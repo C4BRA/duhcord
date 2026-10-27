@@ -42,7 +42,12 @@ Images and files show up as links and open in your browser. Custom emoji show as
 - The release app runs in the **App Sandbox** and its only permission is making outgoing network connections (see `Duhcord.entitlements`). It can't read your files, use the camera, microphone, contacts or location, accept incoming connections, or control other apps.
 - It's signed with the **hardened runtime** and no exceptions: no JIT, no unsigned code, no injected libraries, no debugger attachment.
 - CI runs `scripts/verify-bundle.sh` on every build and fails if either protection is missing or the app gains a permission beyond that file.
-- Your token is stored only in the Keychain (this device only, not synced to iCloud) and is sent only to Discord.
+- Your token is stored only in the Keychain (readable only while your Mac is unlocked, this device only, never synced) and is sent only to Discord.
+- All network traffic goes through one hardened connection layer (`SecureSession`):
+  - it only connects to `discord.com` and `*.discord.gg`;
+  - certificates must chain to Apple's built-in roots, so interception tools that add their own root certificate are refused;
+  - redirects are refused, so the token can never be forwarded to another host;
+  - nothing is cached or written to disk.
 - Links in messages only open if they're `http`/`https`.
 - It has no third-party dependencies.
 
@@ -63,13 +68,15 @@ Every push is built and tested by CI. Each run uploads a ready-made `Duhcord.zip
 
 ## Logging in
 
-Duhcord asks for your token, not your password, so it never handles captchas or 2FA.
+Duhcord only logs in by QR code, the same way the official desktop app does. You can't type or paste a password or token.
 
-1. In the Discord desktop app or the website, open Developer Tools and go to the Network tab.
-2. Click any request to `discord.com/api`.
-3. Copy the value of its `Authorization` header.
+1. Duhcord shows a QR code.
+2. On your phone, open Discord and go to **You → Settings → Scan QR Code**.
+3. Approve the login on your phone.
 
-The token is stored only in your login Keychain. **Log Out** in the app menu deletes it.
+For each login attempt, Duhcord makes a new encryption key that exists only in memory. Discord sends the token encrypted to that key, and the key is thrown away once the attempt ends. Only scan codes from a Duhcord window you opened yourself.
+
+**Log Out** deletes the token from the Keychain and also logs it out on Discord's side, so any copy of it stops working.
 
 ## Layout
 

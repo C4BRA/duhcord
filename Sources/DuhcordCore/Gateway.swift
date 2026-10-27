@@ -57,7 +57,7 @@ public final class GatewayClient: NSObject {
     private let token: String
     private let queue = DispatchQueue(label: "duhcord.gateway")
     private let decoder = makeDiscordDecoder()
-    private let session = URLSession(configuration: .default)
+    private let session = SecureSession.shared.session
 
     private var task: URLSessionWebSocketTask?
     private var heartbeatTimer: DispatchSourceTimer?
@@ -254,8 +254,12 @@ public final class GatewayClient: NSObject {
         case "READY":
             if let ready = decode(ReadyEvent.self) {
                 sessionID = ready.sessionId
-                if let urlString = ready.resumeGatewayUrl {
-                    resumeURL = URL(string: urlString + "/?v=9&encoding=json")
+                // The resume URL comes from the server and our token is sent to it, so only accept Discord hosts.
+                if let urlString = ready.resumeGatewayUrl, let url = URL(string: urlString + "/?v=9&encoding=json"),
+                   url.scheme == "wss", SecureSession.isAllowed(host: url.host) {
+                    resumeURL = url
+                } else {
+                    resumeURL = nil
                 }
                 reconnectAttempt = 0
                 publish(state: .connected)

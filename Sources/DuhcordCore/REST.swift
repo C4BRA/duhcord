@@ -8,6 +8,7 @@ public enum RESTError: Error, LocalizedError {
     case forbidden
     case http(status: Int, message: String?)
     case invalidResponse
+    case captchaRequired
 
     public var errorDescription: String? {
         switch self {
@@ -15,17 +16,19 @@ public enum RESTError: Error, LocalizedError {
         case .forbidden: return "You don't have access to that."
         case .http(let status, let message): return message ?? "Discord returned an error (HTTP \(status))."
         case .invalidResponse: return "Discord sent an unexpected response."
+        case .captchaRequired: return "Discord asked for a captcha, which Duhcord can't show. Wait a while and try again."
         }
     }
 }
 
 /// The handful of REST endpoints we call. Everything else comes over the gateway.
 public final class RESTClient {
-    private let token: String
+    /// nil only for the logged-out client used to finish QR login.
+    private let token: String?
     private let session: URLSession
     private let decoder = makeDiscordDecoder()
 
-    public init(token: String, session: URLSession = .shared) {
+    public init(token: String?, session: URLSession = SecureSession.shared.session) {
         self.token = token
         self.session = session
     }
@@ -50,10 +53,25 @@ public final class RESTClient {
         _ = try await request("POST", "/channels/\(channelID)/messages/\(messageID)/ack", body: ["token": NSNull()])
     }
 
+    /// Invalidates the token on Discord's side, so a copy of it is useless afterwards.
+    public func logout() async throws {
+        _ = try await request("POST", "/auth/logout", body: ["provider": NSNull(), "voip_provider": NSNull()])
+    }
+
+    /// Final step of QR login: swaps the ticket from the remote-auth gateway for the encrypted token.
+    public func exchangeRemoteAuthTicket(_ ticket: String) async throws -> String {
+        struct Response: Decodable { let encryptedToken: String }
+        let data = try await request("POST", "/users/@me/remote-auth/login", body: ["ticket": ticket])
+        return try decoder.decode(Response.self, from: data).encryptedToken
+    }
+
     // MARK: - Plumbing
 
     private struct RateLimited: Decodable { let retryAfter: Double }
-    private struct ErrorBody: Decodable { let message: String? }
+    private struct ErrorBody: Decodable {
+        let message: String?
+        let captchaKey: [String]?
+    }
 
     private func request(_ method: String, _ path: String, query: [URLQueryItem] = [], body: [String: Any]? = nil,
                          attempt: Int = 0) async throws -> Data {
@@ -62,7 +80,7 @@ public final class RESTClient {
 
         var req = URLRequest(url: components.url!)
         req.httpMethod = method
-        req.setValue(token, forHTTPHeaderField: "Authorization")
+        if let token { req.setValue(token, forHTTPHeaderField: "Authorization") }
         req.setValue(ClientIdentity.userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue(ClientIdentity.superPropertiesHeader, forHTTPHeaderField: "X-Super-Properties")
         req.setValue(ClientIdentity.locale, forHTTPHeaderField: "X-Discord-Locale")
@@ -87,8 +105,9 @@ public final class RESTClient {
             try await Task.sleep(nanoseconds: UInt64(max(wait, 0.1) * 1_000_000_000))
             return try await request(method, path, query: query, body: body, attempt: attempt + 1)
         default:
-            let message = try? decoder.decode(ErrorBody.self, from: data).message
-            throw RESTError.http(status: http.statusCode, message: message)
+            let body = try? decoder.decode(ErrorBody.self, from: data)
+            if body?.captchaKey != nil { throw RESTError.captchaRequired }
+            throw RESTError.http(status: http.statusCode, message: body?.message)
         }
     }
 }

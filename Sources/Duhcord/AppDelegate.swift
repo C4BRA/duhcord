@@ -44,16 +44,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
 
     // MARK: - Login flow
 
-    private func showLogin(error: String? = nil) {
+    /// Opens the QR login window. With `startCode: false` it only shows a spinner (used while a saved session connects).
+    private func showLogin(message: String? = nil, startCode: Bool = true) {
         mainWindow?.close()
         mainWindow = nil
-        let login = LoginWindowController { [weak self] token in
+        let login = loginWindow ?? LoginWindowController { [weak self] token in
             Keychain.saveToken(token)
             self?.start(token: token)
         }
         loginWindow = login
+        if startCode {
+            login.beginQR(message: message)
+        } else {
+            login.setBusy(true)
+        }
         login.showWindow(nil)
-        if let error { login.show(error: error) }
     }
 
     private func start(token: String) {
@@ -63,7 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         session.isActive = NSApp.isActive
         self.session = session
         // Show something while READY arrives, which can take a few seconds.
-        if mainWindow == nil, loginWindow == nil { showLogin() }
+        if mainWindow == nil, loginWindow == nil { showLogin(startCode: false) }
         loginWindow?.setBusy(true)
         session.connect()
     }
@@ -75,11 +80,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
     }
 
     @objc private func logOut(_ sender: Any?) {
-        session?.disconnect()
+        let old = session
         session = nil
+        old?.disconnect()
         Keychain.deleteToken()
         NSApp.dockTile.badgeLabel = nil
         showLogin()
+        // Kill the token on Discord's side too, so any copy of it stops working.
+        if let old { Task { try? await old.rest.logout() } }
     }
 
     // MARK: - DiscordSessionDelegate
@@ -104,7 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
             session.disconnect()
             self.session = nil
             Keychain.deleteToken()
-            showLogin(error: "Discord rejected that token. Paste a fresh one.")
+            showLogin(message: "Your session ended. Scan a new code to log back in.")
         case .closed(let code):
             mainWindow?.setStatus("Disconnected (code \(code))")
             loginWindow?.show(error: "Discord closed the connection (code \(code)).")

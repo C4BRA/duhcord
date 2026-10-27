@@ -2,7 +2,7 @@ import AppKit
 import DuhcordCore
 
 /// The right column: channel title, message history and the input box.
-final class MessagesViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+final class MessagesViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     private struct Row {
         let message: Message
         /// Same author shortly after the previous message, so the name/time line is skipped.
@@ -16,7 +16,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private let emptyLabel = NSTextField(labelWithString: "")
     private let scrollView = NSScrollView()
     private let table = NSTableView()
-    private let input = NSTextField()
+    private let input = ComposerView()
 
     private var channelID: Snowflake?
     private var rows: [Row] = []
@@ -65,14 +65,15 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged),
                                                name: Settings.didChange, object: nil)
 
-        input.placeholderString = "Message"
-        input.delegate = self
-        input.bezelStyle = .roundedBezel
+        input.placeholder = "Message"
         input.font = Theme.messageFont
-        input.lineBreakMode = .byWordWrapping
-        input.usesSingleLineMode = false
-        input.cell?.wraps = true
-        input.cell?.isScrollable = false
+        input.onSend = { [weak self] text in self?.send(text) }
+        // Growing the box shrinks the message list; stay pinned to the newest message if we were.
+        input.onHeightChange = { [weak self] in
+            guard let self, self.isAtBottom else { return }
+            self.view.layoutSubtreeIfNeeded()
+            self.scrollToBottom()
+        }
 
         emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.alignment = .center
@@ -98,7 +99,6 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             input.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.sidePadding),
             input.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Self.sidePadding),
             input.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
-            input.heightAnchor.constraint(greaterThanOrEqualToConstant: 24),
             emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
         ])
@@ -115,18 +115,18 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
         if let channelID, let channel = store.channel(channelID) {
             titleLabel.stringValue = channel.isPrivate ? "@ " + channel.displayName : "# " + channel.displayName
-            input.placeholderString = channel.isPrivate ? "Message @\(channel.displayName)" : "Message #\(channel.displayName)"
+            input.placeholder = channel.isPrivate ? "Message @\(channel.displayName)" : "Message #\(channel.displayName)"
             input.isEnabled = true
         } else {
             titleLabel.stringValue = ""
-            input.placeholderString = ""
+            input.placeholder = ""
             input.isEnabled = false
         }
         rebuildRows()
         table.reloadData()
         scrollToBottom()
         updateEmptyState()
-        view.window?.makeFirstResponder(input)
+        input.focus()
     }
 
     func messagesChanged(in channelID: Snowflake) {
@@ -229,32 +229,18 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     // MARK: - Sending
 
-    @objc private func send() {
-        let text = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let channelID, !text.isEmpty else { return }
-        input.stringValue = ""
+    private func send(_ text: String) {
+        guard let channelID else { return }
+        input.text = ""
         session.send(text, to: channelID) { [weak self] error in
             guard let self, let error else { return }
             // Put the text back so nothing is lost.
-            if self.input.stringValue.isEmpty { self.input.stringValue = text }
+            if self.input.text.isEmpty { self.input.text = text }
             let alert = NSAlert()
             alert.messageText = "Message not sent"
             alert.informativeText = error.localizedDescription
             if let window = self.view.window { alert.beginSheetModal(for: window) }
         }
-    }
-
-    /// Return sends; Option-Return or Shift-Return inserts a newline.
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-        if selector == #selector(NSResponder.insertNewline(_:)) {
-            if NSEvent.modifierFlags.contains(.shift) || NSEvent.modifierFlags.contains(.option) {
-                textView.insertNewlineIgnoringFieldEditor(nil)
-            } else {
-                send()
-            }
-            return true
-        }
-        return false
     }
 
     // MARK: - Rendering

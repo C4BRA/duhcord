@@ -1,4 +1,5 @@
 import XCTest
+import Security
 @testable import DuhcordCore
 
 final class MarkdownTests: XCTestCase {
@@ -248,5 +249,56 @@ final class StoreTests: XCTestCase {
         XCTAssertNil(store.messages(in: "a"))
         XCTAssertNotNil(store.messages(in: "b"))
         XCTAssertNotNil(store.messages(in: "c"))
+    }
+}
+
+final class RemoteAuthTests: XCTestCase {
+    func testPublicKeyIsWrappedAsSubjectPublicKeyInfo() throws {
+        let attributes: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeRSA, kSecAttrKeySizeInBits as String: 2048]
+        let key = try XCTUnwrap(SecKeyCreateRandomKey(attributes as CFDictionary, nil))
+        let publicKey = try XCTUnwrap(SecKeyCopyPublicKey(key))
+        let spki = try XCTUnwrap(RemoteAuth.subjectPublicKeyInfo(for: publicKey))
+        // A 2048-bit RSA SubjectPublicKeyInfo is always 294 bytes and starts with this header.
+        XCTAssertEqual(spki.count, 294)
+        XCTAssertEqual(Array(spki.prefix(4)), [0x30, 0x82, 0x01, 0x22])
+        XCTAssertEqual(Array(spki[4..<19]), [0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05, 0x00])
+    }
+
+    func testDERLengths() {
+        XCTAssertEqual(Array(RemoteAuth.der(tag: 0x04, Data([1, 2]))), [0x04, 0x02, 1, 2])
+        XCTAssertEqual(Array(RemoteAuth.der(tag: 0x04, Data(count: 300)).prefix(4)), [0x04, 0x82, 0x01, 0x2C])
+    }
+
+    func testBase64URLHasNoPadding() {
+        XCTAssertEqual(RemoteAuth.base64URL(Data([0xFB, 0xFF])), "-_8")
+    }
+}
+
+final class SecureSessionTests: XCTestCase {
+    func testOnlyDiscordHostsAreAllowed() {
+        XCTAssertTrue(SecureSession.isAllowed(host: "discord.com"))
+        XCTAssertTrue(SecureSession.isAllowed(host: "gateway.discord.gg"))
+        XCTAssertTrue(SecureSession.isAllowed(host: "gateway-us-east1-b.discord.gg"))
+        XCTAssertFalse(SecureSession.isAllowed(host: "evil-discord.gg"))
+        XCTAssertFalse(SecureSession.isAllowed(host: "discord.com.evil.net"))
+        XCTAssertFalse(SecureSession.isAllowed(host: "cdn.discordapp.com"))
+        XCTAssertFalse(SecureSession.isAllowed(host: nil))
+    }
+
+    /// Network test: the strict trust evaluation must still accept Discord's real certificate.
+    func testDiscordCertificateIsAccepted() async throws {
+        let url = URL(string: "https://discord.com/api/v9/gateway")!
+        let (_, response) = try await SecureSession.shared.session.data(from: url)
+        XCTAssertNotNil(response as? HTTPURLResponse)
+    }
+
+    /// Network test: any other host is refused before a request is sent.
+    func testOtherHostsAreRefused() async {
+        do {
+            _ = try await SecureSession.shared.session.data(from: URL(string: "https://example.com")!)
+            XCTFail("connection to a non-Discord host should fail")
+        } catch {
+            // Expected.
+        }
     }
 }

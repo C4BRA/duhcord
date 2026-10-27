@@ -29,7 +29,7 @@ enum Keychain {
         deleteToken()
         var query = baseQuery
         query[kSecValueData as String] = Data(token.utf8)
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
     }
 
