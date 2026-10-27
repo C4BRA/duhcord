@@ -64,7 +64,38 @@ scripts/bundle.sh      # release build packaged as build/Duhcord.app (sandboxed,
 open build/Duhcord.app
 ```
 
-Every push is built and tested by CI. Each run uploads a ready-made `Duhcord.zip`. The app is ad-hoc signed, so the first time you open it, right-click it and choose **Open**.
+Every push is built and tested by CI. Each run uploads a ready-made `Duhcord.zip`.
+
+## Release signing
+
+Release builds are signed with the self-signed **Duhcord Release Signing** certificate. Builds of other branches, pull requests and local builds without the certificate are signed ad-hoc.
+
+macOS doesn't know this certificate, so the first launch of a downloaded copy still needs approval:
+- **macOS 15 and later:** open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
+- **macOS 13–14:** right-click the app and choose **Open**.
+
+What the certificate gives you:
+- **Updates keep the same identity.** The Keychain keeps trusting new versions, so updates don't keep asking for access to your login.
+- **You can check a download is genuine.** Its certificate fingerprint must match `signing/certificate.sha256`:
+
+  ```sh
+  cd /tmp && codesign -d --extract-certificates /Applications/Duhcord.app && shasum -a 256 codesign0
+  ```
+
+CI refuses to publish a release build signed by any other certificate.
+
+### Setting up the certificate (maintainer, once)
+
+1. On your Mac, run `scripts/create-signing-certificate.sh` from the repo and choose a strong password.
+   It creates the certificate, adds it to your login keychain, and writes everything to `~/Duhcord-signing`.
+2. Back up `~/Duhcord-signing/duhcord-signing.p12` and its password somewhere offline. Without them, future releases can't use the same identity.
+3. Add two secrets on GitHub under **Settings → Secrets and variables → Actions → New repository secret**:
+   - `DUHCORD_SIGNING_P12`: the entire contents of `~/Duhcord-signing/duhcord-signing.p12.base64` (`pbcopy < ~/Duhcord-signing/duhcord-signing.p12.base64` copies it).
+   - `DUHCORD_SIGNING_PASSWORD`: the password from step 1.
+4. Commit the fingerprint from `~/Duhcord-signing/fingerprint.txt` as `signing/certificate.sha256`.
+5. Push to the default branch. The CI log should say "signed by the published Duhcord Release Signing certificate".
+
+Never commit or share the `.p12` file, its `.base64` copy or the password. The fingerprint and `certificate.pem` are public.
 
 ## Logging in
 

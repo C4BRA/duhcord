@@ -7,18 +7,35 @@ on:
 jobs:
   build:
     runs-on: macos-15
+    env:
+      # Release builds (default branch and v* tags) are signed with the Duhcord Release Signing
+      # certificate once its secrets exist. Other branches and pull requests are signed ad-hoc and
+      # never see the secrets.
+      RELEASE_BUILD: ${{ github.event_name == 'push' && (github.ref_name == github.event.repository.default_branch || startsWith(github.ref, 'refs/tags/v')) }}
+      HAS_SIGNING_CERT: ${{ secrets.DUHCORD_SIGNING_P12 != '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Build
         run: swift build
       - name: Test
         run: swift test
+      - name: Import signing certificate
+        if: env.RELEASE_BUILD == 'true' && env.HAS_SIGNING_CERT == 'true'
+        env:
+          DUHCORD_SIGNING_P12: ${{ secrets.DUHCORD_SIGNING_P12 }}
+          DUHCORD_SIGNING_PASSWORD: ${{ secrets.DUHCORD_SIGNING_PASSWORD }}
+        run: |
+          scripts/ci-import-certificate.sh
+          echo "DUHCORD_REQUIRE_RELEASE_SIGNATURE=1" >> "$GITHUB_ENV"
       - name: Bundle app
         # Zipped with ditto so the executable bit and signature survive the artifact upload.
         run: |
           scripts/bundle.sh
           scripts/verify-bundle.sh build/Duhcord.app
           ditto -c -k --keepParent build/Duhcord.app build/Duhcord.zip
+      - name: Remove signing keychain
+        if: always() && env.DUHCORD_SIGN_KEYCHAIN != ''
+        run: security delete-keychain "$DUHCORD_SIGN_KEYCHAIN"
       - uses: actions/upload-artifact@v4
         with:
           name: Duhcord

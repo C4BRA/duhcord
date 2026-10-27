@@ -40,5 +40,15 @@ PLIST
 
 # --options runtime enables the hardened runtime with no exceptions: no JIT, no unsigned
 # code, no injected libraries, no debugger attachment.
-codesign --force --options runtime --entitlements Duhcord.entitlements --sign - "$APP"
+#
+# Signing identity, in order: DUHCORD_SIGN_IDENTITY (set by CI), the "Duhcord Release Signing"
+# certificate in your keychain (see scripts/create-signing-certificate.sh), else ad-hoc.
+IDENTITY="${DUHCORD_SIGN_IDENTITY:-}"
+if [ -z "$IDENTITY" ]; then
+    IDENTITY="$(security find-identity -p codesigning 2>/dev/null | awk '/"Duhcord Release Signing"/ { print $2; exit }')"
+fi
+SIGN_ARGS=(--force --options runtime --entitlements Duhcord.entitlements --sign "${IDENTITY:--}")
+[ -n "${DUHCORD_SIGN_KEYCHAIN:-}" ] && SIGN_ARGS+=(--keychain "$DUHCORD_SIGN_KEYCHAIN")
+codesign "${SIGN_ARGS[@]}" "$APP"
+[ -n "$IDENTITY" ] && echo "Signed with Duhcord Release Signing ($IDENTITY)" || echo "Signed ad-hoc (no release certificate found)"
 echo "Built $APP ($(du -sh "$APP" | cut -f1))"
