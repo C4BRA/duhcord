@@ -17,6 +17,13 @@ security import "$P12" -k "$KEYCHAIN" -P "$DUHCORD_SIGNING_PASSWORD" -T /usr/bin
 rm -P "$P12"
 # Let codesign use the key without a GUI prompt.
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+# codesign looks keys up through the search list, so the throwaway keychain has to be on it.
+existing=()
+while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    existing+=("${line//\"/}")
+done < <(security list-keychains -d user)
+security list-keychains -d user -s "$KEYCHAIN" "${existing[@]}"
 
 # Self-signed certificates are "not trusted", so look them up without -v.
 IDENTITY="$(security find-identity -p codesigning "$KEYCHAIN" | awk '/"Duhcord Release Signing"/ { print $2; exit }')"

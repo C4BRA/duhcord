@@ -49,6 +49,8 @@ if [ -z "$IDENTITY" ]; then
 fi
 SIGN_ARGS=(--force --options runtime --entitlements Duhcord.entitlements --sign "${IDENTITY:--}")
 [ -n "${DUHCORD_SIGN_KEYCHAIN:-}" ] && SIGN_ARGS+=(--keychain "$DUHCORD_SIGN_KEYCHAIN")
+# Apple's timestamp service only accepts Apple-issued certificates.
+[ -n "$IDENTITY" ] && SIGN_ARGS+=(--timestamp=none)
 codesign "${SIGN_ARGS[@]}" "$APP"
 [ -n "$IDENTITY" ] && echo "Signed with Duhcord Release Signing ($IDENTITY)" || echo "Signed ad-hoc (no release certificate found)"
 echo "Built $APP ($(du -sh "$APP" | cut -f1))"
