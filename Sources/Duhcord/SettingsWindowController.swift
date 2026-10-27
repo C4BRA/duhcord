@@ -10,6 +10,7 @@ final class SettingsWindowController: NSWindowController {
     private let textSize = NSSegmentedControl(labels: Settings.TextSize.allCases.map(\.title),
                                               trackingMode: .selectOne, target: nil, action: nil)
     private let compact = NSButton(checkboxWithTitle: "Compact message spacing", target: nil, action: nil)
+    private let mediaPreviews = NSPopUpButton()
     private let checkForUpdates = NSButton(checkboxWithTitle: "Check for updates automatically", target: nil, action: nil)
 
     init(onLogOut: @escaping () -> Void) {
@@ -35,6 +36,9 @@ final class SettingsWindowController: NSWindowController {
         guard let content = window?.contentView else { return }
 
         notifications.addItems(withTitles: Settings.NotificationLevel.allCases.map(\.title))
+        mediaPreviews.addItems(withTitles: Settings.MediaPreviews.allCases.map(\.title))
+        mediaPreviews.target = self
+        mediaPreviews.action = #selector(changed)
         notifications.target = self
         notifications.action = #selector(changed)
         [sound, dockBadge, compact, checkForUpdates].forEach {
@@ -54,6 +58,7 @@ final class SettingsWindowController: NSWindowController {
             [NSGridCell.emptyContentView, dockBadge],
             [label("Text size:"), textSize],
             [NSGridCell.emptyContentView, compact],
+            [label("Images:"), mediaPreviews],
             [label("Updates:"), checkForUpdates],
         ])
         grid.column(at: 0).xPlacement = .trailing
@@ -88,6 +93,7 @@ final class SettingsWindowController: NSWindowController {
         textSize.selectedSegment = Settings.textSize.rawValue
         compact.state = Settings.compactMessages ? .on : .off
         checkForUpdates.state = Settings.checkForUpdates ? .on : .off
+        mediaPreviews.selectItem(at: Settings.mediaPreviews.rawValue)
         sound.isEnabled = Settings.notifications != .off
     }
 
@@ -98,6 +104,7 @@ final class SettingsWindowController: NSWindowController {
         Settings.textSize = Settings.TextSize(rawValue: textSize.selectedSegment) ?? .medium
         Settings.compactMessages = compact.state == .on
         Settings.checkForUpdates = checkForUpdates.state == .on
+        Settings.mediaPreviews = Settings.MediaPreviews(rawValue: mediaPreviews.indexOfSelectedItem) ?? .always
         sound.isEnabled = Settings.notifications != .off
     }
 

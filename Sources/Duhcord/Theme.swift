@@ -52,7 +52,10 @@ enum Theme {
     }
 
     /// Message body: reply line, markdown content, edited marker and attachment links.
-    static func body(for message: Message, resolver: Markdown.Resolver) -> NSAttributedString {
+    /// `inlineAttachments` are shown as images, so they're left out of the text. `hasVisuals` suppresses
+    /// "(no text)" when the message is just an image or a link preview.
+    static func body(for message: Message, resolver: Markdown.Resolver, inlineAttachments: Set<Snowflake> = [],
+                     hasVisuals: Bool = false) -> NSAttributedString {
         let out = NSMutableAttributedString()
         let secondary: [NSAttributedString.Key: Any] = [.font: messageSmallFont, .foregroundColor: NSColor.secondaryLabelColor]
 
@@ -68,7 +71,7 @@ enum Theme {
             out.append(NSAttributedString(string: " (edited)", attributes: secondary))
         }
 
-        for attachment in message.attachments {
+        for attachment in message.attachments where !inlineAttachments.contains(attachment.id) {
             if out.length > 0 { out.append(NSAttributedString(string: "\n")) }
             // Attachments open in the browser rather than loading inline, so nothing downloads unless asked.
             var attrs: [NSAttributedString.Key: Any] = [.font: messageFont, .foregroundColor: NSColor.linkColor]
@@ -77,8 +80,45 @@ enum Theme {
             out.append(NSAttributedString(string: "[\(kind): \(attachment.filename)]", attributes: attrs))
         }
 
-        if out.length == 0 {
+        if out.length == 0, !hasVisuals {
             out.append(NSAttributedString(string: "(no text)", attributes: secondary))
+        }
+        return out
+    }
+
+    /// The text of a link preview or rich card: site, author, title, description, fields and footer.
+    static func embedText(_ embed: Embed, resolver: Markdown.Resolver) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        func line(_ text: NSAttributedString) {
+            if out.length > 0 { out.append(NSAttributedString(string: "\n")) }
+            out.append(text)
+        }
+        func plain(_ text: String, font: NSFont, color: NSColor, link: String? = nil) -> NSAttributedString {
+            var attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+            if let link, let url = URL(string: link), url.scheme == "https" || url.scheme == "http" {
+                attrs[.link] = url
+            }
+            return NSAttributedString(string: text, attributes: attrs)
+        }
+
+        if let provider = embed.provider?.name, !provider.isEmpty {
+            line(plain(provider, font: messageSmallFont, color: .secondaryLabelColor, link: embed.provider?.url))
+        }
+        if let author = embed.author?.name, !author.isEmpty {
+            line(plain(author, font: NSFont.boldSystemFont(ofSize: messageSmallFont.pointSize), color: .labelColor, link: embed.author?.url))
+        }
+        if let title = embed.title, !title.isEmpty {
+            line(plain(title, font: messageBoldFont, color: embed.url == nil ? .labelColor : .linkColor, link: embed.url))
+        }
+        if let description = embed.description, !description.isEmpty {
+            line(render(Markdown.parse(description, resolver: resolver)))
+        }
+        for field in embed.fields ?? [] {
+            line(plain(field.name, font: NSFont.boldSystemFont(ofSize: messageSmallFont.pointSize), color: .labelColor))
+            line(render(Markdown.parse(field.value, resolver: resolver)))
+        }
+        if let footer = embed.footer?.text, !footer.isEmpty {
+            line(plain(footer, font: messageSmallFont, color: .secondaryLabelColor))
         }
         return out
     }

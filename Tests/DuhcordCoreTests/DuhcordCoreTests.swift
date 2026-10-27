@@ -487,3 +487,70 @@ final class UpdateVerifierTests: XCTestCase {
         XCTAssertFalse(SecureSession.isAllowed(host: "github.com"))
     }
 }
+
+final class EmbedTests: XCTestCase {
+    func testMessageWithEmbedsAndImageAttachment() throws {
+        let json = """
+        {"id": "1", "channel_id": "2", "author": {"id": "3", "username": "bob"}, "content": "look",
+         "timestamp": "2024-01-01T12:00:00Z",
+         "attachments": [{"id": "9", "filename": "SPOILER_cat.png", "url": "https://cdn.discordapp.com/a/cat.png",
+                          "proxy_url": "https://media.discordapp.net/a/cat.png", "content_type": "image/png", "width": 800, "height": 600}],
+         "embeds": [
+           {"type": "article", "title": "A page", "description": "About **things**", "url": "https://example.com", "color": 16711680,
+            "provider": {"name": "Example"}, "thumbnail": {"url": "https://example.com/t.png",
+            "proxy_url": "https://images-ext-1.discordapp.net/external/abc/https/example.com/t.png", "width": 200, "height": 100}},
+           {"type": "rich", "fields": "broken"},
+           {"type": "gifv", "url": "https://tenor.com/x", "video": {"url": "https://media.tenor.com/x.mp4"},
+            "thumbnail": {"proxy_url": "https://images-ext-2.discordapp.net/external/x", "width": 498, "height": 280}}
+         ]}
+        """
+        let message = try makeDiscordDecoder().decode(Message.self, from: Data(json.utf8))
+        XCTAssertEqual(message.embeds.count, 2, "the malformed embed is skipped, not the message")
+        XCTAssertEqual(message.embeds[0].title, "A page")
+        XCTAssertTrue(message.embeds[0].hasText)
+        XCTAssertTrue(message.embeds[1].isMediaOnly)
+        XCTAssertTrue(message.embeds[1].isVideo)
+        XCTAssertTrue(message.attachments[0].isImage)
+        XCTAssertTrue(message.attachments[0].isSpoiler)
+    }
+
+    func testMediaHostsAreDiscordProxiesOnly() {
+        XCTAssertTrue(MediaRequest.isAllowedHost("media.discordapp.net"))
+        XCTAssertTrue(MediaRequest.isAllowedHost("images-ext-2.discordapp.net"))
+        XCTAssertFalse(MediaRequest.isAllowedHost("cdn.discordapp.com"))
+        XCTAssertFalse(MediaRequest.isAllowedHost("images-ext-evil.discordapp.net"))
+        XCTAssertFalse(MediaRequest.isAllowedHost("example.com"))
+        XCTAssertNil(MediaRequest.url(proxy: "https://example.com/a.png", pixelWidth: 10, pixelHeight: 10))
+    }
+
+    func testRequestAsksForExactSizeAndKeepsSignature() throws {
+        let url = try XCTUnwrap(MediaRequest.url(proxy: "https://media.discordapp.net/a/cat.png?ex=1&hm=abc&width=5",
+                                                 pixelWidth: 720, pixelHeight: 540))
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let dict = Dictionary(items.map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { _, b in b })
+        XCTAssertEqual(dict["ex"], "1")
+        XCTAssertEqual(dict["hm"], "abc")
+        XCTAssertEqual(dict["width"], "720")
+        XCTAssertEqual(dict["height"], "540")
+        XCTAssertEqual(dict["format"], "webp")
+        XCTAssertEqual(items.filter { $0.name == "width" }.count, 1)
+    }
+
+    func testFitNeverEnlarges() {
+        XCTAssertTrue(MediaRequest.fit(width: 800, height: 600, maxWidth: 360, maxHeight: 270) == (360, 270))
+        XCTAssertTrue(MediaRequest.fit(width: 100, height: 50, maxWidth: 360, maxHeight: 270) == (100, 50))
+        XCTAssertTrue(MediaRequest.fit(width: 1000, height: 100, maxWidth: 360, maxHeight: 270) == (360, 36))
+    }
+
+    func testEmbedsArriveInMessageUpdates() throws {
+        let store = Store()
+        let author = User(id: "3", username: "bob")
+        store.addHistory([Message(id: "1", channelId: "c", author: author, content: "https://example.com", timestamp: "")],
+                         for: "c", requestedLimit: 50)
+        let update = try makeDiscordDecoder().decode(MessageUpdate.self, from: Data("""
+        {"id": "1", "channel_id": "c", "embeds": [{"type": "link", "title": "Example"}]}
+        """.utf8))
+        store.apply(.messageUpdate(update))
+        XCTAssertEqual(store.messages(in: "c")?.first?.embeds.first?.title, "Example")
+    }
+}

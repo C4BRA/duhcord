@@ -14,6 +14,8 @@ import Security
 public final class SecureSession: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
     public static let shared = SecureSession(isAllowed: SecureSession.isAllowed(host:), followsRedirects: false)
     public static let updates = SecureSession(isAllowed: SecureSession.isUpdateHost(_:), followsRedirects: true)
+    /// Images for embeds and attachments: Discord's image proxies only, never the token, no redirects.
+    public static let media = SecureSession(isAllowed: MediaRequest.isAllowedHost(_:), followsRedirects: false)
 
     private let hostPolicy: (String?) -> Bool
     private let followsRedirects: Bool

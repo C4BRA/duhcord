@@ -27,7 +27,15 @@ A very small native Discord client for macOS. It's written in Swift with AppKit,
 - Voice and video
 - Animated anything
 
-Images and files show up as links and open in your browser. Custom emoji show as `:name:`.
+Link previews, embeds and image attachments are shown inline, built to stay cheap:
+- **Preview text is free.** Discord builds link previews on its own servers and sends them inside the message, so Duhcord never visits the linked sites.
+- **Images are fetched at display size.** Duhcord only fetches from Discord's image proxy, asking for exactly the size it draws (usually tens of KB). It decodes straight to that size, so the full image is never built.
+- **No layout jumps.** Discord sends image sizes up front, so space is reserved before an image arrives.
+- **On screen only.** Images load for messages on screen and stop when you scroll away. A small memory cache that macOS can empty holds them, and nothing is saved to disk.
+- **No playback.** Videos and GIFs show a still frame with a ▶ that opens the original.
+- **Your choice.** Spoilers wait for a click. **Settings → Images** switches between Always, Click to load and Off.
+
+Other files show up as links that open in your browser. Custom emoji show as `:name:`.
 
 ## How it stays light
 
@@ -44,7 +52,7 @@ Images and files show up as links and open in your browser. Custom emoji show as
 - CI runs `scripts/verify-bundle.sh` on every build and fails if either protection is missing or the app gains a permission beyond that file.
 - Your token is stored only in the Keychain (readable only while your Mac is unlocked, this device only, never synced) and is sent only to Discord.
 - All network traffic goes through one hardened connection layer (`SecureSession`):
-  - it only connects to `discord.com` and `*.discord.gg`;
+  - it only connects to `discord.com` and `*.discord.gg` (images: only Discord's image proxies, without the token);
   - certificates must chain to Apple's built-in roots, so interception tools that add their own root certificate are refused;
   - redirects are refused, so the token can never be forwarded to another host;
   - nothing is cached or written to disk.

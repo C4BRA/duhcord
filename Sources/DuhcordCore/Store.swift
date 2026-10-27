@@ -219,6 +219,7 @@ public final class Store {
             if let content = update.content { list[i].content = content }
             if let edited = update.editedTimestamp { list[i].editedTimestamp = edited }
             if let attachments = update.attachments { list[i].attachments = attachments }
+            if let embeds = update.embeds { list[i].embeds = embeds }
             messageCache[update.channelId] = list
             onChange?(.messages(channelID: update.channelId))
 

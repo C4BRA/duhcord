@@ -1,0 +1,107 @@
+import AppKit
+import DuhcordCore
+import ImageIO
+
+/// Fetches and decodes embed and attachment images, as cheaply as possible:
+/// - Only from Discord's image proxies, at exactly the pixel size that will be drawn (see MediaRequest).
+/// - Decoded straight to that size with ImageIO's thumbnail path; the full image is never built.
+/// - Format, byte size and pixel count are checked before decoding.
+/// - Kept in a memory cache with a byte budget that macOS can also empty under memory pressure. No disk cache.
+/// - Requests nobody waits for any more (rows scrolled away) are cancelled.
+final class MediaLoader {
+    static let shared = MediaLoader()
+
+    typealias Token = UUID
+
+    private let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.totalCostLimit = 24 * 1024 * 1024
+        return cache
+    }()
+    private var waiters: [URL: [Token: (NSImage?) -> Void]] = [:]
+    private var tasks: [URL: Task<Void, Never>] = [:]
+    /// Decoding happens off the main thread, two at a time at most.
+    private let decodeQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 2
+        queue.qualityOfService = .utility
+        return queue
+    }()
+
+    private static let maxBytes = 8 * 1024 * 1024
+    private static let maxSourcePixels = 40_000_000
+    private static let allowedTypes: Set<String> = ["org.webmproject.webp", "public.png", "public.jpeg", "com.compuserve.gif"]
+
+    func cachedImage(for url: URL) -> NSImage? { cache.object(forKey: url.absoluteString as NSString) }
+
+    /// Calls `completion` on the main thread with the image, or nil if it couldn't be loaded.
+    /// Returns a token for `cancel`, or nil when the image was already cached (completion has run).
+    @discardableResult
+    func load(_ url: URL, pointSize: NSSize, completion: @escaping (NSImage?) -> Void) -> Token? {
+        if let image = cachedImage(for: url) {
+            completion(image)
+            return nil
+        }
+        let token = Token()
+        let isFirst = waiters[url] == nil
+        waiters[url, default: [:]][token] = completion
+        guard isFirst else { return token }
+
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let maxPixel = Int((max(pointSize.width, pointSize.height) * scale).rounded(.up))
+        tasks[url] = Task { [weak self] in
+            let image = await Self.fetch(url, maxPixel: maxPixel, pointSize: pointSize, queue: self?.decodeQueue)
+            await MainActor.run { self?.finish(url, image: image) }
+        }
+        return token
+    }
+
+    func cancel(_ token: Token, for url: URL) {
+        waiters[url]?[token] = nil
+        if waiters[url]?.isEmpty == true {
+            waiters[url] = nil
+            tasks.removeValue(forKey: url)?.cancel()
+        }
+    }
+
+    private func finish(_ url: URL, image: NSImage?) {
+        tasks[url] = nil
+        if let image {
+            let pixels = image.representations.first.map { $0.pixelsWide * $0.pixelsHigh } ?? 0
+            cache.setObject(image, forKey: url.absoluteString as NSString, cost: pixels * 4)
+        }
+        let callbacks = waiters.removeValue(forKey: url) ?? [:]
+        callbacks.values.forEach { $0(image) }
+    }
+
+    private static func fetch(_ url: URL, maxPixel: Int, pointSize: NSSize, queue: OperationQueue?) async -> NSImage? {
+        guard MediaRequest.isAllowedHost(url.host),
+              let result = try? await SecureSession.media.session.data(from: url),
+              (result.1 as? HTTPURLResponse)?.statusCode == 200,
+              result.0.count <= maxBytes, !Task.isCancelled, let queue else { return nil }
+        let data = result.0
+        return await withCheckedContinuation { continuation in
+            queue.addOperation {
+                continuation.resume(returning: decode(data, maxPixel: maxPixel, pointSize: pointSize))
+            }
+        }
+    }
+
+    private static func decode(_ data: Data, maxPixel: Int, pointSize: NSSize) -> NSImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions),
+              let type = CGImageSourceGetType(source) as String?, allowedTypes.contains(type),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, sourceOptions) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0, width * height <= maxSourcePixels else { return nil }
+        let thumbnailOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixel),
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary) else { return nil }
+        return NSImage(cgImage: image, size: pointSize)
+    }
+}

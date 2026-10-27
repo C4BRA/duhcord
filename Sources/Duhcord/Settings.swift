@@ -18,6 +18,20 @@ enum Settings {
         }
     }
 
+    enum MediaPreviews: Int, CaseIterable {
+        case always = 0
+        case onClick = 1
+        case off = 2
+
+        var title: String {
+            switch self {
+            case .always: return "Always"
+            case .onClick: return "Click to load"
+            case .off: return "Off"
+            }
+        }
+    }
+
     enum TextSize: Int, CaseIterable {
         case small = 0
         case medium = 1
@@ -49,6 +63,7 @@ enum Settings {
         static let textSize = "textSize"
         static let compact = "compactMessages"
         static let checkForUpdates = "checkForUpdates"
+        static let mediaPreviews = "mediaPreviews"
     }
 
     static func registerDefaults() {
@@ -59,6 +74,7 @@ enum Settings {
             Key.textSize: TextSize.medium.rawValue,
             Key.compact: false,
             Key.checkForUpdates: true,
+            Key.mediaPreviews: MediaPreviews.always.rawValue,
         ])
     }
 
@@ -86,6 +102,12 @@ enum Settings {
     static var compactMessages: Bool {
         get { defaults.bool(forKey: Key.compact) }
         set { set(newValue, for: Key.compact) }
+    }
+
+    /// Images in link previews and attachments.
+    static var mediaPreviews: MediaPreviews {
+        get { MediaPreviews(rawValue: defaults.integer(forKey: Key.mediaPreviews)) ?? .always }
+        set { set(newValue.rawValue, for: Key.mediaPreviews) }
     }
 
     /// Check GitHub for a new release at launch and once a day.

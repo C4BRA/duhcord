@@ -175,8 +175,99 @@ public struct Attachment: Codable, Hashable {
     public let id: Snowflake
     public let filename: String
     public let url: String
+    /// Discord's media proxy copy, which can be resized on request.
+    public let proxyUrl: String?
     public let size: Int?
     public let contentType: String?
+    public let width: Int?
+    public let height: Int?
+
+    public init(id: Snowflake, filename: String, url: String, proxyUrl: String? = nil, size: Int? = nil,
+                contentType: String? = nil, width: Int? = nil, height: Int? = nil) {
+        self.id = id
+        self.filename = filename
+        self.url = url
+        self.proxyUrl = proxyUrl
+        self.size = size
+        self.contentType = contentType
+        self.width = width
+        self.height = height
+    }
+
+    public var isImage: Bool { (contentType ?? "").hasPrefix("image/") && width != nil && height != nil }
+    /// Discord hides attachments named SPOILER_… until clicked.
+    public var isSpoiler: Bool { filename.hasPrefix("SPOILER_") }
+}
+
+/// An image, thumbnail or video inside an embed. `proxyUrl` is Discord's re-encoding proxy.
+public struct EmbedMedia: Codable, Hashable {
+    public let url: String?
+    public let proxyUrl: String?
+    public let width: Int?
+    public let height: Int?
+
+    public init(url: String?, proxyUrl: String?, width: Int?, height: Int?) {
+        self.url = url
+        self.proxyUrl = proxyUrl
+        self.width = width
+        self.height = height
+    }
+}
+
+public struct EmbedField: Codable, Hashable {
+    public let name: String
+    public let value: String
+    public let inline: Bool?
+}
+
+/// A link preview or rich card. Discord builds these on its servers and sends them inside the message,
+/// so showing the text costs nothing extra; only images are ever fetched, and only from Discord's proxy.
+public struct Embed: Codable, Hashable {
+    public struct Named: Codable, Hashable {
+        public let name: String?
+        public let url: String?
+    }
+
+    public struct Footer: Codable, Hashable {
+        public let text: String
+    }
+
+    public let type: String?
+    public let title: String?
+    public let description: String?
+    public let url: String?
+    public let color: Int?
+    public let author: Named?
+    public let provider: Named?
+    public let footer: Footer?
+    public let fields: [EmbedField]?
+    public let thumbnail: EmbedMedia?
+    public let image: EmbedMedia?
+    public let video: EmbedMedia?
+
+    public init(type: String? = "rich", title: String? = nil, description: String? = nil, url: String? = nil,
+                color: Int? = nil, author: Named? = nil, provider: Named? = nil, footer: Footer? = nil,
+                fields: [EmbedField]? = nil, thumbnail: EmbedMedia? = nil, image: EmbedMedia? = nil, video: EmbedMedia? = nil) {
+        self.type = type
+        self.title = title
+        self.description = description
+        self.url = url
+        self.color = color
+        self.author = author
+        self.provider = provider
+        self.footer = footer
+        self.fields = fields
+        self.thumbnail = thumbnail
+        self.image = image
+        self.video = video
+    }
+
+    /// A bare image or GIF link, which Discord shows as just the picture.
+    public var isMediaOnly: Bool { type == "image" || type == "gifv" }
+    public var isVideo: Bool { type == "gifv" || type == "video" || video != nil }
+    public var hasText: Bool {
+        [title, description, author?.name, provider?.name, footer?.text].contains { !($0 ?? "").isEmpty } || !(fields ?? []).isEmpty
+    }
 }
 
 public struct MessageReference: Codable, Hashable {
@@ -200,6 +291,7 @@ public struct Message: Codable, Hashable {
     public let timestamp: String
     public var editedTimestamp: String?
     public var attachments: [Attachment]
+    public var embeds: [Embed]
     public let mentions: [User]?
     public let mentionEveryone: Bool?
     public let referencedMessage: ReferencedMessage?
@@ -207,7 +299,7 @@ public struct Message: Codable, Hashable {
     public let type: Int?
 
     public init(id: Snowflake, channelId: Snowflake, guildId: Snowflake? = nil, author: User, content: String,
-                timestamp: String, editedTimestamp: String? = nil, attachments: [Attachment] = [],
+                timestamp: String, editedTimestamp: String? = nil, attachments: [Attachment] = [], embeds: [Embed] = [],
                 mentions: [User]? = nil, mentionEveryone: Bool? = nil, referencedMessage: ReferencedMessage? = nil,
                 nonce: String? = nil, type: Int? = nil) {
         self.id = id
@@ -218,6 +310,7 @@ public struct Message: Codable, Hashable {
         self.timestamp = timestamp
         self.editedTimestamp = editedTimestamp
         self.attachments = attachments
+        self.embeds = embeds
         self.mentions = mentions
         self.mentionEveryone = mentionEveryone
         self.referencedMessage = referencedMessage
@@ -226,7 +319,7 @@ public struct Message: Codable, Hashable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, channelId, guildId, author, content, timestamp, editedTimestamp, attachments
+        case id, channelId, guildId, author, content, timestamp, editedTimestamp, attachments, embeds
         case mentions, mentionEveryone, referencedMessage, nonce, type
     }
 
@@ -239,7 +332,9 @@ public struct Message: Codable, Hashable {
         content = try c.decodeIfPresent(String.self, forKey: .content) ?? ""
         timestamp = try c.decodeIfPresent(String.self, forKey: .timestamp) ?? ""
         editedTimestamp = try c.decodeIfPresent(String.self, forKey: .editedTimestamp)
-        attachments = try c.decodeIfPresent([Attachment].self, forKey: .attachments) ?? []
+        attachments = (try? c.decodeIfPresent(LossyArray<Attachment>.self, forKey: .attachments))?.elements ?? []
+        // A malformed embed is skipped rather than dropping the whole message.
+        embeds = (try? c.decodeIfPresent(LossyArray<Embed>.self, forKey: .embeds))?.elements ?? []
         mentions = try c.decodeIfPresent([User].self, forKey: .mentions)
         mentionEveryone = try c.decodeIfPresent(Bool.self, forKey: .mentionEveryone)
         // A reply's target can be null (deleted) or fail to decode; neither should drop the message.
@@ -265,6 +360,8 @@ public struct MessageUpdate: Decodable {
     public let content: String?
     public let editedTimestamp: String?
     public let attachments: [Attachment]?
+    /// Discord fetches link previews after the message is sent and delivers them as an update.
+    public let embeds: [Embed]?
 }
 
 public struct MessageDelete: Decodable {
