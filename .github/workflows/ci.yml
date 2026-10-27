@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+      - name: Bundle app
+        # Zipped with ditto so the executable bit and signature survive the artifact upload.
+        run: |
+          scripts/bundle.sh
+          ditto -c -k --keepParent build/Duhcord.app build/Duhcord.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Duhcord
+          path: build/Duhcord.zip
