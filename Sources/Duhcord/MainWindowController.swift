@@ -19,6 +19,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private var place: Place = .directMessages
     private var lastChannel: [Place: Snowflake] = [:]
 
+    private let banner: BannerView
+
     init(session: DiscordSession) {
         self.session = session
         guildList = GuildListViewController(store: session.store)
@@ -44,7 +46,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 680),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Duhcord"
-        window.contentViewController = split
+        let container = BannerContainerViewController(content: split)
+        banner = container.banner
+        window.contentViewController = container
         window.setContentSize(NSSize(width: 1000, height: 680))
         window.setFrameAutosaveName("DuhcordMain")
         super.init(window: window)
@@ -75,6 +79,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     /// Keyboard shortcuts in the Go menu are off while locked.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool { !isLocked }
+
+    /// Shows the bar across the top of the window, or hides it when `text` is nil.
+    func showBanner(_ text: String?, tone: BannerView.Tone = .info, action: String? = nil, handler: (() -> Void)? = nil) {
+        guard let text else {
+            banner.isHidden = true
+            return
+        }
+        banner.show(text, tone: tone, action: action)
+        banner.setActionEnabled(true)
+        banner.onAction = handler
+        banner.isHidden = false
+    }
 
     func setStatus(_ text: String?) {
         window?.subtitle = text ?? ""

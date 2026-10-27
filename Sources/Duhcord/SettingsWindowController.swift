@@ -10,6 +10,7 @@ final class SettingsWindowController: NSWindowController {
     private let textSize = NSSegmentedControl(labels: Settings.TextSize.allCases.map(\.title),
                                               trackingMode: .selectOne, target: nil, action: nil)
     private let compact = NSButton(checkboxWithTitle: "Compact message spacing", target: nil, action: nil)
+    private let checkForUpdates = NSButton(checkboxWithTitle: "Check for updates automatically", target: nil, action: nil)
 
     init(onLogOut: @escaping () -> Void) {
         self.onLogOut = onLogOut
@@ -36,7 +37,7 @@ final class SettingsWindowController: NSWindowController {
         notifications.addItems(withTitles: Settings.NotificationLevel.allCases.map(\.title))
         notifications.target = self
         notifications.action = #selector(changed)
-        [sound, dockBadge, compact].forEach {
+        [sound, dockBadge, compact, checkForUpdates].forEach {
             $0.target = self
             $0.action = #selector(changed)
         }
@@ -53,6 +54,7 @@ final class SettingsWindowController: NSWindowController {
             [NSGridCell.emptyContentView, dockBadge],
             [label("Text size:"), textSize],
             [NSGridCell.emptyContentView, compact],
+            [label("Updates:"), checkForUpdates],
         ])
         grid.column(at: 0).xPlacement = .trailing
         grid.rowAlignment = .firstBaseline
@@ -85,6 +87,7 @@ final class SettingsWindowController: NSWindowController {
         dockBadge.state = Settings.dockBadge ? .on : .off
         textSize.selectedSegment = Settings.textSize.rawValue
         compact.state = Settings.compactMessages ? .on : .off
+        checkForUpdates.state = Settings.checkForUpdates ? .on : .off
         sound.isEnabled = Settings.notifications != .off
     }
 
@@ -94,6 +97,7 @@ final class SettingsWindowController: NSWindowController {
         Settings.dockBadge = dockBadge.state == .on
         Settings.textSize = Settings.TextSize(rawValue: textSize.selectedSegment) ?? .medium
         Settings.compactMessages = compact.state == .on
+        Settings.checkForUpdates = checkForUpdates.state == .on
         sound.isEnabled = Settings.notifications != .off
     }
 

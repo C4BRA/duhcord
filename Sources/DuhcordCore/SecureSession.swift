@@ -1,15 +1,28 @@
 import Foundation
 import Security
 
-/// The only URLSession Duhcord uses to talk to Discord. It exists to make sure the token can't leave for
-/// anywhere but Discord:
+/// The URLSessions Duhcord uses. `shared` talks to Discord and exists to make sure the token can't leave
+/// for anywhere but Discord:
 ///
 /// - Connections are only allowed to Discord's own hosts. Anything else is cancelled before TLS completes.
 /// - Certificates must chain to one of Apple's built-in root certificates. Roots added by the user or an
 ///   administrator (the way corporate proxies and interception tools read TLS traffic) are not trusted.
 /// - Redirects are refused, because URLSession would otherwise carry the Authorization header to the new host.
+///
+/// `updates` is a separate session for the updater: GitHub release hosts only, never the token, and redirects
+/// are followed only between those hosts (GitHub serves release files from a second domain).
 public final class SecureSession: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
-    public static let shared = SecureSession()
+    public static let shared = SecureSession(isAllowed: SecureSession.isAllowed(host:), followsRedirects: false)
+    public static let updates = SecureSession(isAllowed: SecureSession.isUpdateHost(_:), followsRedirects: true)
+
+    private let hostPolicy: (String?) -> Bool
+    private let followsRedirects: Bool
+
+    private init(isAllowed: @escaping (String?) -> Bool, followsRedirects: Bool) {
+        hostPolicy = isAllowed
+        self.followsRedirects = followsRedirects
+        super.init()
+    }
 
     public private(set) lazy var session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
@@ -26,6 +39,12 @@ public final class SecureSession: NSObject, URLSessionDelegate, URLSessionTaskDe
     public static func isAllowed(host: String?) -> Bool {
         guard let host = host?.lowercased() else { return false }
         return host == "discord.com" || host == "discord.gg" || host.hasSuffix(".discord.gg")
+    }
+
+    /// Hosts the updater may connect to: GitHub and the domains it serves release downloads from.
+    public static func isUpdateHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased() else { return false }
+        return ["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"].contains(host)
     }
 
     /// Apple's built-in roots, read once.
@@ -51,13 +70,14 @@ public final class SecureSession: NSObject, URLSessionDelegate, URLSessionTaskDe
 
     public func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                            newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        completionHandler(nil)
+        let allowed = followsRedirects && request.url?.scheme == "https" && hostPolicy(request.url?.host)
+        completionHandler(allowed ? request : nil)
     }
 
     private func evaluate(_ challenge: URLAuthenticationChallenge) -> Bool {
         let space = challenge.protectionSpace
         guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              Self.isAllowed(host: space.host),
+              hostPolicy(space.host),
               let trust = space.serverTrust,
               let anchors = Self.systemAnchors else { return false }
         SecTrustSetPolicies(trust, SecPolicyCreateSSL(true, space.host as CFString))

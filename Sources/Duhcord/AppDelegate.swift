@@ -19,12 +19,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
     private var mainWindow: MainWindowController?
     private var loginWindow: LoginWindowController?
     private var settingsWindow: SettingsWindowController?
+    private var updates: UpdateController?
 
     /// Notifications need a real app bundle; running the bare binary from the terminal has none.
     private var canNotify: Bool { Bundle.main.bundleIdentifier != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Settings.registerDefaults()
+        updates = UpdateController()
         NSApp.mainMenu = buildMenu()
         if let token = Keychain.loadToken() {
             start(token: token)
@@ -72,6 +74,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         loginWindow?.setBusy(true)
         session.connect()
     }
+
+    @objc private func checkForUpdates(_ sender: Any?) { updates?.checkNow() }
 
     @objc private func showSettings(_ sender: Any?) {
         let controller = settingsWindow ?? SettingsWindowController { [weak self] in self?.logOut(nil) }
@@ -138,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
             let main = MainWindowController(session: session)
             mainWindow = main
             main.showWindow(nil)
+            updates?.window = main
             if canNotify {
                 UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
             }
@@ -199,6 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
 
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Duhcord", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
         appMenu.addItem(withTitle: "Log Out", action: #selector(logOut(_:)), keyEquivalent: "")

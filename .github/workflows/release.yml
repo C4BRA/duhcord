@@ -1,0 +1,63 @@
+name: Release
+
+# Push a tag like v1.2.0 to publish a release that the in-app updater will offer.
+# The tag's annotation message becomes the release notes shown in the update prompt.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-tags: true
+      - name: Check the tag
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "error: tags must look like v1.2.3" >&2; exit 1; }
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+      - name: Test
+        run: swift test
+      - name: Import signing certificate
+        env:
+          DUHCORD_SIGNING_P12: ${{ secrets.DUHCORD_SIGNING_P12 }}
+          DUHCORD_SIGNING_PASSWORD: ${{ secrets.DUHCORD_SIGNING_PASSWORD }}
+        run: scripts/ci-import-certificate.sh
+      - name: Build and verify
+        env:
+          DUHCORD_BUILD: ${{ github.run_number }}
+          DUHCORD_REQUIRE_RELEASE_SIGNATURE: '1'
+        run: |
+          DUHCORD_VERSION="$VERSION" scripts/bundle.sh
+          scripts/verify-bundle.sh build/Duhcord.app
+          ditto -c -k --keepParent build/Duhcord.app build/Duhcord.zip
+      - name: Remove signing keychain
+        if: always() && env.DUHCORD_SIGN_KEYCHAIN != ''
+        run: security delete-keychain "$DUHCORD_SIGN_KEYCHAIN"
+      - name: Write and sign the update manifest
+        env:
+          DUHCORD_UPDATE_KEY: ${{ secrets.DUHCORD_UPDATE_KEY }}
+        run: |
+          notes="$(git tag -l --format='%(contents)' "$TAG")"
+          [ -n "$notes" ] || notes="$(git log -1 --format=%B)"
+          printf '%s\n' "$notes" > build/notes.txt
+          scripts/make-update-manifest.sh "$VERSION" build/Duhcord.zip build/notes.txt > build/update.json
+          public_key="$(swift scripts/sign-update.swift build/update.json)"
+          # Refuse to publish an update that no installed copy of Duhcord would accept.
+          grep -qF "\"$public_key\"" Sources/DuhcordUpdateKit/UpdateKit.swift || {
+            echo "error: the update key's public half ($public_key) isn't in UpdateKit.trustedPublicKeys" >&2
+            exit 1
+          }
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" build/Duhcord.zip build/update.json build/update.json.sig \
+            --repo "$GITHUB_REPOSITORY" --title "Duhcord $VERSION" --notes-file build/notes.txt

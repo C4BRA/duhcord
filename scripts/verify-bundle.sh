@@ -1,6 +1,7 @@
 #!/bin/bash
 # Fails if the app bundle lost its hardened runtime, sandbox, or gained entitlements
-# beyond Duhcord.entitlements. Run by CI so a security regression can't ship silently.
+# beyond Duhcord.entitlements, or if the installer helper inside it isn't locked down the same way.
+# Run by CI so a security regression can't ship silently.
 set -euo pipefail
 TMPDIR="${TMPDIR:-/tmp}"
 
@@ -8,11 +9,23 @@ APP="${1:-build/Duhcord.app}"
 cd "$(dirname "$0")/.."
 case "$APP" in /*) ;; *) APP="$PWD/$APP" ;; esac
 
-codesign --verify --strict "$APP"
+HELPER="$APP/Contents/XPCServices/com.duhcord.app.Updater.xpc"
+[ -d "$HELPER" ] || { echo "error: installer helper is missing" >&2; exit 1; }
 
-info="$(codesign -d --verbose=2 "$APP" 2>&1)"
-if ! grep -q "flags=.*runtime" <<<"$info"; then
-    echo "error: hardened runtime is not enabled" >&2
+codesign --verify --strict --deep "$APP"
+
+for code in "$APP" "$HELPER"; do
+    info="$(codesign -d --verbose=2 "$code" 2>&1)"
+    if ! grep -q "flags=.*runtime" <<<"$info"; then
+        echo "error: hardened runtime is not enabled for $code" >&2
+        exit 1
+    fi
+done
+
+# The helper must carry no entitlements at all.
+helper_entitlements="$(codesign -d --entitlements - --xml "$HELPER" 2>/dev/null || true)"
+if [ -n "$helper_entitlements" ] && ! python3 -c 'import plistlib,sys; sys.exit(0 if plistlib.loads(sys.stdin.buffer.read()) == {} else 1)' <<<"$helper_entitlements"; then
+    echo "error: the installer helper has entitlements: $helper_entitlements" >&2
     exit 1
 fi
 
@@ -30,12 +43,15 @@ if [ "${DUHCORD_REQUIRE_RELEASE_SIGNATURE:-0}" = 1 ]; then
     expected_fp="$(tr -d '[:space:]' < signing/certificate.sha256)"
     certs="$TMPDIR/duhcord-certs"
     rm -rf "$certs" && mkdir -p "$certs"
-    (cd "$certs" && codesign -d --extract-certificates "$APP" 2>/dev/null)
-    actual_fp="$(shasum -a 256 "$certs/codesign0" | cut -d' ' -f1)"
-    if [ "$actual_fp" != "$expected_fp" ]; then
-        echo "error: signed by certificate $actual_fp, expected $expected_fp (signing/certificate.sha256)" >&2
-        exit 1
-    fi
+    for code in "$APP" "$HELPER"; do
+        rm -f "$certs"/codesign*
+        (cd "$certs" && codesign -d --extract-certificates "$code" 2>/dev/null)
+        actual_fp="$(shasum -a 256 "$certs/codesign0" | cut -d' ' -f1)"
+        if [ "$actual_fp" != "$expected_fp" ]; then
+            echo "error: $code is signed by certificate $actual_fp, expected $expected_fp (signing/certificate.sha256)" >&2
+            exit 1
+        fi
+    done
     echo "OK: signed by the published Duhcord Release Signing certificate"
 fi
 

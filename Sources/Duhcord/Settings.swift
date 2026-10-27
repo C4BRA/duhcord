@@ -48,6 +48,7 @@ enum Settings {
         static let dockBadge = "dockBadge"
         static let textSize = "textSize"
         static let compact = "compactMessages"
+        static let checkForUpdates = "checkForUpdates"
     }
 
     static func registerDefaults() {
@@ -57,6 +58,7 @@ enum Settings {
             Key.dockBadge: true,
             Key.textSize: TextSize.medium.rawValue,
             Key.compact: false,
+            Key.checkForUpdates: true,
         ])
     }
 
@@ -84,6 +86,12 @@ enum Settings {
     static var compactMessages: Bool {
         get { defaults.bool(forKey: Key.compact) }
         set { set(newValue, for: Key.compact) }
+    }
+
+    /// Check GitHub for a new release at launch and once a day.
+    static var checkForUpdates: Bool {
+        get { defaults.bool(forKey: Key.checkForUpdates) }
+        set { set(newValue, for: Key.checkForUpdates) }
     }
 
     private static func set(_ value: Any, for key: String) {

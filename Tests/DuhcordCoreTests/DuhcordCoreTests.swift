@@ -1,5 +1,7 @@
 import XCTest
+import CryptoKit
 import Security
+@testable import DuhcordUpdateKit
 @testable import DuhcordCore
 
 final class MarkdownTests: XCTestCase {
@@ -376,5 +378,112 @@ final class GatewayPayloadTests: XCTestCase {
         XCTAssertEqual(options["member_updates"] as? Bool, false)
         XCTAssertNil(options["channels"], "member-list ranges would stream the whole sidebar")
         XCTAssertTrue(JSONSerialization.isValidJSONObject(payload))
+    }
+}
+
+
+final class UpdateVerifierTests: XCTestCase {
+    private let key = Curve25519.Signing.PrivateKey()
+    private var keys: [String] { [key.publicKey.rawRepresentation.base64EncodedString()] }
+
+    private func manifest(version: String = "1.2.0", url: String = "https://github.com/C4BRA/duhcord/releases/download/v1.2.0/Duhcord.zip",
+                          size: Int = 1000, minimumSystemVersion: String? = "13.0") -> Data {
+        let m = UpdateManifest(version: version, url: url, sha256: String(repeating: "a", count: 64), size: size,
+                               minimumSystemVersion: minimumSystemVersion, notes: "Fixes")
+        return try! JSONEncoder().encode(m)
+    }
+
+    private func sign(_ data: Data, with signer: Curve25519.Signing.PrivateKey? = nil) -> Data {
+        Data(try! (signer ?? key).signature(for: data).base64EncodedString().utf8)
+    }
+
+    func testValidManifestVerifies() throws {
+        let data = manifest()
+        let parsed = try UpdateVerifier.verify(manifest: data, signature: sign(data), keys: keys)
+        XCTAssertEqual(parsed.version, "1.2.0")
+    }
+
+    func testTamperedManifestIsRejected() {
+        var data = manifest()
+        let signature = sign(data)
+        data[data.startIndex + 5] ^= 0x01
+        XCTAssertThrowsError(try UpdateVerifier.verify(manifest: data, signature: signature, keys: keys)) {
+            XCTAssertEqual($0 as? UpdateError, .badSignature)
+        }
+    }
+
+    func testOtherKeyIsRejected() {
+        let data = manifest()
+        XCTAssertThrowsError(try UpdateVerifier.verify(manifest: data, signature: sign(data, with: .init()), keys: keys)) {
+            XCTAssertEqual($0 as? UpdateError, .badSignature)
+        }
+    }
+
+    func testNoKeysMeansUpdatesAreOff() {
+        let data = manifest()
+        XCTAssertThrowsError(try UpdateVerifier.verify(manifest: data, signature: sign(data), keys: [])) {
+            XCTAssertEqual($0 as? UpdateError, .notConfigured)
+        }
+    }
+
+    func testSignedButForeignURLIsRejected() {
+        let data = manifest(url: "https://evil.example/Duhcord.zip")
+        XCTAssertThrowsError(try UpdateVerifier.verify(manifest: data, signature: sign(data), keys: keys)) {
+            XCTAssertEqual($0 as? UpdateError, .wrongSource)
+        }
+    }
+
+    func testOversizedArchiveIsRejected() {
+        let data = manifest(size: UpdateKit.maxArchiveSize + 1)
+        XCTAssertThrowsError(try UpdateVerifier.verify(manifest: data, signature: sign(data), keys: keys)) {
+            XCTAssertEqual($0 as? UpdateError, .tooLarge)
+        }
+    }
+
+    func testGarbageIsNeverParsedWithoutSignature() {
+        XCTAssertThrowsError(try UpdateVerifier.verify(manifest: Data("{not json".utf8), signature: Data("AAAA".utf8), keys: keys)) {
+            XCTAssertEqual($0 as? UpdateError, .badSignature)
+        }
+    }
+
+    func testDowngradesAndSameVersionAreRejected() throws {
+        let m = try UpdateVerifier.verify(manifest: manifest(version: "1.2.0"), signature: sign(manifest(version: "1.2.0")), keys: keys)
+        XCTAssertNoThrow(try UpdateVerifier.checkApplicable(m, installedVersion: "1.1.9"))
+        XCTAssertThrowsError(try UpdateVerifier.checkApplicable(m, installedVersion: "1.2.0"))
+        XCTAssertThrowsError(try UpdateVerifier.checkApplicable(m, installedVersion: "1.10.0"))
+    }
+
+    func testMinimumSystemVersionIsEnforced() throws {
+        let data = manifest(minimumSystemVersion: "99.0")
+        let m = try UpdateVerifier.verify(manifest: data, signature: sign(data), keys: keys)
+        XCTAssertThrowsError(try UpdateVerifier.checkApplicable(m, installedVersion: "1.0.0")) {
+            XCTAssertEqual($0 as? UpdateError, .systemTooOld("99.0"))
+        }
+    }
+
+    func testVersionOrdering() {
+        XCTAssertTrue(Version("1.10.0")! > Version("1.9.9")!)
+        XCTAssertTrue(Version("v2")! > Version("1.99")!)
+        XCTAssertEqual(Version("1.2")!, Version("1.2.0")!)
+        XCTAssertNil(Version("1.2-beta"))
+        XCTAssertNil(Version(""))
+    }
+
+    func testHashStopsAtLimit() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data(repeating: 7, count: 5000).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let ok = try UpdateVerifier.hash(try FileHandle(forReadingFrom: url), limit: 5000)
+        XCTAssertEqual(ok.size, 5000)
+        XCTAssertEqual(ok.sha256, SHA256.hash(data: Data(repeating: 7, count: 5000)).map { String(format: "%02x", $0) }.joined())
+        XCTAssertThrowsError(try UpdateVerifier.hash(try FileHandle(forReadingFrom: url), limit: 4999))
+    }
+
+    func testUpdateSessionOnlyAllowsGitHubReleaseHosts() {
+        XCTAssertTrue(SecureSession.isUpdateHost("github.com"))
+        XCTAssertTrue(SecureSession.isUpdateHost("release-assets.githubusercontent.com"))
+        XCTAssertFalse(SecureSession.isUpdateHost("discord.com"))
+        XCTAssertFalse(SecureSession.isUpdateHost("evil-github.com"))
+        XCTAssertFalse(SecureSession.isAllowed(host: "github.com"))
     }
 }

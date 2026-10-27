@@ -97,6 +97,48 @@ CI refuses to publish a release build signed by any other certificate.
 
 Never commit or share the `.p12` file, its `.base64` copy or the password. The fingerprint and `certificate.pem` are public.
 
+## Updates
+
+Duhcord checks GitHub for a new release shortly after launch and then once a day. Turn this off under **Settings → Updates**, or check by hand with **Duhcord → Check for Updates…**. When an update is available, a bar appears at the top of the window. Nothing is installed until you click **Update…**, and Duhcord relaunches when it's done.
+
+Duhcord can only update itself from your Applications folder (`/Applications` or `~/Applications`). Run from anywhere else, it shows an orange bar asking you to move it.
+
+How updates are checked:
+- Every release's `update.json` is signed with the **update approval key**. Duhcord only accepts updates signed by a key built into it, and only if the version is newer than the installed one.
+- The download must match the size and SHA-256 in the signed `update.json`.
+- The update check uses its own connection: GitHub only, never the Discord token, Apple root certificates only.
+- A small installer helper inside the app (`Sources/DuhcordUpdater`) does the install, because a sandboxed app can't replace itself. Before swapping the new version in atomically, it repeats every check above. It also requires that the new app:
+  - is signed with the same certificate,
+  - still has the sandbox and hardened runtime,
+  - has no permissions beyond Duhcord's.
+
+  It only accepts requests from Duhcord, has no network access, and runs only during an install.
+
+### Setting up the update approval key (maintainer, once)
+
+1. On your Mac, from the repo folder, run:
+   ```sh
+   swift scripts/create-update-key.swift
+   ```
+   It writes `~/Duhcord-signing/update-key.private` and `update-key.public`, and prints the public key.
+2. Back up `update-key.private` offline, next to your signing certificate. If it's lost, installed copies can't verify new updates and need one manual reinstall.
+3. Add a repository secret named `DUHCORD_UPDATE_KEY` under **Settings → Secrets and variables → Actions**, containing the private key (`pbcopy < ~/Duhcord-signing/update-key.private` copies it).
+4. Add the public key to `trustedPublicKeys` in `Sources/DuhcordUpdateKit/UpdateKit.swift` and push.
+
+### Publishing a release
+
+```sh
+git tag -a v1.2.0 -m "What changed in this version"
+git push origin v1.2.0
+```
+
+The release workflow:
+1. builds and signs the app,
+2. writes and signs `update.json`, using the tag message as the release notes,
+3. publishes a GitHub release with `Duhcord.zip`, `update.json` and `update.json.sig`.
+
+It refuses to publish if the key's public half isn't built into the app.
+
 ## Logging in
 
 Duhcord only logs in by QR code, the same way the official desktop app does. You can't type or paste a password or token.
@@ -112,7 +154,9 @@ For each login attempt, Duhcord makes a new encryption key that exists only in m
 ## Layout
 
 ```
-Sources/DuhcordCore   Gateway, REST, models, permissions, store and markdown (Foundation only, unit tested)
-Sources/Duhcord       AppKit UI
+Sources/DuhcordCore       Gateway, REST, models, permissions, store, markdown, update checks (unit tested)
+Sources/DuhcordUpdateKit  Update manifest and signature checks, shared with the installer helper
+Sources/DuhcordUpdater    The installer helper (XPC service)
+Sources/Duhcord           AppKit UI
 Tests/                Core tests
 ```
