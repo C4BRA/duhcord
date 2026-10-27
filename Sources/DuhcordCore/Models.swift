@@ -156,9 +156,12 @@ public struct Guild: Decodable, Hashable {
         id = try c.decode(Snowflake.self, forKey: .id)
         // Newer gateway payloads nest name/icon/owner under "properties"; older ones keep them at the top.
         let props = try? c.nestedContainer(keyedBy: PropertyKeys.self, forKey: .properties)
-        name = (try? props?.decode(String.self, forKey: .name)) ?? (try c.decodeIfPresent(String.self, forKey: .name)) ?? ""
-        icon = (try? props?.decodeIfPresent(String.self, forKey: .icon)) ?? (try c.decodeIfPresent(String.self, forKey: .icon))
-        ownerId = (try? props?.decodeIfPresent(Snowflake.self, forKey: .ownerId)) ?? (try c.decodeIfPresent(Snowflake.self, forKey: .ownerId))
+        let topName = try c.decodeIfPresent(String.self, forKey: .name)
+        let topIcon = try c.decodeIfPresent(String.self, forKey: .icon)
+        let topOwner = try c.decodeIfPresent(Snowflake.self, forKey: .ownerId)
+        name = (try? props?.decode(String.self, forKey: .name)) ?? topName ?? ""
+        icon = (try? props?.decodeIfPresent(String.self, forKey: .icon)) ?? topIcon
+        ownerId = (try? props?.decodeIfPresent(Snowflake.self, forKey: .ownerId)) ?? topOwner
         roles = try c.decodeIfPresent([Role].self, forKey: .roles) ?? []
         members = try c.decodeIfPresent([Member].self, forKey: .members) ?? []
         unavailable = try c.decodeIfPresent(Bool.self, forKey: .unavailable) ?? false
