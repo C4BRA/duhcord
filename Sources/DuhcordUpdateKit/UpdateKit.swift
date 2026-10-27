@@ -5,7 +5,9 @@ import Foundation
 public enum UpdateKit {
     /// Public halves of the update approval keys (base64 of the raw 32-byte Ed25519 key).
     /// An update is only accepted if its manifest is signed by one of these. Empty means updates are off.
-    public static let trustedPublicKeys: [String] = []
+    public static let trustedPublicKeys: [String] = [
+        "tdEajMGfkvyhp88QqFWZ2BWyZSWTgMa8fBCbV+EonWY=",
+    ]
 
     /// The installer helper's XPC service name; must match its bundle identifier.
     public static let serviceName = "com.duhcord.app.Updater"
