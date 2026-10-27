@@ -47,6 +47,16 @@ final class GuildListViewController: NSViewController, NSTableViewDataSource, NS
         view = column
     }
 
+    /// Keeps the column exactly the strip's width, whatever AppKit decided during layout.
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard let column = table.tableColumns.first, let clip = table.enclosingScrollView?.contentView else { return }
+        let width = clip.bounds.width
+        if abs(column.width - width) > 0.5 {
+            column.width = width
+        }
+    }
+
     func reload() {
         places = [.directMessages] + store.guildOrder.map { .guild($0) }
         table.reloadData()

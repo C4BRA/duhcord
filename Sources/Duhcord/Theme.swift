@@ -146,10 +146,19 @@ enum Theme {
 }
 
 extension NSTableView {
-    /// Makes the single column always span the table's width. A new NSTableColumn is a fixed ~100pt wide,
-    /// which pushes cells off-centre in narrow columns and clips them in wide ones.
+    /// Makes the single column always exactly as wide as the visible table.
+    ///
+    /// A new NSTableColumn starts 100pt wide, and a table inside a scroll view never gets narrower than
+    /// its columns. Autoresizing alone therefore can't shrink it: in the 64pt guild strip every row stayed
+    /// 100pt wide, so cells were centred 18pt too far right and clipped by the column edge. Starting the
+    /// column at zero width lets the table take the clip view's width, and autoresizing then grows the
+    /// column to match (and keeps it matched as the view resizes).
     func fitColumnToWidth() {
-        tableColumns.forEach { $0.resizingMask = .autoresizingMask }
+        for column in tableColumns {
+            column.minWidth = 0
+            column.width = 0
+            column.resizingMask = .autoresizingMask
+        }
         columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         sizeLastColumnToFit()
     }
