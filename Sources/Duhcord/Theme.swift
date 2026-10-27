@@ -108,6 +108,10 @@ enum Theme {
                 attrs[.backgroundColor] = NSColor.tertiaryLabelColor
                 attrs[.toolTip] = span.text
             }
+            if style.contains(.linkHost) {
+                attrs[.foregroundColor] = NSColor.secondaryLabelColor
+                attrs[.font] = messageSmallFont
+            }
             if let urlString = span.url, let url = URL(string: urlString) {
                 attrs[.link] = url
             }

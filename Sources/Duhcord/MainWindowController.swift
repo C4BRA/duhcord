@@ -8,12 +8,13 @@ enum Place: Hashable {
 }
 
 /// The three-column window: guilds, channels, messages.
-final class MainWindowController: NSWindowController, NSWindowDelegate {
+final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     let session: DiscordSession
     private let guildList: GuildListViewController
     private let channelList: ChannelListViewController
     private let messages: MessagesViewController
     private var switcher: QuickSwitcher?
+    private let connectionLock = ConnectionLock()
 
     private var place: Place = .directMessages
     private var lastChannel: [Place: Snowflake] = [:]
@@ -61,6 +62,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         guildList.reload()
         select(place: place)
     }
+
+    var isLocked: Bool { connectionLock.isShown }
+
+    func lock(title: String, detail: String, retry: @escaping () -> Void) {
+        guard let window else { return }
+        switcher = nil
+        connectionLock.show(over: window, title: title, detail: detail, onRetry: retry)
+    }
+
+    func unlock() { connectionLock.hide() }
+
+    /// Keyboard shortcuts in the Go menu are off while locked.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool { !isLocked }
 
     func setStatus(_ text: String?) {
         window?.subtitle = text ?? ""

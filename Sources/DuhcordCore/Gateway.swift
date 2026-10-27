@@ -15,6 +15,7 @@ public enum GatewayEvent {
     case messageUpdate(MessageUpdate)
     case messageDelete(MessageDelete)
     case messageAck(MessageAck)
+    case channelUnreadUpdate(ChannelUnreadUpdate)
 }
 
 public protocol GatewayClientDelegate: AnyObject {
@@ -30,7 +31,10 @@ public final class GatewayClient: NSObject {
         case disconnected
         case connecting
         case connected
-        case reconnecting(attempt: Int)
+        /// A routine reconnect (Discord asked for one, or the socket dropped once). Happens silently.
+        case reconnecting
+        /// Couldn't reach Discord. Nothing happens until `retry()` is called.
+        case unreachable
         /// The token was rejected. We will not reconnect.
         case authenticationFailed
         /// Discord closed the connection with a code that means reconnecting won't help.
@@ -65,6 +69,7 @@ public final class GatewayClient: NSObject {
     private var sequence: Int?
     private var sessionID: String?
     private var resumeURL: URL?
+    /// Reconnects tried since the last successful READY/RESUMED. One silent attempt is allowed; after that we stop.
     private var reconnectAttempt = 0
     private var stopped = false
 
@@ -77,6 +82,17 @@ public final class GatewayClient: NSObject {
         queue.async {
             self.stopped = false
             self.open(url: ClientIdentity.gatewayURL)
+            self.publish(state: .connecting)
+        }
+    }
+
+    /// Tries again after `unreachable`, resuming the previous session if Discord still has it.
+    public func retry() {
+        queue.async {
+            guard !self.stopped else { return }
+            self.reconnectAttempt = 0
+            let url = (self.sessionID != nil ? self.resumeURL : nil) ?? ClientIdentity.gatewayURL
+            self.open(url: url)
             self.publish(state: .connecting)
         }
     }
@@ -152,10 +168,15 @@ public final class GatewayClient: NSObject {
         }
 
         teardown(closeCode: .goingAway)
+        // Discord routinely asks clients to reconnect, so one quiet attempt is fine. If that attempt also fails
+        // we can't reach Discord: stop and wait for the user to press Retry instead of retrying in the background.
+        guard reconnectAttempt == 0 else {
+            publish(state: .unreachable)
+            return
+        }
         reconnectAttempt += 1
-        publish(state: .reconnecting(attempt: reconnectAttempt))
-        let delay = min(30.0, pow(2.0, Double(reconnectAttempt - 1))) + Double.random(in: 0...1)
-        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+        publish(state: .reconnecting)
+        queue.asyncAfter(deadline: .now() + Double.random(in: 1...3)) { [weak self] in
             guard let self, !self.stopped, self.task == nil else { return }
             let url = (self.sessionID != nil ? self.resumeURL : nil) ?? ClientIdentity.gatewayURL
             self.open(url: url)
@@ -221,6 +242,8 @@ public final class GatewayClient: NSObject {
         case Op.heartbeatAck:
             awaitingAck = false
         case Op.reconnect:
+            // Discord itself asked, so it's reachable: this doesn't count against the one quiet attempt.
+            reconnectAttempt = 0
             scheduleReconnect(closeCode: nil)
         case Op.invalidSession:
             let resumable = (try? decoder.decode(Frame<Bool>.self, from: data).d) ?? false
@@ -228,6 +251,7 @@ public final class GatewayClient: NSObject {
                 sessionID = nil
                 sequence = nil
             }
+            reconnectAttempt = 0
             scheduleReconnect(closeCode: nil)
         case Op.dispatch:
             if let t = header.t { dispatch(type: t, data: data) }
@@ -290,6 +314,8 @@ public final class GatewayClient: NSObject {
             event = decode(MessageDelete.self).map { .messageDelete($0) }
         case "MESSAGE_ACK":
             event = decode(MessageAck.self).map { .messageAck($0) }
+        case "CHANNEL_UNREAD_UPDATE":
+            event = decode(ChannelUnreadUpdate.self).map { .channelUnreadUpdate($0) }
         default:
             event = nil
         }

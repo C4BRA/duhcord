@@ -17,6 +17,8 @@ public enum Markdown {
         public static let spoiler = Style(rawValue: 1 << 7)
         public static let mention = Style(rawValue: 1 << 8)
         public static let link = Style(rawValue: 1 << 9)
+        /// The real destination shown after a masked link's text, e.g. "(example.com)".
+        public static let linkHost = Style(rawValue: 1 << 10)
     }
 
     public struct Span: Equatable {
@@ -119,7 +121,10 @@ public enum Markdown {
             flushInline(chars.count, into: &self)
         }
 
-        mutating func parseInline(_ start: Int, _ end: Int, base: Style) {
+        /// Formatting nested deeper than this is shown literally, so a crafted message can't make parsing slow.
+        static let maxNesting = 6
+
+        mutating func parseInline(_ start: Int, _ end: Int, base: Style, depth: Int = 0) {
             var i = start
             var buffer = ""
 
@@ -151,11 +156,20 @@ public enum Markdown {
                     }
                 }
 
-                if let d = delimiter(at: i, end: end),
+                if depth < Self.maxNesting, let d = delimiter(at: i, end: end),
                    let close = find(d.delim, from: i + d.delim.count, before: end), close > i + d.delim.count {
                     flush(&self)
-                    parseInline(i + d.delim.count, close, base: base.union(d.style))
+                    parseInline(i + d.delim.count, close, base: base.union(d.style), depth: depth + 1)
                     i = close + d.delim.count
+                    continue
+                }
+
+                // Masked link: [text](https://…). The real host is always shown after the text.
+                if c == "[", let link = maskedLink(at: i, end: end) {
+                    flush(&self)
+                    spans.append(Span(link.text, base.union(.link), url: link.url.absoluteString))
+                    spans.append(Span(" (\(link.url.host ?? "?"))", base.union(.linkHost)))
+                    i += link.length
                     continue
                 }
 
@@ -234,6 +248,20 @@ public enum Markdown {
                 return Span(inner, base.union(.link), url: inner)
             }
             return nil
+        }
+
+        private func maskedLink(at i: Int, end: Int) -> (text: String, url: URL, length: Int)? {
+            guard let middle = find("](", from: i + 1, before: end), middle > i + 1,
+                  let close = find(")", from: middle + 2, before: end) else { return nil }
+            let text = String(chars[(i + 1)..<middle])
+            guard !text.contains("\n"), !text.contains("["), !text.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+            var target = String(chars[(middle + 2)..<close]).trimmingCharacters(in: .whitespaces)
+            // Optional title: [text](url "title")
+            if let space = target.firstIndex(of: " ") { target = String(target[..<space]) }
+            if target.hasPrefix("<"), target.hasSuffix(">") { target = String(target.dropFirst().dropLast()) }
+            guard target.hasPrefix("https://") || target.hasPrefix("http://"),
+                  let url = URL(string: target), url.host != nil else { return nil }
+            return (text, url, close + 1 - i)
         }
 
         private func url(at i: Int, end: Int) -> (url: String, length: Int)? {

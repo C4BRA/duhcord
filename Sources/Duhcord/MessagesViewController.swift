@@ -236,6 +236,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             guard let self, let error else { return }
             // Put the text back so nothing is lost.
             if self.input.text.isEmpty { self.input.text = text }
+            // Connection problems lock the app instead; no separate alert.
+            guard !DiscordSession.isConnectivityError(error) else { return }
             let alert = NSAlert()
             alert.messageText = "Message not sent"
             alert.informativeText = error.localizedDescription
@@ -289,7 +291,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 }
 
 /// One message. Laid out by hand: no Auto Layout, so scrolling stays cheap.
-private final class MessageCell: NSTableCellView {
+private final class MessageCell: NSTableCellView, NSTextViewDelegate {
     static let identifier = NSUserInterfaceItemIdentifier("MessageCell")
     static let bottomPadding: CGFloat = 2
     static func topPadding(grouped: Bool) -> CGFloat { grouped ? 1 : (Settings.compactMessages ? 4 : 10) }
@@ -314,6 +316,7 @@ private final class MessageCell: NSTableCellView {
         bodyView.textContainer?.widthTracksTextView = true
         bodyView.isVerticallyResizable = false
         bodyView.linkTextAttributes = [.foregroundColor: NSColor.linkColor, .cursor: NSCursor.pointingHand]
+        bodyView.delegate = self
         addSubview(headerField)
         addSubview(bodyView)
     }
@@ -328,6 +331,17 @@ private final class MessageCell: NSTableCellView {
         if let header { headerField.attributedStringValue = header }
         bodyView.textStorage?.setAttributedString(body)
         needsLayout = true
+    }
+
+    /// Every link goes through LinkOpener's checks instead of opening directly.
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        guard let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:)) else { return true }
+        var range = NSRange()
+        let storage = textView.textStorage
+        _ = storage?.attribute(.link, at: charIndex, effectiveRange: &range)
+        let shown = storage.map { ($0.string as NSString).substring(with: range) }
+        LinkOpener.open(url, shownText: shown, from: window)
+        return true
     }
 
     override func layout() {

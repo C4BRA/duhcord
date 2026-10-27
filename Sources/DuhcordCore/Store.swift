@@ -228,6 +228,17 @@ public final class Store {
             messageCache[deleted.channelId] = list
             onChange?(.messages(channelID: deleted.channelId))
 
+        case .channelUnreadUpdate(let update):
+            var changed: Snowflake?
+            for entry in update.channelUnreadUpdates {
+                guard var channel = channels[entry.id], let last = entry.lastMessageId,
+                      last.snowflakeValue > (channel.lastMessageId ?? "0").snowflakeValue else { continue }
+                channel.lastMessageId = last
+                channels[entry.id] = channel
+                changed = entry.id
+            }
+            if let changed { onChange?(.unread(channelID: changed)) }
+
         case .messageAck(let ack):
             // Read on another device.
             readStates[ack.channelId] = ReadState(id: ack.channelId, lastMessageId: ack.messageId, mentionCount: 0)

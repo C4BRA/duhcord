@@ -3,7 +3,7 @@ import DuhcordCore
 import UserNotifications
 
 @main
-final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate, NSMenuItemValidation {
     private static var shared: AppDelegate?
 
     static func main() {
@@ -79,15 +79,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         controller.show(accountName: session?.store.me?.displayName)
     }
 
+    /// Logs out on Discord's side first. If Discord can't be reached the app locks with only a Retry button,
+    /// so the token is never dropped locally while it still works on Discord's servers.
     @objc private func logOut(_ sender: Any?) {
-        let old = session
-        session = nil
-        old?.disconnect()
-        Keychain.deleteToken()
-        NSApp.dockTile.badgeLabel = nil
-        showLogin()
-        // Kill the token on Discord's side too, so any copy of it stops working.
-        if let old { Task { try? await old.rest.logout() } }
+        guard let session else {
+            showLogin()
+            return
+        }
+        Task { @MainActor in
+            do {
+                try await session.logout()
+            } catch RESTError.unauthorized {
+                // The token was already dead on Discord's side; nothing left to revoke.
+            } catch {
+                lock(title: "Couldn't log out", detail: "Duhcord can't reach Discord, so your session is still active. "
+                     + "Duhcord stays locked until it can finish logging you out.") { [weak self] in self?.logOut(nil) }
+                return
+            }
+            guard self.session === session else { return }
+            self.session = nil
+            session.disconnect()
+            Keychain.deleteToken()
+            NSApp.dockTile.badgeLabel = nil
+            mainWindow?.unlock()
+            showLogin()
+        }
+    }
+
+    /// Blocks the whole app until `retry` succeeds.
+    private func lock(title: String = "Can't reach Discord",
+                      detail: String = "Duhcord stays locked until it can talk to Discord again.",
+                      retry: @escaping () -> Void) {
+        settingsWindow?.close()
+        if let mainWindow {
+            mainWindow.lock(title: title, detail: detail, retry: retry)
+        } else {
+            loginWindow?.show(error: title + ". " + detail, retry: retry)
+        }
+    }
+
+    private var isLocked: Bool { mainWindow?.isLocked ?? false }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(showSettings(_:)), #selector(logOut(_:)):
+            return session != nil && !isLocked
+        default:
+            return true
+        }
     }
 
     // MARK: - DiscordSessionDelegate
@@ -114,12 +153,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
             Keychain.deleteToken()
             showLogin(message: "Your session ended. Scan a new code to log back in.")
         case .closed(let code):
-            mainWindow?.setStatus("Disconnected (code \(code))")
-            loginWindow?.show(error: "Discord closed the connection (code \(code)).")
+            // Discord ended the session for good; reconnecting can't fix it.
+            session.disconnect()
+            self.session = nil
+            Keychain.deleteToken()
+            showLogin(message: "Discord ended the session (code \(code)). Scan a new code to log back in.")
+        case .unreachable:
+            lock { [weak session] in session?.retry() }
         case .reconnecting:
             mainWindow?.setStatus("Reconnecting…")
         case .connected:
             mainWindow?.setStatus(nil)
+            mainWindow?.unlock()
         case .connecting, .disconnected:
             break
         }

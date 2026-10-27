@@ -302,3 +302,64 @@ final class SecureSessionTests: XCTestCase {
         }
     }
 }
+
+final class MaskedLinkTests: XCTestCase {
+    func testMaskedLinkShowsRealHost() {
+        XCTAssertEqual(Markdown.parse("see [the docs](https://example.com/a)"), [
+            Markdown.Span("see "),
+            Markdown.Span("the docs", .link, url: "https://example.com/a"),
+            Markdown.Span(" (example.com)", .linkHost),
+        ])
+    }
+
+    func testMaskedLinkRequiresWebURL() {
+        XCTAssertEqual(Markdown.parse("[click](javascript:alert(1))"), [Markdown.Span("[click](javascript:alert(1))")])
+    }
+
+    func testDeepNestingIsCapped() {
+        let message = String(repeating: "*_", count: 50) + "x" + String(repeating: "_*", count: 50)
+        let spans = Markdown.parse(message)
+        XCTAssertTrue(spans.contains { $0.text.contains("x") })
+    }
+}
+
+final class LinkGuardTests: XCTestCase {
+    private func check(_ s: String, shown: String? = nil) -> LinkGuard.Verdict {
+        LinkGuard.check(URL(string: s)!, shownText: shown)
+    }
+
+    func testOrdinaryLinksOpen() {
+        XCTAssertEqual(check("https://github.com/C4BRA/duhcord"), .open)
+        XCTAssertEqual(check("https://discord.com/channels/1/2"), .open)
+        XCTAssertEqual(check("https://cdn.discordapp.com/attachments/1/2/cat.png"), .open)
+        XCTAssertEqual(check("https://disco.example"), .open)
+    }
+
+    func testQRLoginLinksAreBlocked() {
+        guard case .block = check("https://discord.com/ra/abc123") else { return XCTFail() }
+    }
+
+    func testNonWebLinksAreBlocked() {
+        guard case .block = check("file:///etc/passwd") else { return XCTFail() }
+    }
+
+    func testOAuthAuthorizeWarnsAndExplainsAdministrator() {
+        let verdict = check("https://discord.com/oauth2/authorize?client_id=1&scope=bot%20guilds.join&permissions=8")
+        guard case .warn(let reasons) = verdict else { return XCTFail() }
+        XCTAssertTrue(reasons.contains { $0.contains("ADMINISTRATOR") })
+        XCTAssertTrue(reasons.contains { $0.contains("join servers") })
+        guard case .warn = check("https://discord.com/api/oauth2/authorize?client_id=1&scope=identify") else { return XCTFail() }
+    }
+
+    func testLookalikeDomainsWarn() {
+        for host in ["https://dlscord.com/gift", "https://discrod.gift/x", "https://discord-nitro.ru", "https://d1scord.app"] {
+            guard case .warn = check(host) else { return XCTFail(host) }
+        }
+    }
+
+    func testMaskedLinkPointingElsewhereWarns() {
+        guard case .warn = check("https://evil.example/login", shown: "discord.com/nitro") else { return XCTFail() }
+        XCTAssertEqual(check("https://www.github.com/x", shown: "github.com"), .open)
+        XCTAssertEqual(check("https://evil.example", shown: "click here"), .open)
+    }
+}

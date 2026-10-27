@@ -39,6 +39,36 @@ public final class DiscordSession: GatewayClientDelegate {
         gateway.disconnect()
     }
 
+    /// Reconnects after the app was locked because Discord couldn't be reached.
+    public func retry() { gateway.retry() }
+
+    /// Logs the token out on Discord's side first. Throws (and changes nothing) if Discord can't be reached,
+    /// so a logout never leaves a still-valid token behind.
+    public func logout() async throws {
+        try await rest.logout()
+        disconnect()
+    }
+
+    /// True for errors that mean "Discord can't be reached", as opposed to Discord answering with an error.
+    /// A connection our certificate checks refused counts too: we couldn't reach the real Discord.
+    public static func isConnectivityError(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotFindHost, .cannotConnectToHost,
+             .dnsLookupFailed, .dataNotAllowed, .internationalRoamingOff, .secureConnectionFailed,
+             .serverCertificateUntrusted, .serverCertificateHasBadDate, .serverCertificateNotYetValid,
+             .serverCertificateHasUnknownRoot, .cancelled:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func reportIfUnreachable(_ error: Error) {
+        guard Self.isConnectivityError(error) else { return }
+        delegate?.session(self, didChangeState: .unreachable)
+    }
+
     /// Switches the focused channel, loading its latest messages if they aren't cached.
     public func open(channelID: Snowflake) {
         store.focusedChannelID = channelID
@@ -68,6 +98,7 @@ public final class DiscordSession: GatewayClientDelegate {
                 try await rest.sendMessage(content, to: channelID, nonce: nonce)
                 completion(nil)
             } catch {
+                reportIfUnreachable(error)
                 completion(error)
             }
         }
@@ -100,6 +131,7 @@ public final class DiscordSession: GatewayClientDelegate {
                 let page = try await rest.messages(in: channelID, before: before, limit: Self.pageSize)
                 store.addHistory(page, for: channelID, requestedLimit: Self.pageSize)
             } catch {
+                reportIfUnreachable(error)
                 #if DEBUG
                 print("[rest] failed to load messages for \(channelID): \(error)")
                 #endif

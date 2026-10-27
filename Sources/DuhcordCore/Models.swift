@@ -277,6 +277,18 @@ public struct MessageAck: Decodable {
     public let messageId: Snowflake
 }
 
+/// Sent periodically for servers we aren't subscribed to (large servers we haven't opened), so their
+/// unread markers stay right without receiving every message.
+public struct ChannelUnreadUpdate: Decodable {
+    public struct Entry: Decodable {
+        public let id: Snowflake
+        public let lastMessageId: Snowflake?
+    }
+
+    public let guildId: Snowflake
+    public let channelUnreadUpdates: [Entry]
+}
+
 public struct ReadState: Codable, Hashable {
     public let id: Snowflake
     public var lastMessageId: Snowflake?

@@ -22,6 +22,8 @@ public final class RemoteAuth {
         case expired
         /// The user tapped "cancel" on their phone.
         case cancelled
+        /// Discord couldn't be reached.
+        case unreachable
         case failed(String)
     }
 
@@ -35,6 +37,8 @@ public final class RemoteAuth {
     private var heartbeat: DispatchSourceTimer?
     private var privateKey: SecKey?
     private var finished = false
+    /// Whether Discord answered at all on this attempt, to tell "offline" apart from "code expired".
+    private var gotHello = false
 
     public init() {}
 
@@ -47,6 +51,7 @@ public final class RemoteAuth {
         queue.async { [self] in
             stopLocked()
             finished = false
+            gotHello = false
             do {
                 privateKey = try Self.makeKey()
             } catch {
@@ -88,7 +93,7 @@ public final class RemoteAuth {
                 case .success:
                     self.receive(on: task)
                 case .failure:
-                    self.finish(.expired)
+                    self.finish(self.gotHello ? .expired : .unreachable)
                 }
             }
         }
@@ -100,6 +105,7 @@ public final class RemoteAuth {
 
         switch op {
         case "hello":
+            gotHello = true
             let interval = (json["heartbeat_interval"] as? Double ?? 41_250) / 1000
             startHeartbeat(every: interval)
             guard let publicKey = privateKey.flatMap(SecKeyCopyPublicKey),
@@ -159,7 +165,9 @@ public final class RemoteAuth {
                     finish(.loggedIn(token: token))
                 }
             } catch {
-                queue.async { [self] in finish(.failed(error.localizedDescription)) }
+                queue.async { [self] in
+                    finish(DiscordSession.isConnectivityError(error) ? .unreachable : .failed(error.localizedDescription))
+                }
             }
         }
     }

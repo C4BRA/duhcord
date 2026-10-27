@@ -9,6 +9,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
     private let onToken: (String) -> Void
     private let auth = RemoteAuth()
     private var mode: Mode = .idle
+    private var retryAction: (() -> Void)?
 
     private let qrView = NSImageView()
     private let status = NSTextField(wrappingLabelWithString: "")
@@ -61,11 +62,14 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
         spinner.startAnimation(nil)
     }
 
-    func show(error: String) {
+    /// Shows an error with a Retry button. Without `retry`, Retry fetches a new QR code.
+    func show(error: String, retry action: (() -> Void)? = nil) {
         mode = .failed
         auth.stop()
+        retryAction = action
         qrView.image = nil
         status.stringValue = error
+        retry.title = "Retry"
         retry.isHidden = false
         spinner.stopAnimation(nil)
     }
@@ -88,10 +92,14 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
             onToken(token)
         case .expired:
             mode = .failed
+            retryAction = nil
             qrView.image = nil
             spinner.stopAnimation(nil)
             status.stringValue = "The code expired."
+            retry.title = "New Code"
             retry.isHidden = false
+        case .unreachable:
+            show(error: "Can't reach Discord. Check your connection and try again.")
         case .cancelled:
             show(error: "Login was cancelled on your phone.")
         case .failed(let message):
@@ -99,7 +107,15 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    @objc private func retryClicked() { beginQR() }
+    @objc private func retryClicked() {
+        if let action = retryAction {
+            retryAction = nil
+            setBusy(true)
+            action()
+        } else {
+            beginQR()
+        }
+    }
 
     func windowWillClose(_ notification: Notification) {
         // Nobody is looking at the code, so drop the connection and the key.
