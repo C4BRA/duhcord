@@ -52,6 +52,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         guildList.onSelect = { [weak self] place in self?.select(place: place) }
         channelList.onSelect = { [weak self] channelID in self?.select(channelID: channelID) }
         session.store.onChange = { [weak self] change in self?.handle(change) }
+        NotificationCenter.default.addObserver(self, selector: #selector(updateDockBadge), name: Settings.didChange, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -79,9 +80,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         case .unread:
             channelList.refreshIndicators()
             guildList.refreshIndicators()
-            let mentions = session.store.totalMentionCount
-            NSApp.dockTile.badgeLabel = mentions > 0 ? String(mentions) : nil
+            updateDockBadge()
         }
+    }
+
+    @objc private func updateDockBadge() {
+        let mentions = session.store.totalMentionCount
+        NSApp.dockTile.badgeLabel = Settings.dockBadge && mentions > 0 ? String(mentions) : nil
     }
 
     // MARK: - Selection

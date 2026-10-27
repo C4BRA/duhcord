@@ -270,7 +270,7 @@ public final class Store {
         return Permissions.canView(channel: channel, guild: guild, userID: me.id, memberRoles: myRoles[guild.id] ?? [])
     }
 
-    private func mentionsMe(_ message: Message) -> Bool {
+    public func mentionsMe(_ message: Message) -> Bool {
         guard let me else { return false }
         if message.mentionEveryone == true { return true }
         return message.mentions?.contains { $0.id == me.id } ?? false

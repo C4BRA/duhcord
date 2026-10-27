@@ -25,7 +25,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private var lastWidth: CGFloat = 0
 
     private static let sidePadding: CGFloat = 16
-    private static let headerHeight: CGFloat = 18
+    private static var headerHeight: CGFloat { ceil(Settings.textSize.pointSize * 1.4) }
     private static let groupWindow: TimeInterval = 7 * 60
 
     init(session: DiscordSession) {
@@ -62,11 +62,13 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         table.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(didResize),
                                                name: NSView.frameDidChangeNotification, object: table)
+        NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged),
+                                               name: Settings.didChange, object: nil)
 
         input.placeholderString = "Message"
         input.delegate = self
         input.bezelStyle = .roundedBezel
-        input.font = Theme.bodyFont
+        input.font = Theme.messageFont
         input.lineBreakMode = .byWordWrapping
         input.usesSingleLineMode = false
         input.cell?.wraps = true
@@ -203,6 +205,16 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         session.loadOlder(channelID: channelID)
     }
 
+    /// Text size or spacing changed: re-render everything, keeping the scroll position at the bottom if it was.
+    @objc private func settingsChanged() {
+        input.font = Theme.messageFont
+        let wasAtBottom = isAtBottom
+        bodyCache = [:]
+        heightCache = [:]
+        table.reloadData()
+        if wasAtBottom { scrollToBottom() }
+    }
+
     @objc private func didResize() {
         let width = table.bounds.width
         guard abs(width - lastWidth) > 0.5 else { return }
@@ -294,7 +306,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 private final class MessageCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("MessageCell")
     static let bottomPadding: CGFloat = 2
-    static func topPadding(grouped: Bool) -> CGFloat { grouped ? 1 : 10 }
+    static func topPadding(grouped: Bool) -> CGFloat { grouped ? 1 : (Settings.compactMessages ? 4 : 10) }
 
     private let headerField = NSTextField(labelWithString: "")
     private let bodyView = NSTextView()

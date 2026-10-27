@@ -3,10 +3,22 @@ import DuhcordCore
 
 /// Fonts, colours and message rendering. Everything uses system colours so dark mode just works.
 enum Theme {
+    /// Sidebar fonts stay at the system size; message fonts follow the text size setting.
     static let bodyFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
     static let boldFont = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
     static let smallFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-    static let monoFont = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize - 1, weight: .regular)
+
+    static var messageFont: NSFont { NSFont.systemFont(ofSize: Settings.textSize.pointSize) }
+    static var messageBoldFont: NSFont { NSFont.boldSystemFont(ofSize: Settings.textSize.pointSize) }
+    static var messageSmallFont: NSFont { NSFont.systemFont(ofSize: Settings.textSize.pointSize - 2) }
+    static var monoFont: NSFont { NSFont.monospacedSystemFont(ofSize: Settings.textSize.pointSize - 1, weight: .regular) }
+
+    /// Darker strip behind the guild column so it reads as separate from the channel list.
+    static let guildColumnBackground = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(white: 0.08, alpha: 1)
+            : NSColor(white: 0.84, alpha: 1)
+    }
 
     static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -19,12 +31,12 @@ enum Theme {
     /// Name and timestamp line shown above a group of messages.
     static func header(for message: Message) -> NSAttributedString {
         let s = NSMutableAttributedString(string: message.author.displayName, attributes: [
-            .font: boldFont,
+            .font: messageBoldFont,
             .foregroundColor: NSColor.labelColor,
         ])
         if let date = message.date {
             s.append(NSAttributedString(string: "  " + timeFormatter.string(from: date), attributes: [
-                .font: smallFont,
+                .font: messageSmallFont,
                 .foregroundColor: NSColor.secondaryLabelColor,
             ]))
         }
@@ -34,7 +46,7 @@ enum Theme {
     /// Message body: reply line, markdown content, edited marker and attachment links.
     static func body(for message: Message, resolver: Markdown.Resolver) -> NSAttributedString {
         let out = NSMutableAttributedString()
-        let secondary: [NSAttributedString.Key: Any] = [.font: smallFont, .foregroundColor: NSColor.secondaryLabelColor]
+        let secondary: [NSAttributedString.Key: Any] = [.font: messageSmallFont, .foregroundColor: NSColor.secondaryLabelColor]
 
         if let reply = message.referencedMessage {
             let preview = reply.content.replacingOccurrences(of: "\n", with: " ")
@@ -51,7 +63,7 @@ enum Theme {
         for attachment in message.attachments {
             if out.length > 0 { out.append(NSAttributedString(string: "\n")) }
             // Attachments open in the browser rather than loading inline, so nothing downloads unless asked.
-            var attrs: [NSAttributedString.Key: Any] = [.font: bodyFont, .foregroundColor: NSColor.linkColor]
+            var attrs: [NSAttributedString.Key: Any] = [.font: messageFont, .foregroundColor: NSColor.linkColor]
             if let url = URL(string: attachment.url) { attrs[.link] = url }
             let kind = (attachment.contentType ?? "").hasPrefix("image/") ? "image" : "file"
             out.append(NSAttributedString(string: "[\(kind): \(attachment.filename)]", attributes: attrs))
@@ -69,7 +81,7 @@ enum Theme {
             var attrs: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor.labelColor]
             let style = span.style
 
-            var font = bodyFont
+            var font = messageFont
             if style.contains(.code) || style.contains(.codeBlock) {
                 font = monoFont
                 attrs[.backgroundColor] = NSColor.quaternaryLabelColor

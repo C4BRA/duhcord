@@ -18,11 +18,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
     private var session: DiscordSession?
     private var mainWindow: MainWindowController?
     private var loginWindow: LoginWindowController?
+    private var settingsWindow: SettingsWindowController?
 
     /// Notifications need a real app bundle; running the bare binary from the terminal has none.
     private var canNotify: Bool { Bundle.main.bundleIdentifier != nil }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Settings.registerDefaults()
         NSApp.mainMenu = buildMenu()
         if let token = Keychain.loadToken() {
             start(token: token)
@@ -64,6 +66,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         if mainWindow == nil, loginWindow == nil { showLogin() }
         loginWindow?.setBusy(true)
         session.connect()
+    }
+
+    @objc private func showSettings(_ sender: Any?) {
+        let controller = settingsWindow ?? SettingsWindowController { [weak self] in self?.logOut(nil) }
+        settingsWindow = controller
+        controller.show(accountName: session?.store.me?.displayName)
     }
 
     @objc private func logOut(_ sender: Any?) {
@@ -111,6 +119,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
 
     func session(_ session: DiscordSession, shouldNotifyAbout message: Message) {
         guard canNotify, !NSApp.isActive || session.store.focusedChannelID != message.channelId else { return }
+        switch Settings.notifications {
+        case .off:
+            return
+        case .mentionsOnly:
+            if session.store.channel(message.channelId)?.isPrivate == true, !session.store.mentionsMe(message) { return }
+        case .directMessagesAndMentions:
+            break
+        }
         let content = UNMutableNotificationContent()
         let channel = session.store.channel(message.channelId)
         content.title = message.author.displayName
@@ -118,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
             content.subtitle = "#" + channel.displayName
         }
         content.body = message.content.isEmpty ? "Sent an attachment" : message.content
-        content.sound = .default
+        content.sound = Settings.notificationSound ? .default : nil
         let request = UNNotificationRequest(identifier: message.id, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
@@ -131,6 +147,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Duhcord", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
         appMenu.addItem(withTitle: "Log Out", action: #selector(logOut(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Duhcord", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")

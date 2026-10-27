@@ -18,8 +18,7 @@ final class GuildListViewController: NSViewController, NSTableViewDataSource, NS
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func loadView() {
-        let column = NSTableColumn(identifier: .init("guild"))
-        table.addTableColumn(column)
+        table.addTableColumn(NSTableColumn(identifier: .init("guild")))
         table.headerView = nil
         table.rowHeight = 52
         table.intercellSpacing = .zero
@@ -33,7 +32,18 @@ final class GuildListViewController: NSViewController, NSTableViewDataSource, NS
         scroll.documentView = table
         scroll.hasVerticalScroller = false
         scroll.drawsBackground = false
-        view = scroll
+        scroll.contentInsets = NSEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
+
+        let column = GuildColumnView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        column.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: column.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: column.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: column.trailingAnchor, constant: -1),
+        ])
+        view = column
     }
 
     func reload() {
@@ -76,6 +86,16 @@ final class GuildListViewController: NSViewController, NSTableViewDataSource, NS
     }
 }
 
+/// Solid darker background with a hairline on the right, so the guild strip is clearly its own column.
+private final class GuildColumnView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        Theme.guildColumnBackground.setFill()
+        dirtyRect.fill()
+        NSColor.separatorColor.setFill()
+        NSRect(x: bounds.maxX - 1, y: 0, width: 1, height: bounds.height).fill()
+    }
+}
+
 private final class GuildCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("GuildCell")
 
@@ -83,6 +103,7 @@ private final class GuildCell: NSTableCellView {
     private let label = NSTextField(labelWithString: "")
     private let pill = NSView()
     private let badge = NSTextField(labelWithString: "")
+    private var pillHeight: CGFloat = 8
 
     init() {
         super.init(frame: .zero)
@@ -113,11 +134,22 @@ private final class GuildCell: NSTableCellView {
         tile.frame = NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size)
         let labelHeight: CGFloat = 18
         label.frame = NSRect(x: tile.frame.minX, y: tile.frame.midY - labelHeight / 2, width: size, height: labelHeight)
-        pill.frame = NSRect(x: 0, y: bounds.midY - 4, width: 4, height: 8)
+        pill.frame = NSRect(x: 0, y: bounds.midY - pillHeight / 2, width: 4, height: pillHeight)
         badge.frame = NSRect(x: tile.frame.maxX - 12, y: tile.frame.minY - 2, width: 16, height: 14)
     }
 
+    private var lastPlace: Place?
+    private weak var lastStore: Store?
+
+    /// Layer colours are fixed CGColors, so they need refreshing when the appearance changes.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        if let lastPlace, let lastStore { configure(place: lastPlace, store: lastStore) }
+    }
+
     func configure(place: Place, store: Store) {
+        lastPlace = place
+        lastStore = store
         let selected = (superview as? NSTableRowView)?.isSelected ?? false
         let unread: Bool
         let mentions: Int
@@ -134,11 +166,15 @@ private final class GuildCell: NSTableCellView {
             unread = store.guildHasUnread(id)
             mentions = store.guildMentionCount(id)
         }
-        tile.layer?.backgroundColor = (selected ? NSColor.controlAccentColor : NSColor.quaternaryLabelColor).cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            tile.layer?.backgroundColor = (selected ? NSColor.controlAccentColor : NSColor.quaternaryLabelColor).cgColor
+            pill.layer?.backgroundColor = NSColor.labelColor.cgColor
+        }
         tile.layer?.cornerRadius = selected ? 12 : 20
         label.textColor = selected ? .white : .labelColor
         pill.isHidden = !(unread || selected)
-        pill.layer?.backgroundColor = NSColor.labelColor.cgColor
+        // A taller pill marks the selected guild; a short one marks unread.
+        pillHeight = selected ? 28 : 8
         badge.isHidden = mentions == 0
         badge.stringValue = mentions > 99 ? "99+" : String(mentions)
         needsLayout = true
