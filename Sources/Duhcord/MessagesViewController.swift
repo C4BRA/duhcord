@@ -42,14 +42,13 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         titleLabel.lineBreakMode = .byTruncatingTail
 
         let column = NSTableColumn(identifier: .init("message"))
-        column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
+        table.fitColumnToWidth()
         table.headerView = nil
         table.style = .plain
         table.selectionHighlightStyle = .none
         table.intercellSpacing = .zero
         table.backgroundColor = .textBackgroundColor
-        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.dataSource = self
         table.delegate = self
 

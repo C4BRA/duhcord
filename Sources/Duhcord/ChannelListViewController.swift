@@ -27,6 +27,7 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
     override func loadView() {
         let column = NSTableColumn(identifier: .init("channel"))
         table.addTableColumn(column)
+        table.fitColumnToWidth()
         table.headerView = nil
         table.style = .sourceList
         table.rowHeight = 24

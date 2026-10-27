@@ -50,6 +50,7 @@ final class QuickSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         field.font = .systemFont(ofSize: 15)
 
         table.addTableColumn(NSTableColumn(identifier: .init("entry")))
+        table.fitColumnToWidth()
         table.headerView = nil
         table.rowHeight = 34
         table.dataSource = self

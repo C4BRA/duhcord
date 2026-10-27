@@ -50,7 +50,7 @@ public final class GatewayClient: NSObject {
         static let invalidSession = 9
         static let hello = 10
         static let heartbeatAck = 11
-        static let guildSubscriptions = 14
+        static let guildSubscriptionsBulk = 37
     }
 
     /// Close codes after which reconnecting is pointless.
@@ -107,19 +107,23 @@ public final class GatewayClient: NSObject {
         }
     }
 
-    /// Tells Discord we are looking at a guild so it sends us that guild's live events.
-    /// Large guilds don't stream messages to user accounts until this is sent.
+    /// Tells Discord we are looking at a guild so it sends us that guild's live events. Large guilds don't
+    /// stream messages to user accounts until this is sent.
+    ///
+    /// Uses opcode 37 (bulk guild subscriptions), as the official client does; opcode 14 is deprecated.
+    /// `typing` must be true or Discord ignores the subscription for very large guilds. Only the fields
+    /// listed are changed on Discord's side; threads, activities and member updates stay off.
     public func subscribe(toGuild guildID: Snowflake) {
-        let payload: [String: Any] = [
-            "op": Op.guildSubscriptions,
-            "d": [
-                "guild_id": guildID,
-                "typing": false,
-                "threads": false,
-                "activities": false,
-            ] as [String: Any],
-        ]
+        let payload = Self.subscriptionPayload(guildID: guildID)
         queue.async { self.send(payload) }
+    }
+
+    static func subscriptionPayload(guildID: Snowflake) -> [String: Any] {
+        let options: [String: Any] = ["typing": true, "threads": false, "activities": false, "member_updates": false]
+        return [
+            "op": Op.guildSubscriptionsBulk,
+            "d": ["subscriptions": [guildID: options]] as [String: Any],
+        ]
     }
 
     // MARK: - Connection lifecycle

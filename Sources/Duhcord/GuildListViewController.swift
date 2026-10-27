@@ -19,6 +19,7 @@ final class GuildListViewController: NSViewController, NSTableViewDataSource, NS
 
     override func loadView() {
         table.addTableColumn(NSTableColumn(identifier: .init("guild")))
+        table.fitColumnToWidth()
         table.headerView = nil
         table.rowHeight = 52
         table.intercellSpacing = .zero

@@ -363,3 +363,18 @@ final class LinkGuardTests: XCTestCase {
         XCTAssertEqual(check("https://evil.example", shown: "click here"), .open)
     }
 }
+
+final class GatewayPayloadTests: XCTestCase {
+    func testGuildSubscriptionUsesBulkOpcodeWithTyping() throws {
+        let payload = GatewayClient.subscriptionPayload(guildID: "123")
+        XCTAssertEqual(payload["op"] as? Int, 37)
+        let d = try XCTUnwrap(payload["d"] as? [String: Any])
+        let subscriptions = try XCTUnwrap(d["subscriptions"] as? [String: Any])
+        let options = try XCTUnwrap(subscriptions["123"] as? [String: Any])
+        XCTAssertEqual(options["typing"] as? Bool, true)
+        XCTAssertEqual(options["threads"] as? Bool, false)
+        XCTAssertEqual(options["member_updates"] as? Bool, false)
+        XCTAssertNil(options["channels"], "member-list ranges would stream the whole sidebar")
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(payload))
+    }
+}

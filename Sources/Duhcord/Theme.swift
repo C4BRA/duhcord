@@ -34,6 +34,14 @@ enum Theme {
             .font: messageBoldFont,
             .foregroundColor: NSColor.labelColor,
         ])
+        // "Display Name (@username)", so people can't hide behind a borrowed display name.
+        // Skipped when the two are identical, which would just repeat the name.
+        if message.author.displayName != message.author.username {
+            s.append(NSAttributedString(string: " (@\(message.author.username))", attributes: [
+                .font: messageFont,
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
+        }
         if let date = message.date {
             s.append(NSAttributedString(string: "  " + timeFormatter.string(from: date), attributes: [
                 .font: messageSmallFont,
@@ -134,5 +142,15 @@ enum Theme {
         let words = name.split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "_" })
         let letters = words.prefix(2).compactMap(\.first)
         return letters.isEmpty ? "?" : String(letters).uppercased()
+    }
+}
+
+extension NSTableView {
+    /// Makes the single column always span the table's width. A new NSTableColumn is a fixed ~100pt wide,
+    /// which pushes cells off-centre in narrow columns and clips them in wide ones.
+    func fitColumnToWidth() {
+        tableColumns.forEach { $0.resizingMask = .autoresizingMask }
+        columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        sizeLastColumnToFit()
     }
 }
