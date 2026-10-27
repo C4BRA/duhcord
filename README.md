@@ -37,6 +37,17 @@ Images and files show up as links and open in your browser. Custom emoji show as
 - It never loads history in the background. Older messages load only when you scroll up.
 - It renders messages with hand-laid-out table cells, and only for the rows on screen.
 
+## Security
+
+- The release app runs in the **App Sandbox** and its only permission is making outgoing network connections (see `Duhcord.entitlements`). It can't read your files, use the camera, microphone, contacts or location, accept incoming connections, or control other apps.
+- It's signed with the **hardened runtime** and no exceptions: no JIT, no unsigned code, no injected libraries, no debugger attachment.
+- CI runs `scripts/verify-bundle.sh` on every build and fails if either protection is missing or the app gains a permission beyond that file.
+- Your token is stored only in the Keychain (this device only, not synced to iCloud) and is sent only to Discord.
+- Links in messages only open if they're `http`/`https`.
+- It has no third-party dependencies.
+
+Both protections are enforced by macOS when the app starts. They add no memory, CPU or disk cost.
+
 ## Building
 
 You need macOS 13 or newer and Xcode 15 or newer (or the Swift 5.9+ command-line tools).
@@ -44,7 +55,7 @@ You need macOS 13 or newer and Xcode 15 or newer (or the Swift 5.9+ command-line
 ```sh
 swift build            # debug build
 swift test             # unit tests for the networking, state and markdown code
-scripts/bundle.sh      # release build packaged as build/Duhcord.app
+scripts/bundle.sh      # release build packaged as build/Duhcord.app (sandboxed, hardened runtime)
 open build/Duhcord.app
 ```
 

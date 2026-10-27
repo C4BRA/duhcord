@@ -17,6 +17,7 @@ jobs:
         # Zipped with ditto so the executable bit and signature survive the artifact upload.
         run: |
           scripts/bundle.sh
+          scripts/verify-bundle.sh build/Duhcord.app
           ditto -c -k --keepParent build/Duhcord.app build/Duhcord.zip
       - uses: actions/upload-artifact@v4
         with:
