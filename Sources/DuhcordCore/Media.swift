@@ -55,10 +55,10 @@ public enum MediaRequest {
         return URL(string: "https://cdn.discordapp.com/icons/\(guild.id)/\(hash).webp?size=\(cdnSize(forPixels: pixels))")
     }
 
-    /// Hosts videos and GIF videos may stream from: the image proxies plus Discord's own file CDN, which some
-    /// uploaded videos are only served from. Never a third-party host, and never with the token.
-    public static func isAllowedVideoHost(_ host: String?) -> Bool {
-        isAllowedHost(host) || host?.lowercased() == "cdn.discordapp.com"
+    /// Video streams: the image proxies plus Discord's file CDN (some uploads are only served from there),
+    /// over https only. Never a third-party host, and never with the token.
+    public static func isAllowedVideoURL(_ url: URL) -> Bool {
+        url.scheme == "https" && isAllowedImageHost(url.host)
     }
 
     /// The largest size that fits in the box without enlarging, keeping the aspect ratio.

@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+# CI only reads the repository.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: macos-15

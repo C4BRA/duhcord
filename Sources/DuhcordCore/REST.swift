@@ -107,7 +107,8 @@ public final class RESTClient {
         case 429 where attempt < 3:
             // Wait exactly as long as Discord asks, then try again.
             let wait = (try? decoder.decode(RateLimited.self, from: data).retryAfter) ?? 1
-            try await Task.sleep(nanoseconds: UInt64(max(wait, 0.1) * 1_000_000_000))
+            // Clamped so a bogus value can't overflow the sleep or stall a request for hours.
+            try await Task.sleep(nanoseconds: UInt64(min(max(wait, 0.1), 60) * 1_000_000_000))
             return try await request(method, path, query: query, body: body, attempt: attempt + 1)
         default:
             let body = try? decoder.decode(ErrorBody.self, from: data)

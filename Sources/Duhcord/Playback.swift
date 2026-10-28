@@ -53,7 +53,7 @@ final class PlaybackCoordinator {
     }
 }
 
-/// Streams a video for AVFoundation through Duhcord's own connection (SecureSession.video), so playback keeps
+/// Streams a video for AVFoundation through Duhcord's own connection (SecureSession.media), so playback keeps
 /// the same rules as everything else: Discord hosts only, Apple root certificates only, no redirects, no token.
 /// AVFoundation asks for byte ranges; each is fetched and handed back as it arrives, so nothing is buffered
 /// beyond what the player requests.
@@ -67,7 +67,7 @@ final class StreamingLoader: NSObject, AVAssetResourceLoaderDelegate {
 
     /// `sources` are tried in order; a later one is used if an earlier one fails (e.g. proxy → CDN).
     init(sources: [URL]) {
-        self.sources = sources.filter { MediaRequest.isAllowedVideoHost($0.host) }
+        self.sources = sources.filter(MediaRequest.isAllowedVideoURL)
         super.init()
     }
 
@@ -118,7 +118,7 @@ final class StreamingLoader: NSObject, AVAssetResourceLoaderDelegate {
                 }
             }
         }
-        let task = SecureSession.video.session.dataTask(with: request)
+        let task = SecureSession.media.session.dataTask(with: request)
         // A per-task delegate gets the data; certificate checks still go to SecureSession.
         task.delegate = handler
         tasks[loadingRequest] = (task, handler)
@@ -147,7 +147,8 @@ private final class RangeTask: NSObject, URLSessionDataDelegate {
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              startsAtRequestedOffset(http) else {
             completionHandler(.cancel)
             done(true)
             return
@@ -163,6 +164,17 @@ private final class RangeTask: NSObject, URLSessionDataDelegate {
             }
         }
         completionHandler(.allow)
+    }
+
+    /// The bytes must start where AVFoundation asked, or they'd be spliced in at the wrong place.
+    /// A plain 200 is only usable from offset 0; a 206 must name the requested start.
+    private func startsAtRequestedOffset(_ http: HTTPURLResponse) -> Bool {
+        let offset = loadingRequest.dataRequest?.requestedOffset ?? 0
+        if http.statusCode == 200 { return offset == 0 }
+        guard let range = http.value(forHTTPHeaderField: "Content-Range"),
+              let spec = range.split(separator: " ").last,
+              let start = spec.split(separator: "-").first.flatMap({ Int64($0) }) else { return offset == 0 }
+        return start == offset
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
@@ -191,18 +203,40 @@ private final class RangeTask: NSObject, URLSessionDataDelegate {
 final class GIFAnimator {
     private var stop = false
 
-    /// Fetches the GIF through the image proxy session and animates it, calling `frame` on the main thread.
+    /// Downloaded GIFs, so hovering the same one again (or scrolling back) doesn't fetch it again.
+    private static let cache: NSCache<NSURL, NSData> = {
+        let cache = NSCache<NSURL, NSData>()
+        cache.totalCostLimit = 16 * 1024 * 1024
+        return cache
+    }()
+    private static let animatableTypes: Set<String> = ["com.compuserve.gif", "org.webmproject.webp", "public.png"]
+
+    /// Fetches the GIF through the media session (or the cache) and animates it, calling `frame` on the main thread.
     func start(_ url: URL, frame: @escaping (CGImage) -> Void, failed: @escaping () -> Void) {
         stop = false
         Task { [weak self] in
-            guard let result = try? await SecureSession.video.session.data(from: url),
-                  (result.1 as? HTTPURLResponse)?.statusCode == 200 else {
-                await MainActor.run { failed() }
-                return
+            let data: Data
+            if let cached = Self.cache.object(forKey: url as NSURL) {
+                data = cached as Data
+            } else {
+                guard MediaRequest.isAllowedImageURL(url),
+                      let result = try? await SecureSession.media.session.data(from: url),
+                      (result.1 as? HTTPURLResponse)?.statusCode == 200 else {
+                    await MainActor.run { failed() }
+                    return
+                }
+                data = result.0
+                Self.cache.setObject(data as NSData, forKey: url as NSURL, cost: data.count)
             }
             await MainActor.run {
                 guard let self, !self.stop else { return }
-                let status = CGAnimateImageDataWithBlock(result.0 as CFData, nil) { [weak self] _, image, stopPointer in
+                // Only hand ImageIO's animator formats it's meant for.
+                guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                      let type = CGImageSourceGetType(source) as String?, Self.animatableTypes.contains(type) else {
+                    failed()
+                    return
+                }
+                let status = CGAnimateImageDataWithBlock(data as CFData, nil) { [weak self] _, image, stopPointer in
                     guard let self, !self.stop else {
                         stopPointer.pointee = true
                         return

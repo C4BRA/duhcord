@@ -109,7 +109,8 @@ public final class DiscordSession: GatewayClientDelegate {
     public func send(_ content: String, to channelID: Snowflake, completion: @escaping (Error?) -> Void) {
         // Sending ends our typing indicator on Discord's side; the next keystroke starts a fresh one.
         lastTypingSent[channelID] = nil
-        let nonce = String(UInt64(Date().timeIntervalSince1970 * 1000 - 1_420_070_400_000) << 22)
+        // A snowflake-shaped nonce from the current time; clamped so a clock set before 2015 can't trap.
+        let nonce = String(UInt64(max(0, Date().timeIntervalSince1970 * 1000 - 1_420_070_400_000)) << 22)
         Task { @MainActor in
             do {
                 // The gateway echoes the message back as MESSAGE_CREATE, which adds it to the store.

@@ -375,7 +375,8 @@ public final class GatewayClient: NSObject {
 
     private func startHeartbeat(intervalMS: Double) {
         heartbeatTimer?.cancel()
-        let interval = intervalMS / 1000
+        // Clamped: a nonsensical value from the server must not be able to trap the timer.
+        let interval = min(max(intervalMS / 1000, 1), 300)
         let timer = DispatchSource.makeTimerSource(queue: queue)
         // Discord asks for a random delay before the first heartbeat.
         timer.schedule(deadline: .now() + interval * Double.random(in: 0...1), repeating: interval)

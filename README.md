@@ -58,7 +58,7 @@ Other files show up as links that open in your browser. Custom emoji show as `:n
 - The release app runs in the **App Sandbox** and its only permission is making outgoing network connections (see `Duhcord.entitlements`). It can't read your files, use the camera, microphone, contacts or location, accept incoming connections, or control other apps.
 - It's signed with the **hardened runtime** and no exceptions: no JIT, no unsigned code, no injected libraries, no debugger attachment.
 - CI runs `scripts/verify-bundle.sh` on every build and fails if either protection is missing or the app gains a permission beyond that file.
-- Your token is stored only in the Keychain (readable only while your Mac is unlocked, this device only, never synced) and is sent only to Discord.
+- Your token is stored only in your login Keychain, where other apps can't read it without macOS asking you, and it is sent only to Discord.
 - All network traffic goes through one hardened connection layer (`SecureSession`):
   - it only connects to `discord.com` and `*.discord.gg` (images: only Discord's image proxies and its avatar/icon CDN paths, without the token);
   - certificates must chain to Apple's built-in roots, so interception tools that add their own root certificate are refused;

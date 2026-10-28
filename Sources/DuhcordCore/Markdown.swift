@@ -45,6 +45,14 @@ public enum Markdown {
         }
     }
 
+    /// One shared formatter: creating a DateFormatter per timestamp is expensive.
+    static let timestampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .medium
+        f.timeStyle = .short
+        return f
+    }()
+
     public static func parse(_ source: String, resolver: Resolver = Resolver()) -> [Span] {
         var parser = Parser(chars: Array(source), resolver: resolver)
         parser.parseBlocks()
@@ -86,8 +94,9 @@ public enum Markdown {
                 parser.parseInline(textStart, end, base: [])
             }
 
+            var fenceAbsent: Set<String> = []
             while i < chars.count {
-                if matches("```", at: i), let close = find("```", from: i + 3) {
+                if matches("```", at: i), let close = find("```", from: i + 3, before: chars.count, absent: &fenceAbsent) {
                     flushInline(i, into: &self)
                     var bodyStart = i + 3
                     // A language tag runs to the first newline; we drop it.
@@ -127,6 +136,10 @@ public enum Markdown {
         mutating func parseInline(_ start: Int, _ end: Int, base: Style, depth: Int = 0) {
             var i = start
             var buffer = ""
+            // Closing delimiters already known to be missing between here and `end`. If one isn't found from
+            // position i it can't be found from any later position either, so each is searched for at most once.
+            // Without this, text full of unmatched `[`, `<`, `*` or backticks made parsing quadratic.
+            var absent: Set<String> = []
 
             func flush(_ parser: inout Parser) {
                 if !buffer.isEmpty {
@@ -147,7 +160,7 @@ public enum Markdown {
                 if c == "`" {
                     let ticks = matches("``", at: i) ? 2 : 1
                     let delim = String(repeating: "`", count: ticks)
-                    if let close = find(delim, from: i + ticks, before: end), close > i + ticks {
+                    if let close = find(delim, from: i + ticks, before: end, absent: &absent), close > i + ticks {
                         flush(&self)
                         let inner = String(chars[(i + ticks)..<close]).trimmingCharacters(in: .whitespaces)
                         spans.append(Span(inner, base.union(.code)))
@@ -157,7 +170,7 @@ public enum Markdown {
                 }
 
                 if depth < Self.maxNesting, let d = delimiter(at: i, end: end),
-                   let close = find(d.delim, from: i + d.delim.count, before: end), close > i + d.delim.count {
+                   let close = find(d.delim, from: i + d.delim.count, before: end, absent: &absent), close > i + d.delim.count {
                     flush(&self)
                     parseInline(i + d.delim.count, close, base: base.union(d.style), depth: depth + 1)
                     i = close + d.delim.count
@@ -165,7 +178,7 @@ public enum Markdown {
                 }
 
                 // Masked link: [text](https://…). The real host is always shown after the text.
-                if c == "[", let link = maskedLink(at: i, end: end) {
+                if c == "[", let link = maskedLink(at: i, end: end, absent: &absent) {
                     flush(&self)
                     spans.append(Span(link.text, base.union(.link), url: link.url.absoluteString))
                     spans.append(Span(" (\(link.url.host ?? "?"))", base.union(.linkHost)))
@@ -173,7 +186,7 @@ public enum Markdown {
                     continue
                 }
 
-                if c == "<", let close = find(">", from: i + 1, before: end), let span = token(String(chars[(i + 1)..<close]), base: base) {
+                if c == "<", let close = find(">", from: i + 1, before: end, absent: &absent), let span = token(String(chars[(i + 1)..<close]), base: base) {
                     flush(&self)
                     spans.append(span)
                     i = close + 1
@@ -238,10 +251,8 @@ public enum Markdown {
             }
             // Timestamps: <t:1700000000> or <t:1700000000:R>.
             if parts.count >= 2, parts[0] == "t", let seconds = TimeInterval(parts[1]) {
-                let f = DateFormatter()
-                f.dateStyle = .medium
-                f.timeStyle = .short
-                return Span(f.string(from: Date(timeIntervalSince1970: seconds)), base.union(.code))
+                guard seconds.isFinite, abs(seconds) < 1e11 else { return nil }
+                return Span(Markdown.timestampFormatter.string(from: Date(timeIntervalSince1970: seconds)), base.union(.code))
             }
             // Links wrapped in <> to suppress embeds.
             if inner.hasPrefix("http://") || inner.hasPrefix("https://"), !inner.contains(" ") {
@@ -250,9 +261,9 @@ public enum Markdown {
             return nil
         }
 
-        private func maskedLink(at i: Int, end: Int) -> (text: String, url: URL, length: Int)? {
-            guard let middle = find("](", from: i + 1, before: end), middle > i + 1,
-                  let close = find(")", from: middle + 2, before: end) else { return nil }
+        private func maskedLink(at i: Int, end: Int, absent: inout Set<String>) -> (text: String, url: URL, length: Int)? {
+            guard let middle = find("](", from: i + 1, before: end, absent: &absent), middle > i + 1,
+                  let close = find(")", from: middle + 2, before: end, absent: &absent) else { return nil }
             let text = String(chars[(i + 1)..<middle])
             guard !text.contains("\n"), !text.contains("["), !text.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
             var target = String(chars[(middle + 2)..<close]).trimmingCharacters(in: .whitespaces)
@@ -285,6 +296,14 @@ public enum Markdown {
                 j += 1
             }
             return true
+        }
+
+        /// `find`, remembering misses: a delimiter missing from `from` to `end` is missing from any later start too.
+        private func find(_ s: String, from: Int, before end: Int, absent: inout Set<String>) -> Int? {
+            guard !absent.contains(s) else { return nil }
+            let found = find(s, from: from, before: end)
+            if found == nil { absent.insert(s) }
+            return found
         }
 
         private func find(_ s: String, from: Int, before end: Int? = nil) -> Int? {

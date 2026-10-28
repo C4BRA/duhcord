@@ -26,11 +26,16 @@ enum Keychain {
 
     @discardableResult
     static func saveToken(_ token: String) -> Bool {
-        deleteToken()
+        // Add, or update in place if one exists, so a failed save never leaves the user with no token.
+        // (Accessibility classes only apply to the data-protection keychain, which needs a Team ID; the login
+        // keychain item is instead limited to apps signed like Duhcord.)
         var query = baseQuery
         query[kSecValueData as String] = Data(token.utf8)
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
+        let status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            return SecItemUpdate(baseQuery as CFDictionary, [kSecValueData as String: Data(token.utf8)] as CFDictionary) == errSecSuccess
+        }
+        return status == errSecSuccess
     }
 
     static func deleteToken() {

@@ -106,7 +106,7 @@ public final class RemoteAuth {
         switch op {
         case "hello":
             gotHello = true
-            let interval = (json["heartbeat_interval"] as? Double ?? 41_250) / 1000
+            let interval = min(max((json["heartbeat_interval"] as? Double ?? 41_250) / 1000, 1), 300)
             startHeartbeat(every: interval)
             guard let publicKey = privateKey.flatMap(SecKeyCopyPublicKey),
                   let spki = Self.subjectPublicKeyInfo(for: publicKey) else {

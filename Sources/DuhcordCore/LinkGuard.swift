@@ -27,12 +27,14 @@ public enum LinkGuard {
         var reasons: [String] = []
 
         if isOfficial(host) {
-            let path = url.path.lowercased()
+            // Browsers resolve "." and ".." and ignore empty segments, so check the path the way they will see it:
+            // otherwise discord.com/./ra/… would slip past the checks below.
+            let segments = url.standardized.path.lowercased().split(separator: "/").map(String.init)
             // discord.com/ra/… is someone's QR login code as a link. Approving it logs *them* in as you.
-            if path.hasPrefix("/ra/") {
+            if segments.first == "ra" {
                 return .block("This is a Discord login link. Opening it and approving would log someone else into your account. It's a common scam, so Duhcord never opens these.")
             }
-            if isOAuthAuthorize(path) {
+            if isOAuthAuthorize(segments) {
                 reasons.append(contentsOf: oauthReasons(url))
             }
         } else {
@@ -55,9 +57,9 @@ public enum LinkGuard {
 
     // MARK: - OAuth
 
-    static func isOAuthAuthorize(_ path: String) -> Bool {
-        let parts = path.split(separator: "/")
-        return Array(parts.suffix(2)) == ["oauth2", "authorize"]
+    static func isOAuthAuthorize(_ segments: [String]) -> Bool {
+        guard let i = segments.firstIndex(of: "oauth2") else { return false }
+        return segments.dropFirst(i + 1).first == "authorize"
     }
 
     /// Explains what an "Authorize" link would let the app do, in plain words.

@@ -580,9 +580,10 @@ final class VideoTests: XCTestCase {
     }
 
     func testVideoHostsIncludeDiscordCDNOnly() {
-        XCTAssertTrue(MediaRequest.isAllowedVideoHost("cdn.discordapp.com"))
-        XCTAssertTrue(MediaRequest.isAllowedVideoHost("media.discordapp.net"))
-        XCTAssertFalse(MediaRequest.isAllowedVideoHost("media.tenor.com"))
+        XCTAssertTrue(MediaRequest.isAllowedVideoURL(URL(string: "https://cdn.discordapp.com/attachments/1/2/a.mp4")!))
+        XCTAssertTrue(MediaRequest.isAllowedVideoURL(URL(string: "https://media.discordapp.net/attachments/1/2/a.mp4")!))
+        XCTAssertFalse(MediaRequest.isAllowedVideoURL(URL(string: "https://media.tenor.com/x.mp4")!))
+        XCTAssertFalse(MediaRequest.isAllowedVideoURL(URL(string: "http://cdn.discordapp.com/attachments/1/2/a.mp4")!))
         XCTAssertFalse(MediaRequest.isAllowedHost("cdn.discordapp.com"), "still images keep coming from the re-encoding proxy only")
     }
 
@@ -669,5 +670,25 @@ final class AvatarTests: XCTestCase {
         XCTAssertFalse(MediaRequest.isAllowedImageURL(URL(string: "http://cdn.discordapp.com/avatars/1/a.webp")!))
         XCTAssertEqual(MediaRequest.cdnSize(forPixels: 80), 128)
         XCTAssertEqual(MediaRequest.cdnSize(forPixels: 64), 64)
+    }
+}
+
+final class MarkdownPerformanceTests: XCTestCase {
+    /// Unmatched openers used to rescan to the end each time (quadratic). This must stay fast.
+    func testUnmatchedOpenersStayLinear() {
+        let hostile = String(repeating: "[<*`~|_", count: 3000)
+        let start = Date()
+        _ = Markdown.parse(hostile)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 0.5)
+    }
+}
+
+final class LinkGuardNormalizationTests: XCTestCase {
+    func testDotSegmentsDontBypassChecks() {
+        for link in ["https://discord.com/./ra/abc", "https://discord.com/x/../ra/abc", "https://discord.com//ra/abc"] {
+            guard case .block = LinkGuard.check(URL(string: link)!) else { return XCTFail(link) }
+        }
+        guard case .warn = LinkGuard.check(URL(string: "https://discord.com/oauth2/authorize/.?client_id=1&scope=bot")!) else { return XCTFail() }
+        guard case .warn = LinkGuard.check(URL(string: "https://discord.com/api/v10/oauth2/authorize?client_id=1&scope=identify")!) else { return XCTFail() }
     }
 }
