@@ -225,6 +225,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         case .guilds:
             guildList.reload()
         case .channels(let guildID):
+            messages.channelsChanged()
             // nil means "everything" (READY) or a DM channel changed.
             if guildID == nil || place == .guild(guildID!) {
                 channelList.reload()

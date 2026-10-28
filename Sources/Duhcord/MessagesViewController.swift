@@ -158,6 +158,16 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         self.channelID = channelID
         layoutCache = [:]
 
+        refreshInput()
+        rebuildRows()
+        table.reloadData()
+        scrollToBottom()
+        updateEmptyState()
+        input.focus()
+    }
+
+    /// The message box follows the channel: named after it, and only usable once Duhcord knows the channel.
+    private func refreshInput() {
         if let channelID, let channel = store.channel(channelID) {
             input.placeholder = channel.isPrivate ? "Message @\(channel.displayName)" : "Message #\(channel.displayName)"
             input.isEnabled = true
@@ -165,11 +175,12 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             input.placeholder = ""
             input.isEnabled = false
         }
-        rebuildRows()
-        table.reloadData()
-        scrollToBottom()
-        updateEmptyState()
-        input.focus()
+    }
+
+    /// Channels came, went or were renamed. If the one on screen only just became known (a DM opened a moment
+    /// before Discord announced it), this switches its message box on.
+    func channelsChanged() {
+        refreshInput()
     }
 
     func messagesChanged(in channelID: Snowflake) {

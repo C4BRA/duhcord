@@ -1081,3 +1081,17 @@ final class ClientIdentityTests: XCTestCase {
         XCTAssertTrue((p["browser_user_agent"] as? String ?? "").contains("discord/\(ClientIdentity.clientVersion)"))
     }
 }
+
+extension StoreTests {
+    /// A DM opened from a profile is added from Discord's reply, then again from the gateway's CHANNEL_CREATE.
+    func testNewDMIsKnownAtOnceAndAddingItTwiceIsHarmless() throws {
+        let store = try readyStore()
+        let json = #"{"id": "900", "type": 1, "last_message_id": null, "recipients": [{"id": "20", "username": "other"}]}"#
+        let dm = try makeDiscordDecoder().decode(Channel.self, from: Data(json.utf8))
+        store.apply(.channelCreate(dm))
+        XCTAssertNotNil(store.channel("900"))
+        XCTAssertEqual(store.user("20")?.username, "other")
+        store.apply(.channelCreate(dm))
+        XCTAssertEqual(store.privateChannels.map(\.id), ["900"])
+    }
+}

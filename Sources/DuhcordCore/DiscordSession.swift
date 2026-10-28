@@ -89,12 +89,21 @@ public final class DiscordSession: GatewayClientDelegate {
         }
         Task { @MainActor in
             do {
-                completion(try await rest.openDM(with: userID).id)
+                completion(try await openedDM(with: userID).id)
             } catch {
                 reportIfUnreachable(error)
                 completion(nil)
             }
         }
+    }
+
+    /// Opens the DM on Discord's side and adds it to the store straight away. Discord also announces it over the
+    /// gateway (CHANNEL_CREATE), but a moment later; without this the DM would be shown before Duhcord knew of it.
+    /// Adding it twice is harmless: the announcement takes the same path and just updates it.
+    private func openedDM(with userID: Snowflake) async throws -> Channel {
+        let channel = try await rest.openDM(with: userID)
+        store.apply(.channelCreate(channel))
+        return channel
     }
 
     /// Sends a direct message, opening the DM first if there isn't one yet (a profile's message field).
@@ -105,7 +114,7 @@ public final class DiscordSession: GatewayClientDelegate {
         }
         Task { @MainActor in
             do {
-                let channel = try await rest.openDM(with: userID)
+                let channel = try await openedDM(with: userID)
                 send(content, to: channel.id, completion: completion)
             } catch {
                 reportIfUnreachable(error)
