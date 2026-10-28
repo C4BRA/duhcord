@@ -206,9 +206,11 @@ final class StoreTests: XCTestCase {
             switch $0 {
             case .category(let c): return "cat:" + c.displayName
             case .channel(let c): return c.displayName
+            case .voiceChannel(let c): return "voice:" + c.displayName
             }
         }
-        XCTAssertEqual(names, ["general", "cat:Cat", "inside"])
+        // Voice channels come after text channels in their group.
+        XCTAssertEqual(names, ["general", "voice:voice", "cat:Cat", "inside"])
     }
 
     func testUnreadAndMentions() throws {

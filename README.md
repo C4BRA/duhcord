@@ -24,7 +24,7 @@ A very small native Discord client for macOS. It's written in Swift with AppKit,
 - Nitro, the shop, Discovery and Activities
 - Stickers, soundboard and profile decorations
 - The member list and the Friends tab
-- Voice and video
+- Video, screen sharing and DM calls (voice channels are supported, see below)
 - Animated profile pictures and server icons (they show as stills)
 
 Link previews, embeds and image attachments are shown inline, built to stay cheap:
@@ -43,6 +43,12 @@ Link previews, embeds and image attachments are shown inline, built to stay chea
 
 **Typing tabs:** when someone types in the channel you're viewing, a small tab with their profile picture springs up from behind the message box. When they stop or send, it sinks halfway, and it slides away a minute later. Each movement is a single Core Animation spring drawn by the window server, so nothing runs between changes. **Settings → Privacy → Show when I'm typing** controls whether others see you typing.
 
+**Voice channels:** voice channels are listed with who's in them, and whoever is talking shows in green. Click a channel to join. A bar at the bottom of the channel list shows the call, with mute, deafen and leave.
+- **End-to-end encrypted.** Calls use Discord's DAVE protocol through Discord's own open-source library, libdave, so Discord's servers pass the audio along without being able to hear it. The bar shows 🔒 once the call is end-to-end encrypted, and nothing you say is sent before then.
+- **Kept apart from your login.** Calls run in a separate helper process, sandboxed on its own with only network and microphone access. It gets a one-call voice token, never your account token. libdave is written in C++, and this keeps any bug in it away from your login.
+- **The microphone is off unless you're unmuted.** Muting closes the microphone completely, so macOS's microphone indicator turns off. Deafening stops all audio, and the helper exits when you leave the call.
+- **Light.** Opus audio is encoded and decoded by macOS itself, and echo cancellation and noise suppression come from Apple's voice processing. Nothing is sent while you're quiet. A call uses about 64 kbit/s up while you talk, and about 64 kbit/s down per person talking.
+
 Other files show up as links that open in your browser. Custom emoji show as `:name:`.
 
 ## How it stays light
@@ -57,6 +63,7 @@ Other files show up as links that open in your browser. Custom emoji show as `:n
 ## Security
 
 - The release app runs in the **App Sandbox** and its only permission is making outgoing network connections (see `Duhcord.entitlements`). It can't read your files, use the camera, microphone, contacts or location, accept incoming connections, or control other apps.
+- The voice helper is sandboxed separately with outgoing network and the microphone only (`DuhcordVoice.entitlements`). It connects only to Discord's voice servers (`*.discord.media`) and never sees the account token.
 - It's signed with the **hardened runtime** and no exceptions: no JIT, no unsigned code, no injected libraries, no debugger attachment.
 - CI runs `scripts/verify-bundle.sh` on every build and fails if either protection is missing or the app gains a permission beyond that file.
 - Your token is stored only in your login Keychain, where other apps can't read it without macOS asking you, and it is sent only to Discord.
@@ -77,6 +84,7 @@ You need an Apple silicon Mac with macOS 13 or newer, and Xcode 15 or newer (or 
 ```sh
 swift build            # debug build
 swift test             # unit tests for the networking, state and markdown code
+scripts/build-libdave.sh  # builds libdave for the voice helper (needs CMake; done automatically by bundle.sh)
 scripts/bundle.sh      # release build packaged as build/Duhcord.app (sandboxed, hardened runtime)
 open build/Duhcord.app
 ```
@@ -174,6 +182,9 @@ For each login attempt, Duhcord makes a new encryption key that exists only in m
 Sources/DuhcordCore       Gateway, REST, models, permissions, store, markdown, update checks (unit tested)
 Sources/DuhcordUpdateKit  Update manifest and signature checks, shared with the installer helper
 Sources/DuhcordUpdater    The installer helper (XPC service)
+Sources/DuhcordVoice      The voice helper (XPC service): voice gateway, UDP audio, DAVE, Opus
+Sources/DuhcordVoiceKit   The voice helper's protocol, packet format and transport encryption
+Sources/CDave             libdave's C header (the library is built by scripts/build-libdave.sh)
 Sources/Duhcord           AppKit UI
 Tests/                Core tests
 ```
