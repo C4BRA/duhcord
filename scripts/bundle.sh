@@ -12,9 +12,10 @@ VERSION="${DUHCORD_VERSION:-0.1.0}"
 BUILD="${DUHCORD_BUILD:-1}"
 XPC="$APP/Contents/XPCServices/com.duhcord.app.Updater.xpc"
 
+# Apple silicon only: no Intel slice to download, store or page in.
 # Optimise for size: this is a UI app that mostly waits on the network, so a smaller
 # binary (less to load and keep in memory) beats a few percent of raw speed.
-FLAGS=(-c release --arch arm64 --arch x86_64 -Xswiftc -Osize)
+FLAGS=(-c release --arch arm64 -Xswiftc -Osize)
 swift build "${FLAGS[@]}"
 BIN_DIR="$(swift build "${FLAGS[@]}" --show-bin-path)"
 
@@ -58,6 +59,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$BUILD</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>LSArchitecturePriority</key><array><string>arm64</string></array>
+    <key>LSRequiresNativeExecution</key><true/>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict>

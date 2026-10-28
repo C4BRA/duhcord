@@ -47,7 +47,7 @@ Other files show up as links that open in your browser. Custom emoji show as `:n
 
 ## How it stays light
 
-- It's a native AppKit app with no bundled browser. The app is a few MB.
+- It's a native AppKit app built only for Apple silicon (arm64), with no bundled browser. The app is a few MB.
 - It only decodes the gateway event types it uses and drops the rest after reading the header.
 - It keeps messages in memory for at most 8 channels, 300 messages each, so memory doesn't grow over time.
 - It never loads history in the background. Older messages load only when you scroll up.
@@ -71,7 +71,7 @@ Both protections are enforced by macOS when the app starts. They add no memory, 
 
 ## Building
 
-You need macOS 13 or newer and Xcode 15 or newer (or the Swift 5.9+ command-line tools).
+You need an Apple silicon Mac with macOS 13 or newer, and Xcode 15 or newer (or the Swift 5.9+ command-line tools). Release builds are arm64 only; there is no Intel version.
 
 ```sh
 swift build            # debug build

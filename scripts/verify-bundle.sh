@@ -14,6 +14,15 @@ HELPER="$APP/Contents/XPCServices/com.duhcord.app.Updater.xpc"
 
 codesign --verify --strict --deep "$APP"
 
+# Apple silicon native: every binary must be arm64 and nothing else.
+for bin in "$APP/Contents/MacOS/Duhcord" "$HELPER/Contents/MacOS/DuhcordUpdater"; do
+    archs="$(lipo -archs "$bin")"
+    if [ "$archs" != "arm64" ]; then
+        echo "error: $bin is built for '$archs', expected arm64 only" >&2
+        exit 1
+    fi
+done
+
 for code in "$APP" "$HELPER"; do
     info="$(codesign -d --verbose=2 "$code" 2>&1)"
     if ! grep -q "flags=.*runtime" <<<"$info"; then

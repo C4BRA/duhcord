@@ -17,11 +17,8 @@ public enum ClientIdentity {
         return "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
     }()
 
-    #if arch(arm64)
+    /// Duhcord ships for Apple silicon only.
     static let arch = "arm64"
-    #else
-    static let arch = "x64"
-    #endif
 
     static let locale = Locale.preferredLanguages.first ?? "en-US"
 
