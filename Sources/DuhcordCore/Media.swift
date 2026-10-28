@@ -18,13 +18,18 @@ public enum MediaRequest {
         isAllowedHost(host) || host?.lowercased() == "cdn.discordapp.com"
     }
 
-    /// Profile pictures and server icons on Discord's CDN are Discord's own resized, re-encoded copies.
-    /// Nothing else from the CDN is fetched as a still image.
+    /// Profile pictures, banners, server icons, badges and game icons on Discord's CDN are Discord's own
+    /// resized, re-encoded copies. Nothing else from the CDN is fetched as a still image.
     public static func isAllowedImageURL(_ url: URL) -> Bool {
         guard url.scheme == "https", let host = url.host?.lowercased() else { return false }
         if isAllowedHost(host) { return true }
         guard host == "cdn.discordapp.com" else { return false }
-        return ["/avatars/", "/icons/", "/embed/avatars/"].contains { url.path.hasPrefix($0) }
+        let path = url.path
+        if ["/avatars/", "/icons/", "/embed/avatars/", "/banners/", "/app-icons/", "/app-assets/", "/badge-icons/"]
+            .contains(where: { path.hasPrefix($0) }) { return true }
+        // Server profile pictures and banners: /guilds/{guild}/users/{user}/avatars|banners/{hash}
+        let parts = path.split(separator: "/")
+        return parts.count == 6 && parts[0] == "guilds" && parts[2] == "users" && ["avatars", "banners"].contains(parts[4])
     }
 
     /// Discord's CDN only serves power-of-two sizes from 16 to 4096.

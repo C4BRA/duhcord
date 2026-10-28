@@ -897,3 +897,129 @@ final class VoiceTransportTests: XCTestCase {
         XCTAssertNil(empty.averagePing)
     }
 }
+
+final class ProfileTests: XCTestCase {
+    private let decoder = makeDiscordDecoder()
+
+    func testProfilePrefersServerProfileAndReadsMutualsAndWidgets() throws {
+        let json = """
+        {"user": {"id": "80351110224678912", "username": "nelly", "global_name": "Nelly", "avatar": "a1", "bio": "x"},
+         "user_profile": {"bio": "Account bio", "pronouns": "she/her", "banner": "b1", "accent_color": 16711680},
+         "guild_member": {"roles": ["10", "11"], "nick": "Nel", "avatar": null, "banner": null,
+                          "joined_at": "2020-01-01T00:00:00.000000+00:00"},
+         "guild_member_profile": {"guild_id": "9", "bio": "Server bio", "pronouns": ""},
+         "badges": [{"id": "hypesquad_house_1", "description": "HypeSquad Bravery", "icon": "8a88d63823d8a71cd5e390baa45efa02"}],
+         "guild_badges": [],
+         "mutual_guilds": [{"id": "9", "nick": "Nel"}, {"id": "10", "nick": null}],
+         "mutual_friends": [{"id": "5", "username": "five"}], "mutual_friends_count": 1,
+         "widgets": [{"id": "1", "updated_at": "2025-12-31T12:04:11.252336+00:00",
+                      "data": {"type": "favorite_games", "games": [{"game_id": "505", "comment": "Best", "tags": ["expert", "open_to_teach"]}]}},
+                     {"id": "2", "data": {"type": "application", "application_id": "606"}},
+                     {"id": "3", "data": {"broken": true}}],
+         "connected_accounts": [], "premium_type": null, "premium_since": null, "premium_guild_since": null}
+        """
+        let profile = try decoder.decode(UserProfile.self, from: Data(json.utf8))
+        XCTAssertEqual(profile.displayName, "Nel")
+        XCTAssertEqual(profile.bio, "Server bio")
+        // An empty server value falls back to the account's.
+        XCTAssertEqual(profile.pronouns, "she/her")
+        XCTAssertEqual(profile.accentColor, 0xFF0000)
+        XCTAssertEqual(profile.guildMember?.roles, ["10", "11"])
+        XCTAssertEqual(profile.mutualGuilds?.map(\.id), ["9", "10"])
+        XCTAssertEqual(profile.friendsInCommon, 1)
+        XCTAssertEqual(profile.badges.first?.description, "HypeSquad Bravery")
+        XCTAssertEqual(profile.widgets.count, 2)
+        XCTAssertEqual(profile.widgets[0].title, "Favorite Game")
+        XCTAssertTrue(profile.widgets[0].isDetailed)
+        XCTAssertEqual(profile.widgets[0].games.first?.tags, ["expert", "open_to_teach"])
+        XCTAssertEqual(profile.widgets[1].applicationId, "606")
+        XCTAssertEqual(ProfileWidget.tagTitle("looking_for_group"), "Looking For Group")
+
+        let banner = MediaRequest.bannerURL(for: profile, guildID: "9", pixels: 600)
+        XCTAssertEqual(banner?.absoluteString, "https://cdn.discordapp.com/banners/80351110224678912/b1.webp?size=1024")
+        XCTAssertTrue(MediaRequest.isAllowedImageURL(banner!))
+    }
+
+    func testBlockedOrPrivateProfileStillDecodes() throws {
+        let json = """
+        {"user": {"id": "1", "username": "someone"}, "user_profile": null, "badges": null, "mutual_guilds": "nonsense"}
+        """
+        let profile = try decoder.decode(UserProfile.self, from: Data(json.utf8))
+        XCTAssertNil(profile.bio)
+        XCTAssertTrue(profile.badges.isEmpty)
+        XCTAssertNil(profile.mutualGuilds)
+        XCTAssertNil(MediaRequest.bannerURL(for: profile, guildID: nil, pixels: 600))
+    }
+
+    func testPresenceDecodingIsLenient() throws {
+        let json = """
+        {"user": {"id": "5"}, "status": "dnd", "activities": [
+          {"name": "Custom Status", "type": 4, "state": "Busy", "emoji": {"name": "🔥"}},
+          {"name": "Rocket League", "type": 0, "application_id": "356", "timestamps": {"start": "1700000000000"},
+           "assets": {"large_image": "1234", "large_text": "Ranked"}},
+          {"type": 2}]}
+        """
+        let presence = try decoder.decode(RawPresence.self, from: Data(json.utf8)).presence
+        XCTAssertEqual(presence.userID, "5")
+        XCTAssertEqual(presence.status, .dnd)
+        XCTAssertEqual(presence.customStatus?.headline, "🔥 Busy")
+        XCTAssertEqual(presence.shownActivities.map(\.headline), ["Playing Rocket League"])
+        XCTAssertEqual(presence.shownActivities.first?.startDate, Date(timeIntervalSince1970: 1_700_000_000))
+        let image = MediaRequest.activityImageURL(presence.shownActivities[0], pixels: 96)
+        XCTAssertEqual(image?.absoluteString, "https://cdn.discordapp.com/app-assets/356/1234.webp?size=128")
+
+        let unknown = try decoder.decode(RawPresence.self, from: Data(#"{"user_id": "6", "status": "invisible"}"#.utf8)).presence
+        XCTAssertEqual(unknown.status, .offline)
+    }
+
+    func testActivityImagesOnlyFromDiscord() throws {
+        func activity(_ image: String) throws -> Activity {
+            try decoder.decode(Activity.self, from: Data(#"{"name": "x", "type": 2, "application_id": "1", "assets": {"large_image": "\#(image)"}}"#.utf8))
+        }
+        XCTAssertEqual(MediaRequest.activityImageURL(try activity("mp:external/abc/https/x.png"), pixels: 48)?.host, "media.discordapp.net")
+        XCTAssertNil(MediaRequest.activityImageURL(try activity("spotify:ab67616d0000b273"), pixels: 48))
+        XCTAssertNil(MediaRequest.activityImageURL(try activity("mp:../../evil"), pixels: 48))
+        XCTAssertNil(MediaRequest.activityImageURL(try activity("https://example.com/a.png"), pixels: 48))
+    }
+
+    func testProfileImagesAreAllowedButOtherCDNPathsAreNot() {
+        let allowed = [
+            "https://cdn.discordapp.com/banners/1/abc.webp?size=600",
+            "https://cdn.discordapp.com/app-icons/1/abc.webp",
+            "https://cdn.discordapp.com/badge-icons/abc.png",
+            "https://cdn.discordapp.com/guilds/1/users/2/avatars/abc.webp",
+            "https://cdn.discordapp.com/guilds/1/users/2/banners/abc.webp",
+        ]
+        let refused = [
+            "https://cdn.discordapp.com/attachments/1/2/file.png",
+            "https://cdn.discordapp.com/guilds/1/users/2/other/abc.webp",
+            "https://cdn.discordapp.com/guilds/1/abc.webp",
+            "http://cdn.discordapp.com/banners/1/abc.webp",
+        ]
+        for url in allowed { XCTAssertTrue(MediaRequest.isAllowedImageURL(URL(string: url)!), url) }
+        for url in refused { XCTAssertFalse(MediaRequest.isAllowedImageURL(URL(string: url)!), url) }
+    }
+
+    func testStoreKeepsOnlineStatusesAndDropsOffline() throws {
+        let store = Store()
+        let ready = """
+        {"user": {"id": "1", "username": "me"}, "session_id": "s", "private_channels": [], "read_state": [],
+         "presences": [{"user": {"id": "5"}, "status": "online", "activities": []}],
+         "guilds": [{"id": "100", "name": "g", "roles": [{"id": "100", "name": "@everyone", "permissions": "0", "position": 0},
+                                                         {"id": "7", "name": "Mods", "permissions": "0", "position": 3, "colors": {"primary_color": 255}}],
+                     "presences": [{"user": {"id": "6"}, "status": "idle", "activities": []}]}]}
+        """
+        store.apply(.ready(try decoder.decode(ReadyEvent.self, from: Data(ready.utf8))))
+        XCTAssertEqual(store.presence(of: "5")?.status, .online)
+        XCTAssertEqual(store.presence(of: "6")?.status, .idle)
+        XCTAssertEqual(store.guilds["100"]?.presences.count, 0, "presences aren't kept twice")
+        XCTAssertEqual(store.guilds["100"]?.roles.last?.name, "Mods")
+        XCTAssertEqual(store.guilds["100"]?.roles.last?.color, 255)
+
+        var changes: [Store.Change] = []
+        store.onChange = { changes.append($0) }
+        store.apply(.presenceUpdate(Presence(userID: "5", status: .offline, activities: [])))
+        XCTAssertNil(store.presence(of: "5"))
+        XCTAssertEqual(changes, [.presence(userID: "5")])
+    }
+}

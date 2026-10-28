@@ -17,6 +17,8 @@ public final class Store {
         case unread(channelID: Snowflake)
         /// Someone joined, left or changed mute/deafen in one of the guild's voice channels.
         case voice(guildID: Snowflake)
+        /// Someone's status or activities changed.
+        case presence(userID: Snowflake)
     }
 
     public var onChange: ((Change) -> Void)?
@@ -38,6 +40,9 @@ public final class Store {
     private var voiceByGuild: [Snowflake: [Snowflake: VoiceState]] = [:]
     /// Members we've learned about (from voice states and member requests): guild → user → member.
     private var knownMembers: [Snowflake: [Snowflake: Member]] = [:]
+    /// Status and activities for everyone we've been told is online. Offline people are dropped, so this only
+    /// grows with the number of people online at once.
+    private var presences: [Snowflake: Presence] = [:]
     private var cacheOrder: [Snowflake] = []
     private var fullyLoaded: Set<Snowflake> = []
     /// Computed channel lists, since permission checks run on every unread refresh.
@@ -176,6 +181,13 @@ public final class Store {
     }
 
     /// Our own voice state in a guild, if we're in one of its voice channels.
+    /// Someone's status and activities, if they're online and Discord has told us about them.
+    public func presence(of userID: Snowflake) -> Presence? { presences[userID] }
+
+    private func setPresence(_ presence: Presence) {
+        presences[presence.userID] = presence.status == .offline ? nil : presence
+    }
+
     public func myVoiceState(in guildID: Snowflake) -> VoiceState? {
         me.flatMap { voiceByGuild[guildID]?[$0.id] }
     }
@@ -243,6 +255,7 @@ public final class Store {
                 addGuild(guild, mergedMembers: merged)
             }
             for channel in ready.privateChannels { channels[channel.id] = channel }
+            ready.presences.forEach(setPresence)
             for state in ready.readStates { readStates[state.id] = state }
             // No change events: the session reports READY itself, and the UI reloads everything once then.
 
@@ -317,6 +330,12 @@ public final class Store {
         case .typingStart, .voiceServerUpdate:
             break
 
+        case .presenceUpdate(let presence):
+            // Our own presence is never sent; everything else updates the table.
+            guard presences[presence.userID] != presence || presence.status == .offline else { return }
+            setPresence(presence)
+            onChange?(.presence(userID: presence.userID))
+
         case .voiceStateUpdate(let state):
             // Calls outside guilds (DMs) aren't supported.
             guard let guildID = state.guildId else { return }
@@ -328,6 +347,10 @@ public final class Store {
             for member in chunk.members {
                 guard let userID = member.resolvedUserId, member.user != nil else { continue }
                 knownMembers[chunk.guildId, default: [:]][userID] = member
+            }
+            for presence in chunk.presences {
+                setPresence(presence)
+                onChange?(.presence(userID: presence.userID))
             }
             // Names are only shown under voice channels for now.
             onChange?(.voice(guildID: chunk.guildId))
@@ -352,6 +375,7 @@ public final class Store {
         messageCache = [:]
         voiceByGuild = [:]
         knownMembers = [:]
+        presences = [:]
         cacheOrder = []
         fullyLoaded = []
         channelListCache = [:]
@@ -364,7 +388,10 @@ public final class Store {
         channelListCache[guild.id] = nil
         mentionTotals = nil
         if guilds[guild.id] == nil { guildOrder.append(guild.id) }
-        guilds[guild.id] = guild
+        guild.presences.forEach(setPresence)
+        var stored = guild
+        stored.presences = []
+        guilds[guild.id] = stored
         for channel in guild.channels {
             var c = channel
             c.guildId = guild.id

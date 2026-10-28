@@ -120,6 +120,33 @@ public struct Channel: Decodable, Hashable {
 public struct Role: Decodable, Hashable {
     public let id: Snowflake
     public let permissions: String
+    public let name: String
+    /// Higher is more senior; the @everyone role is 0.
+    public let position: Int
+    /// The role's colour, 0 for none.
+    public let color: Int
+
+    private enum CodingKeys: String, CodingKey { case id, permissions, name, position, color, colors }
+    private struct Colors: Decodable { let primaryColor: Int? }
+
+    public init(id: Snowflake, permissions: String, name: String = "", position: Int = 0, color: Int = 0) {
+        self.id = id
+        self.permissions = permissions
+        self.name = name
+        self.position = position
+        self.color = color
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Snowflake.self, forKey: .id)
+        permissions = try c.decode(String.self, forKey: .permissions)
+        name = (try? c.decodeIfPresent(String.self, forKey: .name)) ?? ""
+        position = (try? c.decodeIfPresent(Int.self, forKey: .position)) ?? 0
+        // "colors" replaced "color"; older payloads only have the latter.
+        let primary = (try? c.decodeIfPresent(Colors.self, forKey: .colors))?.primaryColor
+        color = primary ?? (try? c.decodeIfPresent(Int.self, forKey: .color)) ?? 0
+    }
 }
 
 public struct Member: Decodable, Hashable {
@@ -142,9 +169,12 @@ public struct Guild: Decodable, Hashable {
     public let unavailable: Bool
     /// Who is in which voice channel right now.
     public let voiceStates: [VoiceState]
+    /// Statuses and activities of members who are online, as sent when the server loads.
+    /// The store moves these into its own table and empties this, so they aren't kept twice.
+    public internal(set) var presences: [Presence]
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, icon, ownerId, roles, channels, members, unavailable, properties, voiceStates
+        case id, name, icon, ownerId, roles, channels, members, unavailable, properties, voiceStates, presences
     }
 
     private enum PropertyKeys: String, CodingKey {
@@ -152,7 +182,8 @@ public struct Guild: Decodable, Hashable {
     }
 
     public init(id: Snowflake, name: String, icon: String? = nil, ownerId: Snowflake? = nil, roles: [Role] = [],
-                channels: [Channel] = [], members: [Member] = [], unavailable: Bool = false, voiceStates: [VoiceState] = []) {
+                channels: [Channel] = [], members: [Member] = [], unavailable: Bool = false, voiceStates: [VoiceState] = [],
+                presences: [Presence] = []) {
         self.id = id
         self.name = name
         self.icon = icon
@@ -162,6 +193,7 @@ public struct Guild: Decodable, Hashable {
         self.members = members
         self.unavailable = unavailable
         self.voiceStates = voiceStates
+        self.presences = presences
     }
 
     public init(from decoder: Decoder) throws {
@@ -182,6 +214,7 @@ public struct Guild: Decodable, Hashable {
         let guildID = id
         channels = decodedChannels.map { var ch = $0; ch.guildId = guildID; return ch }
         voiceStates = (try? c.decodeIfPresent(LossyArray<VoiceState>.self, forKey: .voiceStates))?.elements ?? []
+        presences = ((try? c.decodeIfPresent(LossyArray<RawPresence>.self, forKey: .presences))?.elements ?? []).map(\.presence)
     }
 }
 
@@ -451,13 +484,16 @@ public struct MessageAck: Decodable {
 public struct GuildMembersChunk: Decodable {
     public let guildId: Snowflake
     public let members: [Member]
+    /// Only when asked for; offline members aren't listed.
+    public let presences: [Presence]
 
-    private enum CodingKeys: String, CodingKey { case guildId, members }
+    private enum CodingKeys: String, CodingKey { case guildId, members, presences }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         guildId = try c.decode(Snowflake.self, forKey: .guildId)
         members = (try? c.decodeIfPresent(LossyArray<Member>.self, forKey: .members))?.elements ?? []
+        presences = ((try? c.decodeIfPresent(LossyArray<RawPresence>.self, forKey: .presences))?.elements ?? []).map(\.presence)
     }
 }
 
@@ -518,9 +554,11 @@ public struct ReadyEvent: Decodable {
     public let readStates: [ReadState]
     /// Our own member object for each guild, in the same order as `guilds`.
     public let mergedMembers: [[Member]]?
+    /// Friends who are online and what they're doing.
+    public let presences: [Presence]
 
     private enum CodingKeys: String, CodingKey {
-        case user, sessionId, resumeGatewayUrl, guilds, privateChannels, readState, mergedMembers, users
+        case user, sessionId, resumeGatewayUrl, guilds, privateChannels, readState, mergedMembers, users, presences
     }
 
     private struct ReadStateContainer: Decodable { let entries: [ReadState] }
@@ -542,6 +580,7 @@ public struct ReadyEvent: Decodable {
         resumeGatewayUrl = try c.decodeIfPresent(String.self, forKey: .resumeGatewayUrl)
         guilds = (try? c.decodeIfPresent(LossyArray<Guild>.self, forKey: .guilds))?.elements ?? []
         mergedMembers = try? c.decodeIfPresent([[Member]].self, forKey: .mergedMembers)
+        presences = ((try? c.decodeIfPresent(LossyArray<RawPresence>.self, forKey: .presences))?.elements ?? []).map(\.presence)
         // Users referenced by ID elsewhere in READY (DM recipients); only needed to fill those in.
         let users = (try? c.decodeIfPresent([User].self, forKey: .users)) ?? []
         let usersByID = Dictionary(users.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })

@@ -17,6 +17,8 @@ public enum GatewayEvent {
     case voiceStateUpdate(VoiceState)
     case voiceServerUpdate(VoiceServerUpdate)
     case guildMembersChunk(GuildMembersChunk)
+    /// Someone's status or activities changed.
+    case presenceUpdate(Presence)
 }
 
 public protocol GatewayClientDelegate: AnyObject {
@@ -144,10 +146,10 @@ public final class GatewayClient: NSObject {
     }
 
     /// Asks for specific members (at most 100), as the official client does to show names it hasn't seen.
-    public func requestMembers(guildID: Snowflake, userIDs: [Snowflake]) {
+    public func requestMembers(guildID: Snowflake, userIDs: [Snowflake], presences: Bool = false) {
         let payload: [String: Any] = [
             "op": Op.requestGuildMembers,
-            "d": ["guild_id": guildID, "user_ids": Array(userIDs.prefix(100)), "presences": false] as [String: Any],
+            "d": ["guild_id": guildID, "user_ids": Array(userIDs.prefix(100)), "presences": presences] as [String: Any],
         ]
         queue.async { self.send(payload) }
     }
@@ -307,6 +309,7 @@ public final class GatewayClient: NSObject {
             case "VOICE_STATE_UPDATE": event = d(VoiceState.self).map { .voiceStateUpdate($0) }
             case "VOICE_SERVER_UPDATE": event = d(VoiceServerUpdate.self).map { .voiceServerUpdate($0) }
             case "GUILD_MEMBERS_CHUNK": event = d(GuildMembersChunk.self).map { .guildMembersChunk($0) }
+            case "PRESENCE_UPDATE": event = d(RawPresence.self).map { .presenceUpdate($0.presence) }
             default: event = nil
             }
         }

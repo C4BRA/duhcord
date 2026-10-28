@@ -12,6 +12,9 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private let session: DiscordSession
     private var store: Store { session.store }
 
+    /// Someone's name or picture was clicked: show their profile card beside `rect` in `view`.
+    var onShowProfile: ((_ userID: Snowflake, _ guildID: Snowflake?, _ rect: NSRect, _ view: NSView) -> Void)?
+
     private let emptyLabel = NSTextField(labelWithString: "")
     private let loadingSpinner = NSProgressIndicator()
     private let scrollView = VerticalScrollView()
@@ -341,7 +344,14 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         let cell = tableView.makeView(withIdentifier: MessageCell.identifier, owner: nil) as? MessageCell ?? MessageCell()
         let cached = layout(for: rows[row])
         cell.configure(cached.layout, header: cached.header)
-        cell.setAccessibilityLabel(spokenText(for: rows[row].message))
+        let message = rows[row].message
+        cell.setAccessibilityLabel(spokenText(for: message))
+        cell.authorNameWidth = row < rows.count && !rows[row].grouped
+            ? ceil((message.author.displayName as NSString).size(withAttributes: [.font: Theme.messageBoldFont]).width) : 0
+        cell.onAuthorClicked = { [weak self, weak cell] rect in
+            guard let self, let cell else { return }
+            self.onShowProfile?(message.author.id, self.store.channel(message.channelId)?.guildId, rect, cell)
+        }
         return cell
     }
 
@@ -383,6 +393,10 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
     private let headerField = NSTextField(labelWithString: "")
     private let avatarView = RemoteImageView()
     private let bodyView = NSTextView()
+    /// The author's picture or name was clicked; the rect is what was clicked, in this cell.
+    var onAuthorClicked: ((NSRect) -> Void)?
+    /// How much of the header line is the author's name, which opens their profile like the picture does.
+    var authorNameWidth: CGFloat = 0
     /// Reused between rows; only as many as the busiest message needed are ever created.
     private var embedTexts: [NSTextView] = []
     private var mediaViews: [MediaView] = []
@@ -455,6 +469,7 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
         }
         needsLayout = true
         needsDisplay = true
+        window?.invalidateCursorRects(for: self)
     }
 
     func cancelMedia() {
@@ -462,9 +477,45 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
         avatarView.cancel()
     }
 
+    // MARK: Author clicks
+
+    private var nameRect: NSRect? {
+        guard let header = current.header, authorNameWidth > 0, !headerField.isHidden else { return nil }
+        return NSRect(x: header.minX, y: header.minY, width: min(authorNameWidth, header.width), height: header.height)
+    }
+
+    private func authorRect(at point: NSPoint) -> NSRect? {
+        if let avatar = current.avatar?.frame, !avatarView.isHidden, avatar.contains(point) { return avatar }
+        if let name = nameRect, name.contains(point) { return name }
+        return nil
+    }
+
+    /// The picture and name take clicks themselves, rather than the image view and label under them.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        if onAuthorClicked != nil, authorRect(at: local) != nil { return self }
+        return super.hitTest(point)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if let rect = authorRect(at: point) {
+            onAuthorClicked?(rect)
+        } else {
+            super.mouseDown(with: event)
+        }
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if let avatar = current.avatar?.frame, !avatarView.isHidden { addCursorRect(avatar, cursor: .pointingHand) }
+        if let name = nameRect { addCursorRect(name, cursor: .pointingHand) }
+    }
+
     override func prepareForReuse() {
         super.prepareForReuse()
         cancelMedia()
+        onAuthorClicked = nil
     }
 
     /// Every link goes through LinkOpener's checks instead of opening directly.

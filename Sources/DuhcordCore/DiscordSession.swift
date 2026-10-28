@@ -65,6 +65,46 @@ public final class DiscordSession: GatewayClientDelegate {
         gateway.requestMembers(guildID: guildID, userIDs: missing)
     }
 
+    /// Asks for someone's status and activities in a server, for their profile. Friends' presences arrive
+    /// on their own; for anyone else, the official client asks the same way when it opens a profile.
+    public func requestPresence(of userID: Snowflake, guildID: Snowflake) {
+        guard userID != store.me?.id else { return }
+        gateway.requestMembers(guildID: guildID, userIDs: [userID], presences: true)
+    }
+
+    /// The DM channel with someone, opened on Discord's side first if there isn't one yet.
+    public func directMessageChannel(with userID: Snowflake, completion: @escaping (Snowflake?) -> Void) {
+        if let existing = store.privateChannels.first(where: { $0.kind == .dm && $0.recipients?.first?.id == userID }) {
+            completion(existing.id)
+            return
+        }
+        Task { @MainActor in
+            do {
+                completion(try await rest.openDM(with: userID).id)
+            } catch {
+                reportIfUnreachable(error)
+                completion(nil)
+            }
+        }
+    }
+
+    /// Sends a direct message, opening the DM first if there isn't one yet (a profile's message field).
+    public func sendDirectMessage(_ content: String, to userID: Snowflake, completion: @escaping (Error?) -> Void) {
+        if let existing = store.privateChannels.first(where: { $0.kind == .dm && $0.recipients?.first?.id == userID }) {
+            send(content, to: existing.id, completion: completion)
+            return
+        }
+        Task { @MainActor in
+            do {
+                let channel = try await rest.openDM(with: userID)
+                send(content, to: channel.id, completion: completion)
+            } catch {
+                reportIfUnreachable(error)
+                completion(error)
+            }
+        }
+    }
+
     /// Reconnects after the app was locked because Discord couldn't be reached.
     public func retry() { gateway.retry() }
 

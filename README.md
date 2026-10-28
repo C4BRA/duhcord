@@ -11,6 +11,7 @@ A small, native Discord client for macOS, written in Swift with AppKit: no Elect
 - **Unread markers, mention badges** (in the sidebar and on the Dock icon), and notifications for DMs and mentions.
 - **Images, GIFs, videos and link previews** shown inline. Spoilers wait for a click, and **Settings → Images** can switch images to click-to-load or off.
 - **Profile pictures and server icons**, loaded at exactly the size shown.
+- **Profiles:** click someone's name or picture in a chat, or their name in a voice channel, for a card with their banner, picture, status, bio, roles, mutual friends and servers, and a box for sending them a quick message. Click the picture on the card for their full profile: what they're doing now, their profile board (favorite games and the like), and lists of mutual friends and servers.
 - **Typing tabs:** when someone types, a tab with their picture rises from behind the message box. It sinks halfway when they stop and leaves a minute later. VoiceOver announces who's typing instead.
 - **Voice channels**, end-to-end encrypted (see [Voice](#voice)).
 - **QR-code login**, the same way the official desktop app logs in (see [Logging in](#logging-in)).
@@ -43,7 +44,7 @@ Voice channels in the channel list show who's in them, with a green ring around 
 - It only decodes the events it uses.
 - It keeps messages for at most 8 channels, 300 each, so memory stays flat. History never loads in the background.
 - Messages are laid out by hand, and only for the rows on screen.
-- Images come from Discord's image proxy at exactly the size drawn and are decoded straight to that size. They load only while on screen and are kept in a small memory cache, never on disk. Link previews come inside messages, so Duhcord never visits linked sites.
+- Images come from Discord's image proxy at exactly the size drawn and are decoded straight to that size. They load only while on screen and are kept in a small memory cache, never on disk. Link previews come inside messages, so Duhcord never visits linked sites, and activity pictures hosted elsewhere (Spotify, YouTube, Twitch) aren't loaded.
 - GIFs animate on hover (or while visible, under **Settings → Animate GIFs**), a few at a time, and only while Duhcord is in front. Videos play on click, one at a time, with a few seconds buffered.
 
 ## Security
@@ -55,7 +56,7 @@ Voice channels in the channel list show who's in them, with a green ring around 
   - CI's `scripts/verify-bundle.sh` fails the build if any of these change, or if a binary isn't arm64-only.
 - **Your token is only in your login Keychain, and only ever sent to Discord.**
 - **One locked-down connection layer** (`SecureSession`) carries all traffic:
-  - It connects only to Discord's hosts (`discord.com`, `*.discord.gg`; images from Discord's proxies and avatar/icon paths; voice from `*.discord.media`).
+  - It connects only to Discord's hosts (`discord.com`, `*.discord.gg`; images from Discord's proxies and its CDN's profile picture, banner, icon and badge paths; voice from `*.discord.media`).
   - Certificates must chain to Apple's built-in roots, so interception tools that install their own root are refused.
   - Redirects are refused.
   - Nothing is cached to disk.

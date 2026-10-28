@@ -128,6 +128,22 @@ final class RemoteImageView: NSImageView {
         set { layer?.cornerRadius = newValue }
     }
 
+    /// Fill the whole frame, cropping the image's edges, instead of fitting inside it (profile banners).
+    var fillsFrame = false {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard fillsFrame, let image, image.size.width > 0, image.size.height > 0 else {
+            super.draw(dirtyRect)
+            return
+        }
+        let scale = max(bounds.width / image.size.width, bounds.height / image.size.height)
+        let size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
+        image.draw(in: NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
+                              width: size.width, height: size.height))
+    }
+
     /// Shows the image at `url` (nil clears it). `onLoad` reports whether an image is showing.
     func setImage(_ url: URL?, pointSize: NSSize, onLoad: ((Bool) -> Void)? = nil) {
         guard url != self.url else {

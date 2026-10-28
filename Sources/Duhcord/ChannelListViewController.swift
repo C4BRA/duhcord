@@ -6,6 +6,8 @@ import DuhcordCore
 final class ChannelListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     var onSelect: ((Snowflake) -> Void)?
     var onJoinVoice: ((Channel) -> Void)?
+    /// Someone in a voice channel was clicked: show their profile card beside `rect` in `view`.
+    var onShowProfile: ((_ userID: Snowflake, _ guildID: Snowflake, _ rect: NSRect, _ view: NSView) -> Void)?
     /// "Voice Connected" in the voice bar was clicked.
     var onShowVoiceDetails: (() -> Void)?
     /// People in voice channels whose names we don't know yet.
@@ -253,7 +255,12 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
     }
 
     @objc private func rowClicked() {
-        join(row: table.clickedRow)
+        let row = table.clickedRow
+        if row >= 0, row < rows.count, case .member(let state, let guildID) = rows[row] {
+            onShowProfile?(state.userId, guildID, table.rect(ofRow: row), table)
+            return
+        }
+        join(row: row)
     }
 
     private func joinSelectedVoiceChannel() {

@@ -17,6 +17,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private let messages: MessagesViewController
     private var switcher: QuickSwitcher?
     private var voiceDetails: VoiceDetailsWindowController?
+    private let profiles: ProfileController
     private let connectionLock = ConnectionLock()
 
     private var place: Place = .directMessages
@@ -34,6 +35,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         guildList = GuildListViewController(store: session.store)
         channelList = ChannelListViewController(store: session.store, voice: voice)
         messages = MessagesViewController(session: session)
+        profiles = ProfileController(session: session)
 
         let split = NSSplitViewController()
         let sidebar = NSSplitViewItem(sidebarWithViewController: guildList)
@@ -75,6 +77,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         channelList.onSelect = { [weak self] channelID in self?.select(channelID: channelID) }
         channelList.onJoinVoice = { [weak self] channel in self?.voice.join(channel) }
         channelList.onShowVoiceDetails = { [weak self] in self?.showVoiceDetails() }
+        channelList.onShowProfile = { [weak self] userID, guildID, rect, view in
+            self?.profiles.showCard(userID: userID, guildID: guildID, relativeTo: rect, of: view)
+        }
+        messages.onShowProfile = { [weak self] userID, guildID, rect, view in
+            self?.profiles.showCard(userID: userID, guildID: guildID, relativeTo: rect, of: view)
+        }
+        profiles.onOpenGuild = { [weak self] guildID in
+            self?.select(place: .guild(guildID))
+            self?.window?.makeKeyAndOrderFront(nil)
+        }
+        profiles.onOpenDM = { [weak self] userID in
+            self?.session.directMessageChannel(with: userID) { channelID in
+                guard let self, let channelID else { return }
+                self.select(place: .directMessages)
+                self.select(channelID: channelID)
+                self.window?.makeKeyAndOrderFront(nil)
+            }
+        }
         channelList.onMissingNames = { [weak session] guildID, userIDs in
             session?.requestMemberNames(guildID: guildID, userIDs: userIDs)
         }
@@ -191,6 +211,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             }
         case .voice(let guildID):
             if place == .guild(guildID) { channelList.voiceMembersChanged() }
+        case .presence(let userID):
+            profiles.presenceChanged(userID)
         case .messages(let channelID):
             messages.messagesChanged(in: channelID)
         case .unread:

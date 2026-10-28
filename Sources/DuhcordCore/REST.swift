@@ -54,6 +54,34 @@ public final class RESTClient {
         _ = try await request("POST", "/channels/\(channelID)/typing")
     }
 
+    /// Someone's profile, as the official client loads it for its profile popout: with mutual servers and
+    /// friends, and their server profile when `guildID` is given.
+    public func profile(of userID: Snowflake, guildID: Snowflake?) async throws -> UserProfile {
+        var query = [
+            URLQueryItem(name: "type", value: "popout"),
+            URLQueryItem(name: "with_mutual_guilds", value: "true"),
+            URLQueryItem(name: "with_mutual_friends", value: "true"),
+            URLQueryItem(name: "with_mutual_friends_count", value: "true"),
+        ]
+        if let guildID { query.append(URLQueryItem(name: "guild_id", value: guildID)) }
+        let data = try await request("GET", "/users/\(userID)/profile", query: query)
+        return try decoder.decode(UserProfile.self, from: data)
+    }
+
+    /// Names and icons for games and apps; unknown IDs are left out.
+    public func applications(_ ids: [Snowflake]) async throws -> [PartialApplication] {
+        guard !ids.isEmpty else { return [] }
+        let query = ids.map { URLQueryItem(name: "application_ids", value: $0) }
+        let data = try await request("GET", "/applications/public", query: query)
+        return try decoder.decode(LossyArray<PartialApplication>.self, from: data).elements
+    }
+
+    /// The DM channel with someone, created if there isn't one yet.
+    public func openDM(with userID: Snowflake) async throws -> Channel {
+        let data = try await request("POST", "/users/@me/channels", body: ["recipients": [userID]])
+        return try decoder.decode(Channel.self, from: data)
+    }
+
     /// Invalidates the token on Discord's side, so a copy of it is useless afterwards.
     public func logout() async throws {
         _ = try await request("POST", "/auth/logout", body: ["provider": NSNull(), "voip_provider": NSNull()])
