@@ -228,10 +228,7 @@ public struct VoiceState: Decodable, Hashable {
     }
 
     /// Server nickname, else the account's display name.
-    public var displayName: String? {
-        if let nick = member?.nick, !nick.isEmpty { return nick }
-        return member?.user?.displayName
-    }
+    public var displayName: String? { member?.displayName }
 }
 
 /// Where to connect for voice in a guild. `endpoint` is nil while Discord picks a server.
@@ -446,6 +443,28 @@ public struct MessageDelete: Decodable {
 public struct MessageAck: Decodable {
     public let channelId: Snowflake
     public let messageId: Snowflake
+}
+
+/// Members we asked for by ID (gateway op 8).
+public struct GuildMembersChunk: Decodable {
+    public let guildId: Snowflake
+    public let members: [Member]
+
+    private enum CodingKeys: String, CodingKey { case guildId, members }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        guildId = try c.decode(Snowflake.self, forKey: .guildId)
+        members = (try? c.decodeIfPresent(LossyArray<Member>.self, forKey: .members))?.elements ?? []
+    }
+}
+
+extension Member {
+    /// Server nickname, else the account's display name.
+    public var displayName: String? {
+        if let nick, !nick.isEmpty { return nick }
+        return user?.displayName
+    }
 }
 
 /// Sent periodically for servers we aren't subscribed to (large servers we haven't opened), so their

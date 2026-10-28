@@ -6,11 +6,21 @@ import DuhcordCore
 final class ChannelListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     var onSelect: ((Snowflake) -> Void)?
     var onJoinVoice: ((Channel) -> Void)?
+    /// People in voice channels whose names we don't know yet.
+    var onMissingNames: ((Snowflake, [Snowflake]) -> Void)?
 
     private enum Row {
         case item(ChannelListItem)
         /// Someone in the voice channel above.
-        case member(VoiceState)
+        case member(VoiceState, guildID: Snowflake)
+
+        /// Identity for telling whether the list's shape changed.
+        var key: String {
+            switch self {
+            case .item(.category(let c)), .item(.channel(let c)), .item(.voiceChannel(let c)): return c.id
+            case .member(let state, _): return (state.channelId ?? "") + "/" + state.userId
+            }
+        }
     }
 
     private let store: Store
@@ -101,15 +111,39 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
             titleLabel.stringValue = store.guilds[id]?.name ?? ""
             items = store.channelList(guildID: id)
         }
-        rows = items.flatMap { item -> [Row] in
-            guard case .voiceChannel(let channel) = item, let guildID = channel.guildId else { return [.item(item)] }
-            let members = store.voiceStates(in: channel.id, guildID: guildID)
-                .sorted { name(of: $0).localizedCaseInsensitiveCompare(name(of: $1)) == .orderedAscending }
-            return [.item(item)] + members.map { .member($0) }
-        }
+        rows = buildRows()
         table.reloadData()
         if let focused = store.focusedChannelID { select(focused) }
         refreshVoiceBar()
+    }
+
+    /// Someone joined, left, muted or got a name in a voice channel of the guild on screen. Updates in place
+    /// without moving the scroll position, and only reloads the table if rows came or went.
+    func voiceMembersChanged() {
+        guard case .guild = place else { return }
+        let oldKeys = rows.map(\.key)
+        rows = buildRows()
+        guard rows.map(\.key) != oldKeys else {
+            refreshVisibleRows()
+            return
+        }
+        table.reloadData()
+        if let focused = store.focusedChannelID { select(focused, scroll: false) }
+    }
+
+    private func buildRows() -> [Row] {
+        var unnamed: [Snowflake: [Snowflake]] = [:]
+        let built = items.flatMap { item -> [Row] in
+            guard case .voiceChannel(let channel) = item, let guildID = channel.guildId else { return [.item(item)] }
+            let members = store.voiceStates(in: channel.id, guildID: guildID)
+            unnamed[guildID, default: []] += members.filter { knownName(of: $0, in: guildID) == nil }.map(\.userId)
+            let sorted = members.sorted {
+                name(of: $0, in: guildID).localizedCaseInsensitiveCompare(name(of: $1, in: guildID)) == .orderedAscending
+            }
+            return [.item(item)] + sorted.map { .member($0, guildID: guildID) }
+        }
+        for (guildID, userIDs) in unnamed where !userIDs.isEmpty { onMissingNames?(guildID, userIDs) }
+        return built
     }
 
     func refreshIndicators() {
@@ -127,12 +161,12 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         refreshVoiceBar()
     }
 
-    func select(_ channelID: Snowflake) {
+    func select(_ channelID: Snowflake, scroll: Bool = true) {
         guard let row = rows.firstIndex(where: { if case .item(.channel(let c)) = $0 { return c.id == channelID } else { return false } })
         else { return }
         suppressSelection = true
         table.selectRowIndexes([row], byExtendingSelection: false)
-        table.scrollRowToVisible(row)
+        if scroll { table.scrollRowToVisible(row) }
         suppressSelection = false
     }
 
@@ -151,12 +185,17 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         let channel = store.channel(channelID)
         let guild = voice.guildID.flatMap { store.guilds[$0] }
         voiceBar.update(status: voice.status, place: [channel?.displayName, guild?.name].compactMap { $0 }.joined(separator: " · "),
-                        muted: voice.muted || voice.deafened, deafened: voice.deafened)
+                        muted: voice.muted || voice.deafened, deafened: voice.deafened,
+                        serverMuted: voice.serverMuted, serverDeafened: voice.serverDeafened)
         voiceBar.isHidden = false
     }
 
-    private func name(of state: VoiceState) -> String {
-        state.displayName ?? store.user(state.userId)?.displayName ?? "Someone"
+    private func knownName(of state: VoiceState, in guildID: Snowflake) -> String? {
+        state.displayName ?? store.memberName(state.userId, in: guildID) ?? store.user(state.userId)?.displayName
+    }
+
+    private func name(of state: VoiceState, in guildID: Snowflake) -> String {
+        knownName(of: state, in: guildID) ?? "Someone"
     }
 
     private func configure(_ cell: ChannelCell, _ row: Row) {
@@ -165,8 +204,8 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
             var inCall = false
             if case .voiceChannel(let c) = item { inCall = c.id == voice.channelID }
             cell.configure(item, store: store, inCall: inCall)
-        case .member(let state):
-            cell.configureMember(name: name(of: state), speaking: voice.speaking.contains(state.userId),
+        case .member(let state, let guildID):
+            cell.configureMember(name: name(of: state, in: guildID), speaking: voice.speaking.contains(state.userId),
                                  muted: state.selfMute || state.mute, deafened: state.selfDeaf || state.deaf)
         }
     }
@@ -322,7 +361,8 @@ private final class VoiceBar: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    func update(status: VoiceController.Status, place: String, muted: Bool, deafened: Bool) {
+    func update(status: VoiceController.Status, place: String, muted: Bool, deafened: Bool, serverMuted: Bool,
+                serverDeafened: Bool) {
         switch status {
         case .idle, .connecting:
             statusLabel.stringValue = "Connecting…"
@@ -335,12 +375,22 @@ private final class VoiceBar: NSView {
                 ? "End-to-end encrypted: only the people in this call can hear it."
                 : "Setting up end-to-end encryption…"
         }
-        placeLabel.stringValue = place
-        muteButton.image = NSImage(systemSymbolName: muted ? "mic.slash.fill" : "mic.fill", accessibilityDescription: muted ? "Unmute" : "Mute")
-        muteButton.contentTintColor = muted ? .systemRed : nil
-        deafenButton.image = NSImage(systemSymbolName: deafened ? "speaker.slash.fill" : "headphones",
+        if serverMuted || serverDeafened {
+            placeLabel.stringValue = serverDeafened ? "Deafened by a moderator" : "Muted by a moderator"
+            placeLabel.textColor = .systemOrange
+        } else {
+            placeLabel.stringValue = place
+            placeLabel.textColor = .secondaryLabelColor
+        }
+        let micOff = muted || serverMuted || serverDeafened
+        let soundOff = deafened || serverDeafened
+        muteButton.image = NSImage(systemSymbolName: micOff ? "mic.slash.fill" : "mic.fill", accessibilityDescription: muted ? "Unmute" : "Mute")
+        muteButton.contentTintColor = micOff ? .systemRed : nil
+        muteButton.toolTip = muted ? "Unmute" : "Mute"
+        deafenButton.image = NSImage(systemSymbolName: soundOff ? "speaker.slash.fill" : "headphones",
                                      accessibilityDescription: deafened ? "Undeafen" : "Deafen")
-        deafenButton.contentTintColor = deafened ? .systemRed : nil
+        deafenButton.contentTintColor = soundOff ? .systemRed : nil
+        deafenButton.toolTip = deafened ? "Undeafen" : "Deafen"
     }
 
     @objc private func mute() { onMute?() }

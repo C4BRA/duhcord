@@ -19,6 +19,9 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
     private(set) var channelID: Snowflake?
     private(set) var muted = false
     private(set) var deafened = false
+    /// Muted or deafened by a moderator. Our microphone or speakers stay off while it lasts.
+    private(set) var serverMuted = false
+    private(set) var serverDeafened = false
     /// Who is talking right now, including us.
     private(set) var speaking: Set<Snowflake> = []
 
@@ -31,6 +34,9 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
     private var connection: NSXPCConnection?
     private var voiceSessionID: String?
     private var server: VoiceServerUpdate?
+    private var joinTimer: Timer?
+    /// Discord doesn't answer a join it won't allow (no permission, channel full), so give up after this.
+    private static let joinTimeout: TimeInterval = 15
 
     init(session: DiscordSession) {
         self.session = session
@@ -40,6 +46,10 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
     }
 
     var isInCall: Bool { status != .idle }
+
+    /// What the helper should do: our own choices plus a moderator's.
+    private var effectiveDeafened: Bool { deafened || serverDeafened }
+    private var effectiveMuted: Bool { muted || serverMuted || effectiveDeafened }
 
     // MARK: - Actions
 
@@ -53,15 +63,27 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
         server = nil
         status = .connecting
         speaking = []
+        serverMuted = false
+        serverDeafened = false
         session.updateVoiceState(guildID: guildID, channelID: channel.id, muted: muted || deafened, deafened: deafened)
+        startJoinTimer()
         onChange?()
     }
 
     func leave() {
         guard isInCall, let guildID else { return }
-        session.updateVoiceState(guildID: guildID, channelID: nil, muted: false, deafened: false)
+        // Only take ourselves out if Discord still has the call on this device; if voice moved to another
+        // device, a leave from here would disconnect that one.
+        if voiceIsOnThisDevice {
+            session.updateVoiceState(guildID: guildID, channelID: nil, muted: false, deafened: false)
+        }
         endHelperCall()
         reset()
+    }
+
+    private var voiceIsOnThisDevice: Bool {
+        guard let guildID, let mine = session.store.myVoiceState(in: guildID) else { return true }
+        return mine.sessionId == nil || mine.sessionId == session.sessionID
     }
 
     func toggleMute() {
@@ -83,17 +105,30 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
     private func applyMuteState() {
         if isInCall, let guildID, let channelID {
             session.updateVoiceState(guildID: guildID, channelID: channelID, muted: muted || deafened, deafened: deafened)
-            helper?.setMuted(muted || deafened, deafened: deafened)
+            updateHelperMuteState()
         }
         onChange?()
+    }
+
+    /// Only a running helper needs telling; a call that hasn't started yet picks the state up when it does.
+    private func updateHelperMuteState() {
+        guard connection != nil else { return }
+        helper?.setMuted(effectiveMuted, deafened: effectiveDeafened)
     }
 
     // MARK: - Main gateway
 
     private func ownVoiceStateChanged(_ state: VoiceState) {
         guard isInCall, state.guildId == guildID else { return }
+        if let sessionID = state.sessionId, let ours = session.sessionID, sessionID != ours {
+            // We joined voice on another device; Discord moved the call there. Don't send a leave from here.
+            endHelperCall()
+            reset()
+            onProblem?("Voice moved to another device.")
+            return
+        }
         guard let newChannel = state.channelId else {
-            // Discord took us out of the channel (a moderator, or another device joined voice).
+            // A moderator took us out of the channel.
             endHelperCall()
             reset()
             onProblem?("You were disconnected from the voice channel.")
@@ -102,12 +137,23 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
         // Moved by a moderator: Discord also sends a new voice server, which restarts the call there.
         channelID = newChannel
         voiceSessionID = state.sessionId
+        if serverMuted != state.mute || serverDeafened != state.deaf {
+            serverMuted = state.mute
+            serverDeafened = state.deaf
+            updateHelperMuteState()
+            onChange?()
+        }
         startHelperCallIfReady()
     }
 
     private func voiceServerChanged(_ update: VoiceServerUpdate) {
         guard isInCall, update.guildId == guildID else { return }
         server = update
+        if update.endpoint == nil, status != .connecting {
+            // Discord is moving the call to another voice server; a new update follows.
+            status = .connecting
+            onChange?()
+        }
         startHelperCallIfReady()
     }
 
@@ -116,15 +162,30 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
         guard let guildID, let channelID, let voiceSessionID, let server, let endpoint = server.endpoint,
               let me = session.store.me else { return }
         self.server = nil
+        joinTimer?.invalidate()
+        joinTimer = nil
         let request = VoiceJoinRequest(guildID: guildID, channelID: channelID, userID: me.id, sessionID: voiceSessionID,
-                                       token: server.token, endpoint: endpoint, muted: muted || deafened, deafened: deafened)
+                                       token: server.token, endpoint: endpoint, muted: effectiveMuted, deafened: effectiveDeafened)
         guard let data = try? JSONEncoder().encode(request) else { return }
         status = .connecting
         onChange?()
         helper?.join(data)
     }
 
+    private func startJoinTimer() {
+        joinTimer?.invalidate()
+        joinTimer = Timer.scheduledTimer(withTimeInterval: Self.joinTimeout, repeats: false) { [weak self] _ in
+            guard let self, self.isInCall, self.connection == nil else { return }
+            self.leave()
+            self.onProblem?("Couldn't join the voice channel. You may not have permission, or it may be full.")
+        }
+    }
+
     private func reset() {
+        joinTimer?.invalidate()
+        joinTimer = nil
+        serverMuted = false
+        serverDeafened = false
         status = .idle
         guildID = nil
         channelID = nil
@@ -168,6 +229,8 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
         // Only the current helper matters; one we let go of on purpose is expected to disappear.
         guard let lostConnection, lostConnection === connection else { return }
         connection = nil
+        // An interrupted connection is still alive; let go of it so it (and us, its exported object) can go.
+        lostConnection.invalidate()
         guard isInCall else { return }
         leave()
         onProblem?("Voice stopped unexpectedly. Join the channel again to reconnect.")

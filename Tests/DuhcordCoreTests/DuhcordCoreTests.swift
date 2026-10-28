@@ -851,4 +851,25 @@ final class VoiceTransportTests: XCTestCase {
         store.apply(.voiceStateUpdate(VoiceState(guildId: "100", channelId: nil, userId: "5")))
         XCTAssertEqual(store.voiceStates(in: "200", guildID: "100").map(\.userId), ["1"])
     }
+
+    func testMemberNamesFromChunksAndVoiceStates() throws {
+        let store = Store()
+        let chunk = """
+        {"guild_id": "100", "members": [
+          {"user": {"id": "5", "username": "five", "global_name": "Five"}, "roles": [], "nick": "Fiver"},
+          {"user": {"id": "6", "username": "six"}, "roles": []},
+          {"broken": true}]}
+        """
+        store.apply(.guildMembersChunk(try makeDiscordDecoder().decode(GuildMembersChunk.self, from: Data(chunk.utf8))))
+        XCTAssertEqual(store.memberName("5", in: "100"), "Fiver")
+        XCTAssertEqual(store.memberName("6", in: "100"), "six")
+        XCTAssertNil(store.memberName("5", in: "999"))
+
+        let voice = """
+        {"guild_id": "100", "channel_id": "200", "user_id": "7", "session_id": "x",
+         "member": {"user": {"id": "7", "username": "seven"}, "roles": []}}
+        """
+        store.apply(.voiceStateUpdate(try makeDiscordDecoder().decode(VoiceState.self, from: Data(voice.utf8))))
+        XCTAssertEqual(store.memberName("7", in: "100"), "seven")
+    }
 }

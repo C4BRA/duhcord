@@ -59,6 +59,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         guildList.onSelect = { [weak self] place in self?.select(place: place) }
         channelList.onSelect = { [weak self] channelID in self?.select(channelID: channelID) }
         channelList.onJoinVoice = { [weak self] channel in self?.voice.join(channel) }
+        channelList.onMissingNames = { [weak session] guildID, userIDs in
+            session?.requestMemberNames(guildID: guildID, userIDs: userIDs)
+        }
         voice.onChange = { [weak self] in self?.channelList.voiceChanged() }
         voice.onProblem = { [weak self] message in self?.showVoiceProblem(message) }
         session.store.onChange = { [weak self] change in self?.handle(change) }
@@ -123,7 +126,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                 channelList.reload()
             }
         case .voice(let guildID):
-            if place == .guild(guildID) { channelList.reload() }
+            if place == .guild(guildID) { channelList.voiceMembersChanged() }
         case .messages(let channelID):
             messages.messagesChanged(in: channelID)
         case .unread:

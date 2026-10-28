@@ -22,6 +22,8 @@ public final class DiscordSession: GatewayClientDelegate {
     public let typing = TypingTracker()
     /// Called on the main thread whenever `typing` changes.
     public var onTypingChange: (() -> Void)?
+    /// This connection's gateway session. Voice states carrying another session ID belong to another device.
+    public private(set) var sessionID: String?
     /// Our own voice state changed (joined, moved, left, muted).
     public var onOwnVoiceState: ((VoiceState) -> Void)?
     /// Discord told us which voice server to use.
@@ -31,6 +33,8 @@ public final class DiscordSession: GatewayClientDelegate {
     private let gateway: GatewayClient
     private var loading: Set<Snowflake> = []
     private var subscribedGuilds: Set<Snowflake> = []
+    /// "guild/user" pairs already asked for, so a name Discord can't give isn't asked for again and again.
+    private var requestedMembers: Set<String> = []
     private var pendingAck: [Snowflake: Snowflake] = [:]
     private var ackTimer: Timer?
 
@@ -52,6 +56,13 @@ public final class DiscordSession: GatewayClientDelegate {
     /// Joins or leaves (nil channel) a voice channel, or changes our mute and deafen.
     public func updateVoiceState(guildID: Snowflake, channelID: Snowflake?, muted: Bool, deafened: Bool) {
         gateway.updateVoiceState(guildID: guildID, channelID: channelID, selfMute: muted, selfDeaf: deafened)
+    }
+
+    /// Fetches names for members we don't know yet. Each one is asked for once per connection.
+    public func requestMemberNames(guildID: Snowflake, userIDs: [Snowflake]) {
+        let missing = userIDs.filter { requestedMembers.insert(guildID + "/" + $0).inserted }
+        guard !missing.isEmpty else { return }
+        gateway.requestMembers(guildID: guildID, userIDs: missing)
     }
 
     /// Reconnects after the app was locked because Discord couldn't be reached.
@@ -172,8 +183,10 @@ public final class DiscordSession: GatewayClientDelegate {
     public func gateway(_ gateway: GatewayClient, didReceive event: GatewayEvent) {
         store.apply(event)
         switch event {
-        case .ready:
+        case .ready(let ready):
+            sessionID = ready.sessionId
             subscribedGuilds = []
+            requestedMembers = []
             delegate?.sessionDidBecomeReady(self)
         case .typingStart(let event):
             guard event.userId != store.me?.id else { break }
