@@ -23,6 +23,13 @@ jobs:
         with:
           # CI never pushes, so don't leave a GitHub token in the checkout.
           persist-credentials: false
+      # libdave and its dependencies for the voice helper, rebuilt only when the pinned versions change.
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: Vendor/libdave
+          key: libdave-${{ runner.os }}-${{ hashFiles('scripts/build-libdave.sh', 'Sources/CDave/include/dave.h') }}
+      - name: Build libdave
+        run: scripts/build-libdave.sh
       - name: Build
         run: swift build
       - name: Test

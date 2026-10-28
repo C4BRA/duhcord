@@ -103,6 +103,9 @@ public struct Channel: Decodable, Hashable {
     /// Channels we can show and type into. Voice, forum and similar channels are left out.
     public var isTextLike: Bool { kind == .text || kind == .announcement }
 
+    /// Voice channels we can join. Stage channels work differently and aren't supported.
+    public var isVoice: Bool { kind == .voice }
+
     public var displayName: String {
         if let name, !name.isEmpty { return name }
         if let recipients, !recipients.isEmpty {
@@ -121,6 +124,7 @@ public struct Member: Decodable, Hashable {
     public let user: User?
     public let userId: Snowflake?
     public let roles: [Snowflake]
+    public let nick: String?
 
     public var resolvedUserId: Snowflake? { user?.id ?? userId }
 }
@@ -134,9 +138,11 @@ public struct Guild: Decodable, Hashable {
     public var channels: [Channel]
     public let members: [Member]
     public let unavailable: Bool
+    /// Who is in which voice channel right now.
+    public let voiceStates: [VoiceState]
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, icon, ownerId, roles, channels, members, unavailable, properties
+        case id, name, icon, ownerId, roles, channels, members, unavailable, properties, voiceStates
     }
 
     private enum PropertyKeys: String, CodingKey {
@@ -144,7 +150,7 @@ public struct Guild: Decodable, Hashable {
     }
 
     public init(id: Snowflake, name: String, icon: String? = nil, ownerId: Snowflake? = nil, roles: [Role] = [],
-                channels: [Channel] = [], members: [Member] = [], unavailable: Bool = false) {
+                channels: [Channel] = [], members: [Member] = [], unavailable: Bool = false, voiceStates: [VoiceState] = []) {
         self.id = id
         self.name = name
         self.icon = icon
@@ -153,6 +159,7 @@ public struct Guild: Decodable, Hashable {
         self.channels = channels
         self.members = members
         self.unavailable = unavailable
+        self.voiceStates = voiceStates
     }
 
     public init(from decoder: Decoder) throws {
@@ -172,7 +179,66 @@ public struct Guild: Decodable, Hashable {
         let decodedChannels = (try? c.decodeIfPresent(LossyArray<Channel>.self, forKey: .channels))?.elements ?? []
         let guildID = id
         channels = decodedChannels.map { var ch = $0; ch.guildId = guildID; return ch }
+        voiceStates = (try? c.decodeIfPresent(LossyArray<VoiceState>.self, forKey: .voiceStates))?.elements ?? []
     }
+}
+
+/// Someone's place in a voice channel. `channelId` is nil when they left.
+public struct VoiceState: Decodable, Hashable {
+    public let guildId: Snowflake?
+    public let channelId: Snowflake?
+    public let userId: Snowflake
+    public let sessionId: String?
+    public let member: Member?
+    public let selfMute: Bool
+    public let selfDeaf: Bool
+    /// Muted or deafened by a moderator.
+    public let mute: Bool
+    public let deaf: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case guildId, channelId, userId, sessionId, member, selfMute, selfDeaf, mute, deaf
+    }
+
+    public init(guildId: Snowflake?, channelId: Snowflake?, userId: Snowflake, sessionId: String? = nil, member: Member? = nil,
+                selfMute: Bool = false, selfDeaf: Bool = false, mute: Bool = false, deaf: Bool = false) {
+        self.guildId = guildId
+        self.channelId = channelId
+        self.userId = userId
+        self.sessionId = sessionId
+        self.member = member
+        self.selfMute = selfMute
+        self.selfDeaf = selfDeaf
+        self.mute = mute
+        self.deaf = deaf
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        guildId = try c.decodeIfPresent(Snowflake.self, forKey: .guildId)
+        channelId = try c.decodeIfPresent(Snowflake.self, forKey: .channelId)
+        userId = try c.decode(Snowflake.self, forKey: .userId)
+        sessionId = try c.decodeIfPresent(String.self, forKey: .sessionId)
+        // A member object we can't read shouldn't hide that the person is in the channel.
+        member = try? c.decodeIfPresent(Member.self, forKey: .member)
+        selfMute = try c.decodeIfPresent(Bool.self, forKey: .selfMute) ?? false
+        selfDeaf = try c.decodeIfPresent(Bool.self, forKey: .selfDeaf) ?? false
+        mute = try c.decodeIfPresent(Bool.self, forKey: .mute) ?? false
+        deaf = try c.decodeIfPresent(Bool.self, forKey: .deaf) ?? false
+    }
+
+    /// Server nickname, else the account's display name.
+    public var displayName: String? {
+        if let nick = member?.nick, !nick.isEmpty { return nick }
+        return member?.user?.displayName
+    }
+}
+
+/// Where to connect for voice in a guild. `endpoint` is nil while Discord picks a server.
+public struct VoiceServerUpdate: Decodable {
+    public let token: String
+    public let guildId: Snowflake?
+    public let endpoint: String?
 }
 
 public struct Attachment: Decodable, Hashable {

@@ -17,6 +17,8 @@ public final class SecureSession: NSObject, URLSessionDelegate, URLSessionTaskDe
     /// Images, GIFs and video streams: Discord's image proxies and file CDN, never the token, no redirects.
     /// One session for all media, so connections to those hosts are shared rather than opened twice.
     public static let media = SecureSession(isAllowed: MediaRequest.isAllowedImageHost(_:), followsRedirects: false)
+    /// The voice helper's connection to Discord's voice servers. Never carries the account token.
+    public static let voice = SecureSession(isAllowed: SecureSession.isVoiceHost(_:), followsRedirects: false)
 
     private let hostPolicy: (String?) -> Bool
     private let followsRedirects: Bool
@@ -42,6 +44,12 @@ public final class SecureSession: NSObject, URLSessionDelegate, URLSessionTaskDe
     public static func isAllowed(host: String?) -> Bool {
         guard let host = host?.lowercased() else { return false }
         return host == "discord.com" || host == "discord.gg" || host.hasSuffix(".discord.gg")
+    }
+
+    /// Discord's voice servers (the endpoint in VOICE_SERVER_UPDATE).
+    public static func isVoiceHost(_ host: String?) -> Bool {
+        guard let host = host?.lowercased() else { return false }
+        return host.hasSuffix(".discord.media")
     }
 
     /// Hosts the updater may connect to: GitHub and the domains it serves release downloads from.

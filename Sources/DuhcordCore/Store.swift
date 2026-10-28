@@ -3,6 +3,7 @@ import Foundation
 public enum ChannelListItem: Equatable {
     case category(Channel)
     case channel(Channel)
+    case voiceChannel(Channel)
 }
 
 /// In-memory state for the session. Main-thread only.
@@ -14,6 +15,8 @@ public final class Store {
         case channels(guildID: Snowflake?)
         case messages(channelID: Snowflake)
         case unread(channelID: Snowflake)
+        /// Someone joined, left or changed mute/deafen in one of the guild's voice channels.
+        case voice(guildID: Snowflake)
     }
 
     public var onChange: ((Change) -> Void)?
@@ -31,6 +34,8 @@ public final class Store {
     private var myRoles: [Snowflake: [Snowflake]] = [:]
     private var readStates: [Snowflake: ReadState] = [:]
     private var messageCache: [Snowflake: [Message]] = [:]
+    /// Voice channel occupants: guild → user → state.
+    private var voiceByGuild: [Snowflake: [Snowflake: VoiceState]] = [:]
     private var cacheOrder: [Snowflake] = []
     private var fullyLoaded: Set<Snowflake> = []
     /// Computed channel lists, since permission checks run on every unread refresh.
@@ -89,15 +94,21 @@ public final class Store {
             return pa != pb ? pa < pb : a.id.snowflakeValue < b.id.snowflakeValue
         }
 
-        let text = visible.filter(\.isTextLike)
-        var items: [ChannelListItem] = text.filter { $0.parentId == nil }.sorted(by: byPosition).map { .channel($0) }
+        // Discord lists text channels above voice channels within each group.
+        func byKindThenPosition(_ a: Channel, _ b: Channel) -> Bool {
+            a.isVoice != b.isVoice ? !a.isVoice : byPosition(a, b)
+        }
+        func item(_ channel: Channel) -> ChannelListItem { channel.isVoice ? .voiceChannel(channel) : .channel(channel) }
+
+        let listed = visible.filter { $0.isTextLike || $0.isVoice }
+        var items: [ChannelListItem] = listed.filter { $0.parentId == nil }.sorted(by: byKindThenPosition).map(item)
 
         let categories = visible.filter { $0.kind == .category }.sorted(by: byPosition)
         for category in categories {
-            let children = text.filter { $0.parentId == category.id }.sorted(by: byPosition)
+            let children = listed.filter { $0.parentId == category.id }.sorted(by: byKindThenPosition)
             guard !children.isEmpty else { continue }
             items.append(.category(category))
-            items.append(contentsOf: children.map { .channel($0) })
+            items.append(contentsOf: children.map(item))
         }
         return items
     }
@@ -145,6 +156,16 @@ public final class Store {
         }
         mentionTotals = totals
         return totals
+    }
+
+    /// Who is in a voice channel.
+    public func voiceStates(in channelID: Snowflake, guildID: Snowflake) -> [VoiceState] {
+        (voiceByGuild[guildID] ?? [:]).values.filter { $0.channelId == channelID }
+    }
+
+    /// Our own voice state in a guild, if we're in one of its voice channels.
+    public func myVoiceState(in guildID: Snowflake) -> VoiceState? {
+        me.flatMap { voiceByGuild[guildID]?[$0.id] }
     }
 
     /// Cached messages for a channel, oldest first, or nil if we haven't loaded it.
@@ -224,6 +245,7 @@ public final class Store {
         case .guildDelete(let id):
             guilds[id] = nil
             channelListCache[id] = nil
+            voiceByGuild[id] = nil
             guildOrder.removeAll { $0 == id }
             channels = channels.filter { $0.value.guildId != id }
             mentionTotals = nil
@@ -279,8 +301,14 @@ public final class Store {
             }
             if let changed { onChange?(.unread(channelID: changed)) }
 
-        case .typingStart:
+        case .typingStart, .voiceServerUpdate:
             break
+
+        case .voiceStateUpdate(let state):
+            // Calls outside guilds (DMs) aren't supported.
+            guard let guildID = state.guildId else { return }
+            voiceByGuild[guildID, default: [:]][state.userId] = state.channelId == nil ? nil : state
+            onChange?(.voice(guildID: guildID))
 
         case .messageAck(let ack):
             // Read on another device.
@@ -300,6 +328,7 @@ public final class Store {
         myRoles = [:]
         readStates = [:]
         messageCache = [:]
+        voiceByGuild = [:]
         cacheOrder = []
         fullyLoaded = []
         channelListCache = [:]
@@ -318,6 +347,8 @@ public final class Store {
             c.guildId = guild.id
             channels[c.id] = c
         }
+        voiceByGuild[guild.id] = Dictionary(guild.voiceStates.filter { $0.channelId != nil }.map { ($0.userId, $0) },
+                                           uniquingKeysWith: { _, latest in latest })
         let selfMember = (mergedMembers ?? []).first { $0.resolvedUserId == me?.id }
             ?? guild.members.first { $0.resolvedUserId == me?.id }
         if let selfMember { myRoles[guild.id] = selfMember.roles }

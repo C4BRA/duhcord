@@ -30,6 +30,13 @@ jobs:
           [[ "$status" == "identical" || "$status" == "behind" ]] || {
             echo "error: $TAG points at a commit that isn't on $DEFAULT_BRANCH ($status)" >&2; exit 1; }
           echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+      # libdave and its dependencies for the voice helper, rebuilt only when the pinned versions change.
+      - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: Vendor/libdave
+          key: libdave-${{ runner.os }}-${{ hashFiles('scripts/build-libdave.sh', 'Sources/CDave/include/dave.h') }}
+      - name: Build libdave
+        run: scripts/build-libdave.sh
       - name: Test
         run: swift test
       - name: Import signing certificate

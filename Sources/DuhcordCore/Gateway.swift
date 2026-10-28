@@ -14,6 +14,8 @@ public enum GatewayEvent {
     case messageAck(MessageAck)
     case channelUnreadUpdate(ChannelUnreadUpdate)
     case typingStart(TypingStart)
+    case voiceStateUpdate(VoiceState)
+    case voiceServerUpdate(VoiceServerUpdate)
 }
 
 public protocol GatewayClientDelegate: AnyObject {
@@ -48,6 +50,7 @@ public final class GatewayClient: NSObject {
         static let invalidSession = 9
         static let hello = 10
         static let heartbeatAck = 11
+        static let voiceStateUpdate = 4
         static let guildSubscriptionsBulk = 37
     }
 
@@ -120,6 +123,21 @@ public final class GatewayClient: NSObject {
     /// listed are changed on Discord's side; threads, activities and member updates stay off.
     public func subscribe(toGuild guildID: Snowflake) {
         let payload = Self.subscriptionPayload(guildID: guildID)
+        queue.async { self.send(payload) }
+    }
+
+    /// Joins, moves between or (with a nil channel) leaves voice channels, and sets our mute and deafen.
+    public func updateVoiceState(guildID: Snowflake, channelID: Snowflake?, selfMute: Bool, selfDeaf: Bool) {
+        let payload: [String: Any] = [
+            "op": Op.voiceStateUpdate,
+            "d": [
+                "guild_id": guildID,
+                "channel_id": channelID.map { $0 as Any } ?? NSNull(),
+                "self_mute": selfMute,
+                "self_deaf": selfDeaf,
+                "self_video": false,
+            ] as [String: Any],
+        ]
         queue.async { self.send(payload) }
     }
 
@@ -275,6 +293,8 @@ public final class GatewayClient: NSObject {
             case "MESSAGE_ACK": event = d(MessageAck.self).map { .messageAck($0) }
             case "TYPING_START": event = d(TypingStart.self).map { .typingStart($0) }
             case "CHANNEL_UNREAD_UPDATE": event = d(ChannelUnreadUpdate.self).map { .channelUnreadUpdate($0) }
+            case "VOICE_STATE_UPDATE": event = d(VoiceState.self).map { .voiceStateUpdate($0) }
+            case "VOICE_SERVER_UPDATE": event = d(VoiceServerUpdate.self).map { .voiceServerUpdate($0) }
             default: event = nil
             }
         }

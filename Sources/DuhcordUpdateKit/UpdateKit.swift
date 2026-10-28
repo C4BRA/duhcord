@@ -11,6 +11,8 @@ public enum UpdateKit {
 
     /// The installer helper's XPC service name; must match its bundle identifier.
     public static let serviceName = "com.duhcord.app.Updater"
+    /// The voice helper, whose limits the installer also checks.
+    public static let voiceServiceName = "com.duhcord.app.Voice"
     public static let appBundleIdentifier = "com.duhcord.app"
 
     /// Updates can only replace Duhcord in /Applications or ~/Applications. Shared by the app (to warn) and the

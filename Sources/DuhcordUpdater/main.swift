@@ -1,4 +1,3 @@
-import CryptoKit
 import DuhcordUpdateKit
 import Foundation
 import OSLog
@@ -14,22 +13,11 @@ private let updaterLog = Logger(subsystem: "com.duhcord.app.Updater", category: 
 // version, the archive checksum and the new app's code signature itself, picks the install location itself,
 // and refuses builds that drop the sandbox or the hardened runtime.
 
-/// The leaf certificate this helper was signed with. Callers and new versions must carry the same one.
-/// nil for ad-hoc builds, which therefore can't update.
+/// Callers and new versions must carry this helper's own certificate. Nil for ad-hoc builds, which therefore can't update.
 private let signingRequirement: String? = {
-    var code: SecCode?
-    var staticCode: SecStaticCode?
-    var info: CFDictionary?
-    guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
-          SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
-          SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: UInt32(kSecCSSigningInformation)), &info) == errSecSuccess,
-          let certificates = (info as? [String: Any])?[kSecCodeInfoCertificates as String] as? [SecCertificate],
-          let leaf = certificates.first else {
-        updaterLog.error("helper has no signing certificate (ad-hoc build?); refusing all requests")
-        return nil
-    }
-    let sha1 = Insecure.SHA1.hash(data: SecCertificateCopyData(leaf) as Data).map { String(format: "%02x", $0) }.joined()
-    return "identifier \"\(UpdateKit.appBundleIdentifier)\" and certificate leaf = H\"\(sha1)\""
+    let requirement = CodeSignature.ownCertificateRequirement
+    if requirement == nil { updaterLog.error("helper has no signing certificate (ad-hoc build?); refusing all requests") }
+    return requirement
 }()
 
 final class Installer: NSObject, DuhcordUpdaterProtocol {
@@ -118,21 +106,42 @@ final class Installer: NSObject, DuhcordUpdaterProtocol {
             throw UpdateError.invalidApp(reason)
         }
 
+        let sandbox = "com.apple.security.app-sandbox", network = "com.apple.security.network.client"
+        try checkLimits(staticCode, entitlements: [sandbox, network], name: "the app")
+        // The helpers inside keep their own limits: this one with none at all, the voice helper sandboxed with
+        // only the network and the microphone.
+        let services = url.appendingPathComponent("Contents/XPCServices")
+        try checkLimits(at: services.appendingPathComponent(UpdateKit.serviceName + ".xpc"), entitlements: [], name: "the installer")
+        let voice = services.appendingPathComponent(UpdateKit.voiceServiceName + ".xpc")
+        if fileManager.fileExists(atPath: voice.path) {
+            try checkLimits(at: voice, entitlements: [sandbox, network, "com.apple.security.device.audio-input"], name: "the voice helper")
+        }
+        guard Self.version(of: url) == expectedVersion else { throw UpdateError.invalidApp("version doesn't match the manifest") }
+    }
+
+    private func checkLimits(at url: URL, entitlements expected: Set<String>, name: String) throws {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess, let staticCode else {
+            throw UpdateError.invalidApp("\(name) is missing or unsigned")
+        }
+        try checkLimits(staticCode, entitlements: expected, name: name)
+    }
+
+    /// The hardened runtime is on and the entitlements are exactly `expected`, all switched on.
+    private func checkLimits(_ code: SecStaticCode, entitlements expected: Set<String>, name: String) throws {
         var info: CFDictionary?
         let infoFlags = SecCSFlags(rawValue: UInt32(kSecCSSigningInformation) | UInt32(kSecCSRequirementInformation))
-        guard SecCodeCopySigningInformation(staticCode, infoFlags, &info) == errSecSuccess,
-              let details = info as? [String: Any] else { throw UpdateError.invalidApp("unreadable signature") }
+        guard SecCodeCopySigningInformation(code, infoFlags, &info) == errSecSuccess,
+              let details = info as? [String: Any] else { throw UpdateError.invalidApp("unreadable signature for \(name)") }
 
         // 0x10000 is kSecCodeSignatureRuntime: the hardened runtime.
         guard let flags = details[kSecCodeInfoFlags as String] as? UInt32, flags & 0x10000 != 0 else {
-            throw UpdateError.invalidApp("hardened runtime is off")
+            throw UpdateError.invalidApp("hardened runtime is off for \(name)")
         }
         let entitlements = details[kSecCodeInfoEntitlementsDict as String] as? [String: Any] ?? [:]
-        let expected: Set<String> = ["com.apple.security.app-sandbox", "com.apple.security.network.client"]
         guard Set(entitlements.keys) == expected, entitlements.values.allSatisfy({ ($0 as? Bool) == true }) else {
-            throw UpdateError.invalidApp("its permissions differ from Duhcord's (sandbox, outgoing network only)")
+            throw UpdateError.invalidApp("the permissions of \(name) differ from Duhcord's")
         }
-        guard Self.version(of: url) == expectedVersion else { throw UpdateError.invalidApp("version doesn't match the manifest") }
     }
 
     private func makeRequirement(_ text: String) throws -> SecRequirement {
@@ -170,27 +179,14 @@ final class Installer: NSObject, DuhcordUpdaterProtocol {
 }
 
 final class ServiceDelegate: NSObject, NSXPCListenerDelegate {
-    /// Checks the caller's code signature against the requirement. Done by hand because
-    /// NSXPCListener.setConnectionCodeSigningRequirement isn't supported on an app's own XPC service listener:
-    /// calling it there aborts the helper at launch.
-    static func callerIsDuhcord(_ connection: NSXPCConnection) -> Bool {
-        guard let signingRequirement else { return false }
-        var requirement: SecRequirement?
-        var code: SecCode?
-        let attributes = [kSecGuestAttributePid: connection.processIdentifier] as CFDictionary
-        guard SecRequirementCreateWithString(signingRequirement as CFString, [], &requirement) == errSecSuccess, let requirement,
-              SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code else { return false }
-        return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
-    }
-
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         // Ad-hoc builds have no certificate to check callers against, so they accept nobody.
-        guard signingRequirement != nil else {
+        guard let signingRequirement else {
             updaterLog.error("rejected connection: helper isn't release-signed")
             return false
         }
         // Only Duhcord itself, signed with the same certificate as this helper, may talk to it.
-        guard Self.callerIsDuhcord(connection) else {
+        guard CodeSignature.caller(connection, satisfies: signingRequirement) else {
             updaterLog.error("rejected connection from pid \(connection.processIdentifier, privacy: .public): not signed as Duhcord")
             return false
         }

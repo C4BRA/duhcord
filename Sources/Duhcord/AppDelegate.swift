@@ -48,6 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
 
     /// Opens the QR login window. With `startCode: false` it only shows a spinner (used while a saved session connects).
     private func showLogin(message: String? = nil, startCode: Bool = true) {
+        mainWindow?.voice.leave()
         mainWindow?.close()
         mainWindow = nil
         let login = loginWindow ?? LoginWindowController { [weak self] token in
@@ -101,6 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
                 return
             }
             guard self.session === session else { return }
+            mainWindow?.voice.leave()
             self.session = nil
             session.disconnect()
             Keychain.deleteToken()

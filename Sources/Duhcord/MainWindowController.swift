@@ -10,6 +10,7 @@ enum Place: Hashable {
 /// The three-column window: guilds, channels, messages.
 final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     let session: DiscordSession
+    let voice: VoiceController
     private let guildList: GuildListViewController
     private let channelList: ChannelListViewController
     private let messages: MessagesViewController
@@ -23,8 +24,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     init(session: DiscordSession) {
         self.session = session
+        voice = VoiceController(session: session)
         guildList = GuildListViewController(store: session.store)
-        channelList = ChannelListViewController(store: session.store)
+        channelList = ChannelListViewController(store: session.store, voice: voice)
         messages = MessagesViewController(session: session)
 
         let split = NSSplitViewController()
@@ -56,6 +58,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
         guildList.onSelect = { [weak self] place in self?.select(place: place) }
         channelList.onSelect = { [weak self] channelID in self?.select(channelID: channelID) }
+        channelList.onJoinVoice = { [weak self] channel in self?.voice.join(channel) }
+        voice.onChange = { [weak self] in self?.channelList.voiceChanged() }
+        voice.onProblem = { [weak self] message in self?.showVoiceProblem(message) }
         session.store.onChange = { [weak self] change in self?.handle(change) }
         NotificationCenter.default.addObserver(self, selector: #selector(updateDockBadge), name: Settings.didChange, object: nil)
     }
@@ -73,6 +78,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func lock(title: String, detail: String, retry: @escaping () -> Void) {
         guard let window else { return }
         switcher = nil
+        // Without the main connection Discord drops the call anyway; don't leave it half-running.
+        voice.leave()
         connectionLock.show(over: window, title: title, detail: detail, onRetry: retry)
     }
 
@@ -92,6 +99,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         banner.isHidden = false
     }
 
+    private func showVoiceProblem(_ message: String) {
+        guard let window, window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.messageText = "Voice"
+        alert.informativeText = message
+        alert.beginSheetModal(for: window)
+    }
+
     func setStatus(_ text: String?) {
         window?.subtitle = text ?? ""
     }
@@ -107,6 +122,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             if guildID == nil || place == .guild(guildID!) {
                 channelList.reload()
             }
+        case .voice(let guildID):
+            if place == .guild(guildID) { channelList.reload() }
         case .messages(let channelID):
             messages.messagesChanged(in: channelID)
         case .unread:

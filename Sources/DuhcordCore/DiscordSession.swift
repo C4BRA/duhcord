@@ -22,6 +22,10 @@ public final class DiscordSession: GatewayClientDelegate {
     public let typing = TypingTracker()
     /// Called on the main thread whenever `typing` changes.
     public var onTypingChange: (() -> Void)?
+    /// Our own voice state changed (joined, moved, left, muted).
+    public var onOwnVoiceState: ((VoiceState) -> Void)?
+    /// Discord told us which voice server to use.
+    public var onVoiceServer: ((VoiceServerUpdate) -> Void)?
     private var lastTypingSent: [Snowflake: Date] = [:]
 
     private let gateway: GatewayClient
@@ -43,6 +47,11 @@ public final class DiscordSession: GatewayClientDelegate {
     public func disconnect() {
         ackTimer?.invalidate()
         gateway.disconnect()
+    }
+
+    /// Joins or leaves (nil channel) a voice channel, or changes our mute and deafen.
+    public func updateVoiceState(guildID: Snowflake, channelID: Snowflake?, muted: Bool, deafened: Bool) {
+        gateway.updateVoiceState(guildID: guildID, channelID: channelID, selfMute: muted, selfDeaf: deafened)
     }
 
     /// Reconnects after the app was locked because Discord couldn't be reached.
@@ -171,6 +180,10 @@ public final class DiscordSession: GatewayClientDelegate {
             let user = event.member?.user ?? store.user(event.userId) ?? User(id: event.userId, username: "Someone")
             let name = event.member?.nick.flatMap { $0.isEmpty ? nil : $0 } ?? user.displayName
             if typing.typing(user, name: name, in: event.channelId, at: Date()) { onTypingChange?() }
+        case .voiceStateUpdate(let state):
+            if state.userId == store.me?.id { onOwnVoiceState?(state) }
+        case .voiceServerUpdate(let update):
+            onVoiceServer?(update)
         case .messageCreate(let message):
             if typing.messageArrived(from: message.author.id, in: message.channelId, at: Date()) { onTypingChange?() }
             if isActive, message.channelId == store.focusedChannelID {

@@ -3,6 +3,7 @@ import CryptoKit
 import Security
 @testable import DuhcordUpdateKit
 @testable import DuhcordCore
+@testable import DuhcordVoiceKit
 
 final class MarkdownTests: XCTestCase {
     func testPlainText() {
@@ -726,5 +727,126 @@ final class ZlibStreamTests: XCTestCase {
 
     func testGatewayAsksForCompression() {
         XCTAssertTrue(ClientIdentity.gatewayURL.absoluteString.hasSuffix("compress=zlib-stream"))
+    }
+}
+
+final class VoiceTransportTests: XCTestCase {
+    private func bytes(_ hex: String) -> [UInt8] {
+        var out: [UInt8] = []
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            out.append(UInt8(hex[index..<next], radix: 16)!)
+            index = next
+        }
+        return out
+    }
+
+    func testHChaCha20MatchesTheSpec() {
+        // draft-irtf-cfrg-xchacha-03, section 2.2.1.
+        let subkey = TransportCipher.hChaCha20(key: Array(0..<32), nonce: bytes("000000090000004a0000000031415927"))
+        XCTAssertEqual(subkey, bytes("82413b4227b27bfed30e42508a877d73a0f9e4d58a74a853c12ec41326d3ecdc"))
+    }
+
+    // Packets sealed independently with Python's `cryptography` (key 0…31, nonce counter 7).
+    private let header = [UInt8]([0x80, 0x78, 0x00, 0x01, 0x00, 0x00, 0x09, 0x60, 0x00, 0x00, 0x04, 0xD2])
+    private let payload = Array("opus frame".utf8)
+
+    func testXChaChaSealsLikeAReferenceImplementation() throws {
+        let cipher = try XCTUnwrap(TransportCipher(mode: .xChaCha20Poly1305, secretKey: Array(0..<32)))
+        let sealed = try cipher.seal(payload, header: header, nonce: 7)
+        XCTAssertEqual(sealed, bytes("d9c7284458a4db2aba26d6bf292ddd387623305fa3e0b30fb6f4") + [0, 0, 0, 7])
+        XCTAssertEqual(cipher.open(sealed[...], header: header[...]), payload)
+    }
+
+    func testAESGCMSealsLikeAReferenceImplementation() throws {
+        let cipher = try XCTUnwrap(TransportCipher(mode: .aes256GCM, secretKey: Array(0..<32)))
+        let sealed = try cipher.seal(payload, header: header, nonce: 7)
+        XCTAssertEqual(sealed, bytes("3097a1f25a4e51ea82b78bbffab65b56ccabcc78e02a4c56bc38") + [0, 0, 0, 7])
+        XCTAssertEqual(cipher.open(sealed[...], header: header[...]), payload)
+    }
+
+    func testTamperedPacketsAreRejected() throws {
+        let cipher = try XCTUnwrap(TransportCipher(mode: .aes256GCM, secretKey: Array(0..<32)))
+        var packet = try RTP.seal(payload, sequence: 1, timestamp: 2400, ssrc: 1234, nonce: 7, cipher: cipher)
+        XCTAssertEqual(RTP.open(packet, cipher: cipher)?.payload, payload)
+        packet[13] ^= 1
+        XCTAssertNil(RTP.open(packet, cipher: cipher))
+    }
+
+    func testRTPRoundTripKeepsHeaderFields() throws {
+        let cipher = try XCTUnwrap(TransportCipher(mode: .xChaCha20Poly1305, secretKey: Array(0..<32)))
+        let packet = try RTP.seal(payload, sequence: 513, timestamp: 96_000, ssrc: 77, nonce: 1, cipher: cipher)
+        let opened = try XCTUnwrap(RTP.open(packet, cipher: cipher))
+        XCTAssertEqual(opened, RTP.Packet(sequence: 513, timestamp: 96_000, ssrc: 77, payload: payload))
+    }
+
+    func testRTCPAndShortPacketsAreIgnored() throws {
+        let cipher = try XCTUnwrap(TransportCipher(mode: .aes256GCM, secretKey: Array(0..<32)))
+        XCTAssertNil(RTP.open([0x81, 0xC9] + [UInt8](repeating: 0, count: 40), cipher: cipher))
+        XCTAssertNil(RTP.open([0x80, 0x78, 0, 1], cipher: cipher))
+    }
+
+    func testRTPWithExtensionStripsTheEncryptedExtensionBody() throws {
+        let cipher = try XCTUnwrap(TransportCipher(mode: .aes256GCM, secretKey: Array(0..<32)))
+        // Header with the extension bit, then the extension preamble (profile 0xBEDE, one 32-bit word).
+        let clear: [UInt8] = [0x90, 0x78, 0, 5, 0, 0, 0, 1, 0, 0, 0, 9, 0xBE, 0xDE, 0x00, 0x01]
+        let body: [UInt8] = [1, 2, 3, 4] + payload
+        let packet = clear + (try cipher.seal(body, header: clear, nonce: 3))
+        XCTAssertEqual(RTP.open(packet, cipher: cipher)?.payload, payload)
+    }
+
+    func testIPDiscovery() {
+        let request = IPDiscovery.request(ssrc: 0x0102_0304)
+        XCTAssertEqual(request.count, 74)
+        XCTAssertEqual(Array(request[0..<8]), [0, 1, 0, 70, 1, 2, 3, 4])
+        var response = [UInt8](repeating: 0, count: 74)
+        response[1] = 2
+        response.replaceSubrange(8..<19, with: Array("203.0.113.5".utf8))
+        response[72] = 0xC3
+        response[73] = 0x50
+        XCTAssertEqual(IPDiscovery.parse(response)?.address, "203.0.113.5")
+        XCTAssertEqual(IPDiscovery.parse(response)?.port, 50_000)
+        XCTAssertNil(IPDiscovery.parse(Array(response.prefix(20))))
+    }
+
+    func testBinaryVoiceMessages() {
+        let message = VoiceBinaryMessage([0x00, 0x2A, 29, 0x01, 0x02, 0xAA, 0xBB])
+        XCTAssertEqual(message?.sequence, 42)
+        XCTAssertEqual(message?.opcode, 29)
+        XCTAssertEqual(message?.transition?.id, 0x0102)
+        XCTAssertEqual(message?.transition?.body, [0xAA, 0xBB])
+        XCTAssertNil(VoiceBinaryMessage([0x00, 0x01]))
+        XCTAssertEqual(VoiceBinaryMessage.outgoing(opcode: 26, payload: [9, 8]), Data([26, 9, 8]))
+    }
+
+    func testModePreference() {
+        XCTAssertEqual(TransportCipher.Mode.preferred(from: ["aead_xchacha20_poly1305_rtpsize", "aead_aes256_gcm_rtpsize"]), .aes256GCM)
+        XCTAssertEqual(TransportCipher.Mode.preferred(from: ["aead_xchacha20_poly1305_rtpsize"]), .xChaCha20Poly1305)
+        XCTAssertNil(TransportCipher.Mode.preferred(from: ["xsalsa20_poly1305"]))
+    }
+
+    func testVoiceHostsAreDiscordsOnly() {
+        XCTAssertTrue(SecureSession.isVoiceHost("sweetwater-12345.discord.media"))
+        XCTAssertFalse(SecureSession.isVoiceHost("discord.media.evil.com"))
+        XCTAssertFalse(SecureSession.isVoiceHost("discord.com"))
+        XCTAssertFalse(SecureSession.isVoiceHost(nil))
+    }
+
+    func testStoreTracksVoiceChannelMembers() throws {
+        let store = Store()
+        let json = """
+        {"user": {"id": "1", "username": "me"}, "session_id": "s", "guilds": [{"id": "100", "name": "g",
+          "channels": [{"id": "200", "type": 2, "name": "Lounge"}],
+          "voice_states": [{"user_id": "5", "channel_id": "200", "self_mute": true}]}],
+         "private_channels": [], "read_state": []}
+        """
+        store.apply(.ready(try makeDiscordDecoder().decode(ReadyEvent.self, from: Data(json.utf8))))
+        XCTAssertEqual(store.voiceStates(in: "200", guildID: "100").map(\.userId), ["5"])
+        XCTAssertTrue(store.voiceStates(in: "200", guildID: "100")[0].selfMute)
+        store.apply(.voiceStateUpdate(VoiceState(guildId: "100", channelId: "200", userId: "1")))
+        XCTAssertEqual(store.myVoiceState(in: "100")?.channelId, "200")
+        store.apply(.voiceStateUpdate(VoiceState(guildId: "100", channelId: nil, userId: "5")))
+        XCTAssertEqual(store.voiceStates(in: "200", guildID: "100").map(\.userId), ["1"])
     }
 }

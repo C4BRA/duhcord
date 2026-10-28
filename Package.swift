@@ -1,22 +1,48 @@
 // swift-tools-version:5.9
+import Foundation
 import PackageDescription
+
+/// The voice helper links Discord's libdave, which scripts/build-libdave.sh builds into Vendor/. Without it
+/// everything else still builds; release bundles require it.
+let libdaveDirectory = Context.packageDirectory + "/Vendor/libdave/lib"
+let hasLibdave = FileManager.default.fileExists(atPath: libdaveDirectory + "/libCDave.a")
+
+var products: [Product] = [
+    .executable(name: "Duhcord", targets: ["Duhcord"]),
+    .executable(name: "DuhcordUpdater", targets: ["DuhcordUpdater"]),
+]
+
+var targets: [Target] = [
+    // Update manifest, signature checks and the installer protocol, shared by the app and the installer.
+    .target(name: "DuhcordUpdateKit"),
+    // Networking, models, state and markdown parsing. Foundation only, no AppKit.
+    .target(name: "DuhcordCore", dependencies: ["DuhcordUpdateKit"]),
+    // The voice helper's protocol, packet format and transport encryption, shared by the app and the helper.
+    .target(name: "DuhcordVoiceKit", dependencies: ["DuhcordUpdateKit"]),
+    // The AppKit user interface.
+    .executableTarget(name: "Duhcord", dependencies: ["DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit"]),
+    // The installer helper (an XPC service inside the app) that swaps in verified updates.
+    .executableTarget(name: "DuhcordUpdater", dependencies: ["DuhcordUpdateKit"]),
+    .testTarget(name: "DuhcordCoreTests", dependencies: ["DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit"]),
+]
+
+if hasLibdave {
+    products.append(.executable(name: "DuhcordVoice", targets: ["DuhcordVoice"]))
+    targets += [
+        // libdave's C API, linked from the static library build-libdave.sh produced.
+        .target(name: "CDave", linkerSettings: [
+            .unsafeFlags(["-L", libdaveDirectory]),
+            .linkedLibrary("CDave"),
+            .linkedLibrary("c++"),
+        ]),
+        // The voice helper: an XPC service that runs calls in its own sandbox, away from the account token.
+        .executableTarget(name: "DuhcordVoice", dependencies: ["CDave", "DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit"]),
+    ]
+}
 
 let package = Package(
     name: "Duhcord",
     platforms: [.macOS(.v13)],
-    products: [
-        .executable(name: "Duhcord", targets: ["Duhcord"]),
-        .executable(name: "DuhcordUpdater", targets: ["DuhcordUpdater"]),
-    ],
-    targets: [
-        // Update manifest, signature checks and the installer protocol, shared by the app and the installer.
-        .target(name: "DuhcordUpdateKit"),
-        // Networking, models, state and markdown parsing. Foundation only, no AppKit.
-        .target(name: "DuhcordCore", dependencies: ["DuhcordUpdateKit"]),
-        // The AppKit user interface.
-        .executableTarget(name: "Duhcord", dependencies: ["DuhcordCore", "DuhcordUpdateKit"]),
-        // The installer helper (an XPC service inside the app) that swaps in verified updates.
-        .executableTarget(name: "DuhcordUpdater", dependencies: ["DuhcordUpdateKit"]),
-        .testTarget(name: "DuhcordCoreTests", dependencies: ["DuhcordCore", "DuhcordUpdateKit"]),
-    ]
+    products: products,
+    targets: targets
 )
