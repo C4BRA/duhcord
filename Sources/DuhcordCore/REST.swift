@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 
 public enum RESTError: Error, LocalizedError {
     case unauthorized
@@ -42,10 +39,10 @@ public final class RESTClient {
     }
 
     @discardableResult
-    public func sendMessage(_ content: String, to channelID: Snowflake, nonce: String) async throws -> Message {
+    /// The sent message comes back over the gateway, so the response isn't decoded.
+    public func sendMessage(_ content: String, to channelID: Snowflake, nonce: String) async throws {
         let body: [String: Any] = ["content": content, "nonce": nonce, "tts": false, "flags": 0]
-        let data = try await request("POST", "/channels/\(channelID)/messages", body: body)
-        return try decoder.decode(Message.self, from: data)
+        _ = try await request("POST", "/channels/\(channelID)/messages", body: body)
     }
 
     /// Marks a channel as read up to `messageID`.

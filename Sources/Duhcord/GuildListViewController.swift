@@ -87,13 +87,8 @@ final class GuildListViewController: NSViewController, NSTableViewDataSource, NS
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !suppressSelection, table.selectedRow >= 0 else { return }
+        // Selection is shown by the tile itself; `select(_:)`, called back from onSelect, refreshes the tiles.
         onSelect?(places[table.selectedRow])
-    }
-
-    /// Selection is shown by the tile itself, so refresh tiles when it changes.
-    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        DispatchQueue.main.async { self.refreshIndicators() }
-        return true
     }
 }
 
@@ -174,7 +169,7 @@ private final class GuildCell: NSTableCellView {
             label.stringValue = "DM"
             toolTip = "Direct Messages"
             unread = store.privateUnreadCount > 0
-            mentions = store.privateChannels.reduce(0) { $0 + store.mentionCount($1.id) }
+            mentions = store.privateMentionCount
         case .guild(let id):
             let name = store.guilds[id]?.name ?? ""
             label.stringValue = Theme.initials(name)

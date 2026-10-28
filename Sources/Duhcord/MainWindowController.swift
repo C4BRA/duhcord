@@ -65,6 +65,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func reload() {
         guildList.reload()
         select(place: place)
+        updateDockBadge()
     }
 
     var isLocked: Bool { connectionLock.isShown }
@@ -87,7 +88,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             return
         }
         banner.show(text, tone: tone, action: action)
-        banner.setActionEnabled(true)
         banner.onAction = handler
         banner.isHidden = false
     }
@@ -95,6 +95,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func setStatus(_ text: String?) {
         window?.subtitle = text ?? ""
     }
+
+    private var indicatorRefreshPending = false
 
     private func handle(_ change: Store.Change) {
         switch change {
@@ -108,9 +110,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         case .messages(let channelID):
             messages.messagesChanged(in: channelID)
         case .unread:
-            channelList.refreshIndicators()
-            guildList.refreshIndicators()
-            updateDockBadge()
+            // A burst of events (a busy channel, READY's backlog) becomes one refresh at the end of this run-loop turn.
+            guard !indicatorRefreshPending else { return }
+            indicatorRefreshPending = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                indicatorRefreshPending = false
+                channelList.refreshIndicators()
+                guildList.refreshIndicators()
+                updateDockBadge()
+            }
         }
     }
 

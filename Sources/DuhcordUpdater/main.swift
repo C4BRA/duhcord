@@ -57,7 +57,7 @@ final class Installer: NSObject, DuhcordUpdaterProtocol {
         let installURL = Bundle.main.bundleURL
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .resolvingSymlinksInPath()
-        guard installURL.pathExtension == "app", Self.isApplicationsFolder(installURL.deletingLastPathComponent()) else {
+        guard installURL.pathExtension == "app", UpdateKit.isApplicationsFolder(installURL.deletingLastPathComponent()) else {
             throw UpdateError.wrongLocation
         }
 
@@ -166,12 +166,6 @@ final class Installer: NSObject, DuhcordUpdaterProtocol {
         guard let data = try? Data(contentsOf: plist),
               let dict = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
         return dict["CFBundleShortVersionString"] as? String
-    }
-
-    static func isApplicationsFolder(_ folder: URL) -> Bool {
-        let path = folder.standardizedFileURL.path
-        guard let home = getpwuid(getuid()).map({ String(cString: $0.pointee.pw_dir) }) else { return path == "/Applications" }
-        return path == "/Applications" || path == home + "/Applications"
     }
 }
 

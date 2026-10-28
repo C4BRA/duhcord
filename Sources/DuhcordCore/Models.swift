@@ -15,7 +15,7 @@ public func makeDiscordDecoder() -> JSONDecoder {
     return decoder
 }
 
-public struct User: Codable, Hashable {
+public struct User: Decodable, Hashable {
     public let id: Snowflake
     public let username: String
     public let globalName: String?
@@ -40,7 +40,7 @@ public struct User: Codable, Hashable {
     }
 }
 
-public struct PermissionOverwrite: Codable, Hashable {
+public struct PermissionOverwrite: Decodable, Hashable {
     public let id: Snowflake
     /// 0 = role, 1 = member.
     public let type: Int
@@ -71,7 +71,7 @@ public enum ChannelKind: Int {
     case media = 16
 }
 
-public struct Channel: Codable, Hashable {
+public struct Channel: Decodable, Hashable {
     public let id: Snowflake
     public let type: Int
     public var guildId: Snowflake?
@@ -112,12 +112,12 @@ public struct Channel: Codable, Hashable {
     }
 }
 
-public struct Role: Codable, Hashable {
+public struct Role: Decodable, Hashable {
     public let id: Snowflake
     public let permissions: String
 }
 
-public struct Member: Codable, Hashable {
+public struct Member: Decodable, Hashable {
     public let user: User?
     public let userId: Snowflake?
     public let roles: [Snowflake]
@@ -175,7 +175,7 @@ public struct Guild: Decodable, Hashable {
     }
 }
 
-public struct Attachment: Codable, Hashable {
+public struct Attachment: Decodable, Hashable {
     public let id: Snowflake
     public let filename: String
     public let url: String
@@ -209,7 +209,7 @@ public struct Attachment: Codable, Hashable {
 }
 
 /// An image, thumbnail or video inside an embed. `proxyUrl` is Discord's re-encoding proxy.
-public struct EmbedMedia: Codable, Hashable {
+public struct EmbedMedia: Decodable, Hashable {
     public let url: String?
     public let proxyUrl: String?
     public let width: Int?
@@ -223,7 +223,7 @@ public struct EmbedMedia: Codable, Hashable {
     }
 }
 
-public struct EmbedField: Codable, Hashable {
+public struct EmbedField: Decodable, Hashable {
     public let name: String
     public let value: String
     public let inline: Bool?
@@ -231,13 +231,13 @@ public struct EmbedField: Codable, Hashable {
 
 /// A link preview or rich card. Discord builds these on its servers and sends them inside the message,
 /// so showing the text costs nothing extra; only images are ever fetched, and only from Discord's proxy.
-public struct Embed: Codable, Hashable {
-    public struct Named: Codable, Hashable {
+public struct Embed: Decodable, Hashable {
+    public struct Named: Decodable, Hashable {
         public let name: String?
         public let url: String?
     }
 
-    public struct Footer: Codable, Hashable {
+    public struct Footer: Decodable, Hashable {
         public let text: String
     }
 
@@ -286,67 +286,58 @@ public struct Embed: Codable, Hashable {
     }
 }
 
-public struct MessageReference: Codable, Hashable {
-    public let messageId: Snowflake?
-    public let channelId: Snowflake?
-}
-
 /// The message a reply points at. Kept shallow so replies can't nest forever.
-public struct ReferencedMessage: Codable, Hashable {
+public struct ReferencedMessage: Decodable, Hashable {
     public let id: Snowflake
     public let author: User
     public let content: String
 }
 
-public struct Message: Codable, Hashable {
+public struct Message: Decodable, Equatable {
     public let id: Snowflake
     public let channelId: Snowflake
-    public let guildId: Snowflake?
     public let author: User
     public var content: String
-    public let timestamp: String
+    /// When it was sent, parsed once at decode time rather than every time rows are grouped.
+    public let date: Date?
     public var editedTimestamp: String?
     public var attachments: [Attachment]
     public var embeds: [Embed]
     public let mentions: [User]?
     public let mentionEveryone: Bool?
     public let referencedMessage: ReferencedMessage?
-    public let nonce: String?
-    public let type: Int?
+    /// Bumped by the store whenever an edit or a late link preview changes the message, so the UI can key its
+    /// layout cache on (id, revision) instead of hashing the content.
+    public internal(set) var revision = 0
 
-    public init(id: Snowflake, channelId: Snowflake, guildId: Snowflake? = nil, author: User, content: String,
-                timestamp: String, editedTimestamp: String? = nil, attachments: [Attachment] = [], embeds: [Embed] = [],
-                mentions: [User]? = nil, mentionEveryone: Bool? = nil, referencedMessage: ReferencedMessage? = nil,
-                nonce: String? = nil, type: Int? = nil) {
+    public init(id: Snowflake, channelId: Snowflake, author: User, content: String, timestamp: String,
+                editedTimestamp: String? = nil, attachments: [Attachment] = [], embeds: [Embed] = [],
+                mentions: [User]? = nil, mentionEveryone: Bool? = nil, referencedMessage: ReferencedMessage? = nil) {
         self.id = id
         self.channelId = channelId
-        self.guildId = guildId
         self.author = author
         self.content = content
-        self.timestamp = timestamp
+        date = DiscordDate.parse(timestamp)
         self.editedTimestamp = editedTimestamp
         self.attachments = attachments
         self.embeds = embeds
         self.mentions = mentions
         self.mentionEveryone = mentionEveryone
         self.referencedMessage = referencedMessage
-        self.nonce = nonce
-        self.type = type
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, channelId, guildId, author, content, timestamp, editedTimestamp, attachments, embeds
-        case mentions, mentionEveryone, referencedMessage, nonce, type
+        case id, channelId, author, content, timestamp, editedTimestamp, attachments, embeds
+        case mentions, mentionEveryone, referencedMessage
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Snowflake.self, forKey: .id)
         channelId = try c.decode(Snowflake.self, forKey: .channelId)
-        guildId = try c.decodeIfPresent(Snowflake.self, forKey: .guildId)
         author = try c.decode(User.self, forKey: .author)
         content = try c.decodeIfPresent(String.self, forKey: .content) ?? ""
-        timestamp = try c.decodeIfPresent(String.self, forKey: .timestamp) ?? ""
+        date = try c.decodeIfPresent(String.self, forKey: .timestamp).flatMap(DiscordDate.parse)
         editedTimestamp = try c.decodeIfPresent(String.self, forKey: .editedTimestamp)
         attachments = (try? c.decodeIfPresent(LossyArray<Attachment>.self, forKey: .attachments))?.elements ?? []
         // A malformed embed is skipped rather than dropping the whole message.
@@ -355,18 +346,7 @@ public struct Message: Codable, Hashable {
         mentionEveryone = try c.decodeIfPresent(Bool.self, forKey: .mentionEveryone)
         // A reply's target can be null (deleted) or fail to decode; neither should drop the message.
         referencedMessage = try? c.decodeIfPresent(ReferencedMessage.self, forKey: .referencedMessage)
-        // Nonces arrive as either strings or numbers.
-        if let s = try? c.decodeIfPresent(String.self, forKey: .nonce) {
-            nonce = s
-        } else if let n = try? c.decodeIfPresent(Int64.self, forKey: .nonce) {
-            nonce = String(n)
-        } else {
-            nonce = nil
-        }
-        type = try c.decodeIfPresent(Int.self, forKey: .type)
     }
-
-    public var date: Date? { DiscordDate.parse(timestamp) }
 }
 
 /// MESSAGE_UPDATE can carry only the changed fields.
@@ -388,7 +368,6 @@ public struct TypingStart: Decodable {
     }
 
     public let channelId: Snowflake
-    public let guildId: Snowflake?
     public let userId: Snowflake
     public let member: Member?
 }
@@ -415,7 +394,7 @@ public struct ChannelUnreadUpdate: Decodable {
     public let channelUnreadUpdates: [Entry]
 }
 
-public struct ReadState: Codable, Hashable {
+public struct ReadState: Decodable, Hashable {
     public let id: Snowflake
     public var lastMessageId: Snowflake?
     public var mentionCount: Int?
@@ -452,8 +431,6 @@ public struct ReadyEvent: Decodable {
     public let readStates: [ReadState]
     /// Our own member object for each guild, in the same order as `guilds`.
     public let mergedMembers: [[Member]]?
-    /// Users referenced by ID elsewhere in READY (for example DM recipients).
-    public let users: [User]?
 
     private enum CodingKeys: String, CodingKey {
         case user, sessionId, resumeGatewayUrl, guilds, privateChannels, readState, mergedMembers, users
@@ -478,9 +455,9 @@ public struct ReadyEvent: Decodable {
         resumeGatewayUrl = try c.decodeIfPresent(String.self, forKey: .resumeGatewayUrl)
         guilds = (try? c.decodeIfPresent(LossyArray<Guild>.self, forKey: .guilds))?.elements ?? []
         mergedMembers = try? c.decodeIfPresent([[Member]].self, forKey: .mergedMembers)
-        users = try? c.decodeIfPresent([User].self, forKey: .users)
-
-        let usersByID = Dictionary((users ?? []).map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        // Users referenced by ID elsewhere in READY (DM recipients); only needed to fill those in.
+        let users = (try? c.decodeIfPresent([User].self, forKey: .users)) ?? []
+        let usersByID = Dictionary(users.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let raw = (try? c.decodeIfPresent(LossyArray<RawPrivateChannel>.self, forKey: .privateChannels))?.elements ?? []
         privateChannels = raw.map { r in
             let recipients = r.recipients ?? (r.recipientIds ?? []).compactMap { usersByID[$0] }

@@ -116,7 +116,6 @@ final class DecodingTests: XCTestCase {
          "referenced_message": null}
         """
         let message = try makeDiscordDecoder().decode(Message.self, from: Data(json.utf8))
-        XCTAssertEqual(message.nonce, "12345")
         XCTAssertNil(message.referencedMessage)
         XCTAssertNotNil(message.date)
     }

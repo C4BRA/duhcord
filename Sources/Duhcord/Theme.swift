@@ -8,10 +8,34 @@ enum Theme {
     static let boldFont = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
     static let smallFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
 
-    static var messageFont: NSFont { NSFont.systemFont(ofSize: Settings.textSize.pointSize) }
-    static var messageBoldFont: NSFont { NSFont.boldSystemFont(ofSize: Settings.textSize.pointSize) }
-    static var messageSmallFont: NSFont { NSFont.systemFont(ofSize: Settings.textSize.pointSize - 2) }
-    static var monoFont: NSFont { NSFont.monospacedSystemFont(ofSize: Settings.textSize.pointSize - 1, weight: .regular) }
+    static var messageFont: NSFont { messageFonts.regular }
+    static var messageBoldFont: NSFont { messageFonts.bold }
+    static var messageSmallFont: NSFont { messageFonts.small }
+    static var monoFont: NSFont { messageFonts.mono }
+
+    /// Message fonts are looked up for every row laid out, so they're made once per text size.
+    private struct MessageFonts {
+        let size: CGFloat
+        let regular, bold, small, mono: NSFont
+
+        init(size: CGFloat) {
+            self.size = size
+            regular = .systemFont(ofSize: size)
+            bold = .boldSystemFont(ofSize: size)
+            small = .systemFont(ofSize: size - 2)
+            mono = .monospacedSystemFont(ofSize: size - 1, weight: .regular)
+        }
+    }
+
+    private static var cachedFonts: MessageFonts?
+
+    private static var messageFonts: MessageFonts {
+        let size = Settings.textSize.pointSize
+        if let cachedFonts, cachedFonts.size == size { return cachedFonts }
+        let fonts = MessageFonts(size: size)
+        cachedFonts = fonts
+        return fonts
+    }
 
     /// Darker strip behind the guild column so it reads as separate from the channel list.
     static let guildColumnBackground = NSColor(name: nil) { appearance in

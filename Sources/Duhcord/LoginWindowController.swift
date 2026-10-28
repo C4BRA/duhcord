@@ -51,8 +51,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
     }
 
     /// Shown while the gateway connects after login, or at launch with a saved session.
-    func setBusy(_ busy: Bool) {
-        guard busy else { return }
+    func setBusy() {
         mode = .busy
         auth.stop()
         qrView.image = nil
@@ -88,7 +87,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
             spinner.startAnimation(nil)
             status.stringValue = "Approve the login on your phone to continue as \(username)."
         case .loggedIn(let token):
-            setBusy(true)
+            setBusy()
             onToken(token)
         case .expired:
             mode = .failed
@@ -110,7 +109,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
     @objc private func retryClicked() {
         if let action = retryAction {
             retryAction = nil
-            setBusy(true)
+            setBusy()
             action()
         } else {
             beginQR()

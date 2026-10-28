@@ -1,8 +1,5 @@
 import DuhcordUpdateKit
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 
 /// Looks for new releases and downloads them. Installing is done by the installer helper, which re-checks
 /// everything this class checks. Main-thread only.
@@ -101,31 +98,14 @@ public final class UpdateChecker {
 
     private func downloadArchive(_ manifest: UpdateManifest) async throws -> URL {
         guard let url = URL(string: manifest.url) else { throw UpdateError.malformed }
-        let (bytes, response) = try await session.bytes(from: url)
+        // URLSession writes straight to disk; the size cap stops a response that runs past the signed size.
+        let (downloaded, response) = try await session.download(from: url, delegate: SizeCap(limit: Int64(manifest.size)))
+        defer { try? FileManager.default.removeItem(at: downloaded) }
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw UpdateError.installFailed("download failed") }
 
         let destination = FileManager.default.temporaryDirectory.appendingPathComponent("Duhcord-\(manifest.version).zip")
         try? FileManager.default.removeItem(at: destination)
-        FileManager.default.createFile(atPath: destination.path, contents: nil)
-        let output = try FileHandle(forWritingTo: destination)
-        defer { try? output.close() }
-
-        var buffer = Data()
-        buffer.reserveCapacity(1 << 16)
-        var total = 0
-        for try await byte in bytes {
-            buffer.append(byte)
-            if buffer.count == 1 << 16 {
-                total += buffer.count
-                guard total <= manifest.size else { throw UpdateError.tooLarge }
-                try output.write(contentsOf: buffer)
-                buffer.removeAll(keepingCapacity: true)
-            }
-        }
-        total += buffer.count
-        guard total <= manifest.size else { throw UpdateError.tooLarge }
-        try output.write(contentsOf: buffer)
-        try output.close()
+        try FileManager.default.moveItem(at: downloaded, to: destination)
 
         let input = try FileHandle(forReadingFrom: destination)
         defer { try? input.close() }
@@ -136,4 +116,19 @@ public final class UpdateChecker {
         }
         return destination
     }
+}
+
+/// Cancels a download once it writes more than the signed size.
+private final class SizeCap: NSObject, URLSessionDownloadDelegate {
+    private let limit: Int64
+
+    init(limit: Int64) { self.limit = limit }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
+                    totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        if totalBytesWritten > limit || totalBytesExpectedToWrite > limit { downloadTask.cancel() }
+    }
+
+    // Required by the protocol; the async download call delivers the file itself.
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {}
 }

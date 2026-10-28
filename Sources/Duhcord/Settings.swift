@@ -1,8 +1,10 @@
 import AppKit
 
-/// User preferences, stored in UserDefaults. Posts `Settings.didChange` whenever one changes.
+/// User preferences, stored in UserDefaults. Posts `Settings.didChange` when one actually changes, with the
+/// changed key under `keyInfo` in userInfo.
 enum Settings {
     static let didChange = Notification.Name("DuhcordSettingsDidChange")
+    static let keyInfo = "key"
 
     enum NotificationLevel: Int, CaseIterable {
         case directMessagesAndMentions = 0
@@ -70,7 +72,7 @@ enum Settings {
 
     private static let defaults = UserDefaults.standard
 
-    private enum Key {
+    enum Key {
         static let notifications = "notifications"
         static let sound = "notificationSound"
         static let dockBadge = "dockBadge"
@@ -146,8 +148,12 @@ enum Settings {
         set { set(newValue, for: Key.checkForUpdates) }
     }
 
-    private static func set(_ value: Any, for key: String) {
+    /// Settings that change how messages are laid out.
+    static let messageLayoutKeys: Set<String> = [Key.textSize, Key.compact, Key.mediaPreviews, Key.animateGIFs]
+
+    private static func set<T: Equatable>(_ value: T, for key: String) {
+        guard defaults.object(forKey: key) as? T != value else { return }
         defaults.set(value, forKey: key)
-        NotificationCenter.default.post(name: didChange, object: nil)
+        NotificationCenter.default.post(name: didChange, object: nil, userInfo: [keyInfo: key])
     }
 }

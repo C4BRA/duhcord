@@ -8,13 +8,10 @@ enum Updates {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
     }
 
-    /// Updates can only replace Duhcord in /Applications or ~/Applications. Run from anywhere else (Downloads,
-    /// a disk image, or the hidden read-only copy macOS makes of quarantined apps) the swap can't happen.
+    /// Run from anywhere else (Downloads, a disk image, or the hidden read-only copy macOS makes of quarantined
+    /// apps) the swap can't happen.
     static var isInApplicationsFolder: Bool {
-        let folder = Bundle.main.bundleURL.resolvingSymlinksInPath().deletingLastPathComponent().standardizedFileURL.path
-        // The sandbox redirects the home folder APIs into the container, so ask the user database instead.
-        let home = getpwuid(getuid()).map { String(cString: $0.pointee.pw_dir) }
-        return folder == "/Applications" || (home.map { folder == $0 + "/Applications" } ?? false)
+        UpdateKit.isApplicationsFolder(Bundle.main.bundleURL.resolvingSymlinksInPath().deletingLastPathComponent())
     }
 
     /// Hands a downloaded, verified archive to the installer helper. The reply is nil on success.
@@ -100,8 +97,6 @@ final class BannerView: NSView {
         button.isHidden = action == nil
         needsDisplay = true
     }
-
-    func setActionEnabled(_ enabled: Bool) { button.isEnabled = enabled }
 
     /// Drawn with dynamic colours so it follows light and dark mode.
     override func draw(_ dirtyRect: NSRect) {

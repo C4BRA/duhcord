@@ -22,7 +22,10 @@ public final class Store {
     public private(set) var guilds: [Snowflake: Guild] = [:]
     public private(set) var guildOrder: [Snowflake] = []
     /// The channel the user is looking at. New messages there don't count as unread.
-    public var focusedChannelID: Snowflake?
+    public var focusedChannelID: Snowflake? {
+        // Reopening a cached channel makes it the most recent, so the cache evicts the least recently viewed.
+        didSet { if let id = focusedChannelID, messageCache[id] != nil { touch(id) } }
+    }
 
     private var channels: [Snowflake: Channel] = [:]
     private var myRoles: [Snowflake: [Snowflake]] = [:]
@@ -32,6 +35,12 @@ public final class Store {
     private var fullyLoaded: Set<Snowflake> = []
     /// Computed channel lists, since permission checks run on every unread refresh.
     private var channelListCache: [Snowflake: [ChannelListItem]] = [:]
+    /// The sorted DM list, rebuilt only when a DM changes rather than on every sidebar refresh.
+    private var privateChannelCache: [Channel]?
+    /// Mention totals per guild (DMs under `directMessagesKey`), counted in one pass and kept until a read state
+    /// or the channel set changes.
+    private var mentionTotals: [Snowflake: Int]?
+    private static let directMessagesKey: Snowflake = "@me"
 
     public let maxCachedChannels: Int
     public let maxMessagesPerChannel: Int
@@ -49,9 +58,12 @@ public final class Store {
 
     /// DMs and group DMs, most recently active first.
     public var privateChannels: [Channel] {
-        channels.values
+        if let cached = privateChannelCache { return cached }
+        let sorted = channels.values
             .filter(\.isPrivate)
             .sorted { ($0.lastMessageId ?? "0").snowflakeValue > ($1.lastMessageId ?? "0").snowflakeValue }
+        privateChannelCache = sorted
+        return sorted
     }
 
     /// The text channels we can see in a guild, grouped under their categories in Discord's order.
@@ -63,9 +75,14 @@ public final class Store {
     }
 
     private func computeChannelList(guildID: Snowflake) -> [ChannelListItem] {
-        guard let guild = guilds[guildID] else { return [] }
-        let all = channels.values.filter { $0.guildId == guildID }
-        let visible = all.filter { canView($0, in: guild) }
+        guard let guild = guilds[guildID], let me else { return [] }
+        let roles = myRoles[guildID] ?? []
+        let base = Permissions.base(in: guild, userID: me.id, memberRoles: roles)
+        let roleSet = Set(roles)
+        let visible = channels.values.filter {
+            $0.guildId == guildID
+                && Permissions.canView(channel: $0, guildID: guildID, base: base, userID: me.id, memberRoles: roleSet)
+        }
 
         func byPosition(_ a: Channel, _ b: Channel) -> Bool {
             let pa = a.position ?? 0, pb = b.position ?? 0
@@ -104,7 +121,11 @@ public final class Store {
     }
 
     public func guildMentionCount(_ guildID: Snowflake) -> Int {
-        channels.values.filter { $0.guildId == guildID }.reduce(0) { $0 + mentionCount($1.id) }
+        computedMentionTotals[guildID] ?? 0
+    }
+
+    public var privateMentionCount: Int {
+        computedMentionTotals[Self.directMessagesKey] ?? 0
     }
 
     public var privateUnreadCount: Int {
@@ -112,7 +133,18 @@ public final class Store {
     }
 
     public var totalMentionCount: Int {
-        readStates.values.reduce(0) { $0 + ($1.mentionCount ?? 0) }
+        computedMentionTotals.values.reduce(0, +)
+    }
+
+    private var computedMentionTotals: [Snowflake: Int] {
+        if let cached = mentionTotals { return cached }
+        var totals: [Snowflake: Int] = [:]
+        for state in readStates.values {
+            guard let count = state.mentionCount, count > 0, let channel = channels[state.id] else { continue }
+            totals[channel.isPrivate ? Self.directMessagesKey : channel.guildId ?? Self.directMessagesKey, default: 0] += count
+        }
+        mentionTotals = totals
+        return totals
     }
 
     /// Cached messages for a channel, oldest first, or nil if we haven't loaded it.
@@ -161,6 +193,7 @@ public final class Store {
         let wasUnread = (current?.lastMessageId ?? "0").snowflakeValue < last.snowflakeValue || (current?.mentionCount ?? 0) > 0
         guard wasUnread else { return nil }
         readStates[channelID] = ReadState(id: channelID, lastMessageId: last, mentionCount: 0)
+        mentionTotals = nil
         onChange?(.unread(channelID: channelID))
         return last
     }
@@ -178,8 +211,7 @@ public final class Store {
             }
             for channel in ready.privateChannels { channels[channel.id] = channel }
             for state in ready.readStates { readStates[state.id] = state }
-            onChange?(.guilds)
-            onChange?(.channels(guildID: nil))
+            // No change events: the session reports READY itself, and the UI reloads everything once then.
 
         case .resumed:
             break
@@ -194,6 +226,7 @@ public final class Store {
             channelListCache[id] = nil
             guildOrder.removeAll { $0 == id }
             channels = channels.filter { $0.value.guildId != id }
+            mentionTotals = nil
             onChange?(.guilds)
 
         case .channelCreate(let channel), .channelUpdate(let channel):
@@ -202,11 +235,15 @@ public final class Store {
             if updated.lastMessageId == nil { updated.lastMessageId = channels[channel.id]?.lastMessageId }
             channels[channel.id] = updated
             if let guildID = channel.guildId { channelListCache[guildID] = nil }
+            if channel.isPrivate { privateChannelCache = nil }
+            mentionTotals = nil
             onChange?(.channels(guildID: channel.guildId))
 
         case .channelDelete(let channel):
             channels[channel.id] = nil
             if let guildID = channel.guildId { channelListCache[guildID] = nil }
+            if channel.isPrivate { privateChannelCache = nil }
+            mentionTotals = nil
             evict(channel.id)
             onChange?(.channels(guildID: channel.guildId))
 
@@ -220,6 +257,7 @@ public final class Store {
             if let edited = update.editedTimestamp { list[i].editedTimestamp = edited }
             if let attachments = update.attachments { list[i].attachments = attachments }
             if let embeds = update.embeds { list[i].embeds = embeds }
+            list[i].revision += 1
             messageCache[update.channelId] = list
             onChange?(.messages(channelID: update.channelId))
 
@@ -236,6 +274,7 @@ public final class Store {
                       last.snowflakeValue > (channel.lastMessageId ?? "0").snowflakeValue else { continue }
                 channel.lastMessageId = last
                 channels[entry.id] = channel
+                if channel.isPrivate { privateChannelCache = nil }
                 changed = entry.id
             }
             if let changed { onChange?(.unread(channelID: changed)) }
@@ -246,6 +285,7 @@ public final class Store {
         case .messageAck(let ack):
             // Read on another device.
             readStates[ack.channelId] = ReadState(id: ack.channelId, lastMessageId: ack.messageId, mentionCount: 0)
+            mentionTotals = nil
             onChange?(.unread(channelID: ack.channelId))
         }
     }
@@ -263,11 +303,14 @@ public final class Store {
         cacheOrder = []
         fullyLoaded = []
         channelListCache = [:]
+        privateChannelCache = nil
+        mentionTotals = nil
     }
 
     private func addGuild(_ guild: Guild, mergedMembers: [Member]?) {
         guard !guild.unavailable else { return }
         channelListCache[guild.id] = nil
+        mentionTotals = nil
         if guilds[guild.id] == nil { guildOrder.append(guild.id) }
         guilds[guild.id] = guild
         for channel in guild.channels {
@@ -278,11 +321,6 @@ public final class Store {
         let selfMember = (mergedMembers ?? []).first { $0.resolvedUserId == me?.id }
             ?? guild.members.first { $0.resolvedUserId == me?.id }
         if let selfMember { myRoles[guild.id] = selfMember.roles }
-    }
-
-    private func canView(_ channel: Channel, in guild: Guild) -> Bool {
-        guard let me else { return false }
-        return Permissions.canView(channel: channel, guild: guild, userID: me.id, memberRoles: myRoles[guild.id] ?? [])
     }
 
     public func mentionsMe(_ message: Message) -> Bool {
@@ -296,6 +334,7 @@ public final class Store {
         if var channel = channels[id] {
             channel.lastMessageId = message.id
             channels[id] = channel
+            if channel.isPrivate { privateChannelCache = nil }
         }
 
         if var list = messageCache[id], !list.contains(where: { $0.id == message.id }) {
@@ -311,12 +350,14 @@ public final class Store {
         if message.author.id == me?.id {
             // Our own messages are read by definition.
             readStates[id] = ReadState(id: id, lastMessageId: message.id, mentionCount: 0)
+            mentionTotals = nil
         } else if id != focusedChannelID {
             var state = readStates[id] ?? ReadState(id: id, lastMessageId: nil, mentionCount: 0)
             if mentionsMe(message) || channels[id]?.isPrivate == true {
                 state.mentionCount = (state.mentionCount ?? 0) + 1
             }
             readStates[id] = state
+            mentionTotals = nil
         }
         onChange?(.unread(channelID: id))
     }

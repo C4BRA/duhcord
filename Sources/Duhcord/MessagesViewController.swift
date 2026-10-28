@@ -22,8 +22,20 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     private var channelID: Snowflake?
     private var rows: [Row] = []
-    /// Layouts by message, row grouping and width. Cleared when the width or a display setting changes.
-    private var layoutCache: [String: MessageLayout] = [:]
+    private struct LayoutKey: Hashable {
+        let id: Snowflake
+        let revision: Int
+        let grouped: Bool
+    }
+
+    private struct CachedLayout {
+        let layout: MessageLayout
+        /// Name and time line, nil for grouped rows. Built once rather than on every scroll.
+        let header: NSAttributedString?
+    }
+
+    /// Layouts for the current width. Cleared when the width, the channel or a display setting changes.
+    private var layoutCache: [LayoutKey: CachedLayout] = [:]
     private var lastWidth: CGFloat = 0
 
     private static let sidePadding: CGFloat = 16
@@ -38,7 +50,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func loadView() {
-        let root = NSView()
+        let root = LiveResizeView()
+        root.onEndLiveResize = { [weak self] in self?.updateAllRowHeights() }
 
         titleLabel.font = .boldSystemFont(ofSize: 14)
         titleLabel.lineBreakMode = .byTruncatingTail
@@ -218,7 +231,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     /// Text size or spacing changed: re-render everything, keeping the scroll position at the bottom if it was.
-    @objc private func settingsChanged() {
+    @objc private func settingsChanged(_ note: Notification) {
+        guard let key = note.userInfo?[Settings.keyInfo] as? String, Settings.messageLayoutKeys.contains(key) else { return }
         input.font = Theme.messageFont
         let wasAtBottom = isAtBottom
         layoutCache = [:]
@@ -231,10 +245,23 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         guard abs(width - lastWidth) > 0.5 else { return }
         lastWidth = width
         layoutCache = [:]
+        if table.inLiveResize {
+            // While dragging, only the rows on screen are re-laid out; the rest catch up when the drag ends.
+            noteHeights(IndexSet(integersIn: Range<Int>(table.rows(in: table.visibleRect)) ?? 0..<0))
+        } else {
+            updateAllRowHeights()
+        }
+    }
+
+    private func updateAllRowHeights() {
+        noteHeights(IndexSet(integersIn: 0..<rows.count))
+    }
+
+    private func noteHeights(_ rows: IndexSet) {
         guard !rows.isEmpty else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
-            table.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<rows.count))
+            table.noteHeightOfRows(withIndexesChanged: rows)
         }
     }
 
@@ -284,11 +311,10 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     // MARK: - Rendering
 
-    private func layout(for row: Row) -> MessageLayout {
+    private func layout(for row: Row) -> CachedLayout {
         let message = row.message
-        // Link previews arrive as updates without an edit time, so the embeds are part of the key.
-        let key = [message.id, message.editedTimestamp ?? "", String(message.content.hashValue), String(message.embeds.hashValue),
-                   String(message.attachments.count), row.grouped ? "g" : "", String(Int(table.bounds.width))].joined(separator: "|")
+        // Edits and late link previews bump the revision.
+        let key = LayoutKey(id: message.id, revision: message.revision, grouped: row.grouped)
         if let cached = layoutCache[key] { return cached }
         let mentioned = Dictionary((message.mentions ?? []).map { ($0.id, $0.displayName) }, uniquingKeysWith: { a, _ in a })
         let resolver = Markdown.Resolver(
@@ -299,20 +325,21 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             message: message, grouped: row.grouped, cellWidth: table.bounds.width, sidePadding: Self.sidePadding,
             headerHeight: Self.headerHeight, topPadding: MessageCell.topPadding(grouped: row.grouped),
             bottomPadding: MessageCell.bottomPadding, resolver: resolver)
-        layoutCache[key] = built
-        return built
+        let cached = CachedLayout(layout: built, header: row.grouped ? nil : Theme.header(for: message))
+        layoutCache[key] = cached
+        return cached
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        layout(for: rows[row]).height
+        layout(for: rows[row]).layout.height
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = tableView.makeView(withIdentifier: MessageCell.identifier, owner: nil) as? MessageCell ?? MessageCell()
-        let r = rows[row]
-        cell.configure(layout(for: r), header: r.grouped ? nil : Theme.header(for: r.message))
+        let cached = layout(for: rows[row])
+        cell.configure(cached.layout, header: cached.header)
         return cell
     }
 
@@ -322,6 +349,16 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
+}
+
+/// Tells the messages view when a window or divider drag ends.
+private final class LiveResizeView: NSView {
+    var onEndLiveResize: (() -> Void)?
+
+    override func viewDidEndLiveResize() {
+        super.viewDidEndLiveResize()
+        onEndLiveResize?()
+    }
 }
 
 /// One message. Laid out by hand from a precomputed MessageLayout: no Auto Layout, so scrolling stays cheap.

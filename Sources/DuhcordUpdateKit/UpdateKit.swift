@@ -13,6 +13,15 @@ public enum UpdateKit {
     public static let serviceName = "com.duhcord.app.Updater"
     public static let appBundleIdentifier = "com.duhcord.app"
 
+    /// Updates can only replace Duhcord in /Applications or ~/Applications. Shared by the app (to warn) and the
+    /// installer helper (to refuse).
+    public static func isApplicationsFolder(_ folder: URL) -> Bool {
+        let path = folder.standardizedFileURL.path
+        // The sandbox redirects the home folder APIs into the container, so ask the user database instead.
+        guard let home = getpwuid(getuid()).map({ String(cString: $0.pointee.pw_dir) }) else { return path == "/Applications" }
+        return path == "/Applications" || path == home + "/Applications"
+    }
+
     public static let manifestURL = URL(string: "https://github.com/C4BRA/duhcord/releases/latest/download/update.json")!
     public static let signatureURL = URL(string: "https://github.com/C4BRA/duhcord/releases/latest/download/update.json.sig")!
     /// Release archives must live under this prefix.

@@ -25,7 +25,7 @@ A very small native Discord client for macOS. It's written in Swift with AppKit,
 - Stickers, soundboard and profile decorations
 - The member list and the Friends tab
 - Voice and video
-- Animated anything
+- Animated profile pictures and server icons (they show as stills)
 
 Link previews, embeds and image attachments are shown inline, built to stay cheap:
 - **Preview text is free.** Discord builds link previews on its own servers and sends them inside the message, so Duhcord never visits the linked sites.

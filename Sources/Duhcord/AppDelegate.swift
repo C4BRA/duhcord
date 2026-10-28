@@ -58,7 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         if startCode {
             login.beginQR(message: message)
         } else {
-            login.setBusy(true)
+            login.setBusy()
         }
         login.showWindow(nil)
     }
@@ -71,7 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         self.session = session
         // Show something while READY arrives, which can take a few seconds.
         if mainWindow == nil, loginWindow == nil { showLogin(startCode: false) }
-        loginWindow?.setBusy(true)
+        loginWindow?.setBusy()
         session.connect()
     }
 
@@ -144,7 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
             main.showWindow(nil)
             updates?.window = main
             if canNotify {
-                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
             }
         }
         mainWindow?.reload()
