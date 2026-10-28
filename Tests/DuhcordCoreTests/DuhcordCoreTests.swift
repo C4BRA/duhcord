@@ -1023,3 +1023,61 @@ final class ProfileTests: XCTestCase {
         XCTAssertEqual(changes, [.presence(userID: "5")])
     }
 }
+
+extension StoreTests {
+    func testUsersAreFoundWithoutScanningMessages() throws {
+        let store = try readyStore()
+        XCTAssertNil(store.user("20"))
+        store.apply(.messageCreate(message("60")))
+        XCTAssertEqual(store.user("20")?.username, "other")
+        let mentioned = User(id: "30", username: "thirty")
+        store.addHistory([message("40", mentions: [mentioned])], for: "101", requestedLimit: 50)
+        XCTAssertEqual(store.user("30")?.username, "thirty")
+        XCTAssertEqual(store.user("10")?.username, "me")
+    }
+
+    func testMarkAllReadCoversEveryUnreadChannel() throws {
+        let store = try readyStore()
+        store.apply(.messageCreate(message("60")))
+        store.apply(.messageCreate(message("61", channel: "103")))
+        let acks = store.markAllRead(guildID: "100")
+        XCTAssertEqual(Set(acks.map(\.channelID)), ["101", "103"])
+        XCTAssertFalse(store.guildHasUnread("100"))
+        XCTAssertTrue(store.markAllRead(guildID: "100").isEmpty)
+    }
+
+    func testNotificationTextUsesNames() throws {
+        let store = try readyStore()
+        let mentioned = User(id: "30", username: "thirty", globalName: "Thirty")
+        let msg = message("60", content: "hey <@30> in <#103>, ||secret|| **bold** <:pog:1>", mentions: [mentioned])
+        XCTAssertEqual(Markdown.plainText(msg.content, resolver: store.resolver(for: msg)),
+                       "hey @Thirty in #inside, (spoiler) bold :pog:")
+        // Roles use the server's names; unknown ones fall back to "@role".
+        let roles = Markdown.Resolver(role: { $0 == "7" ? "Mods" : nil })
+        XCTAssertEqual(Markdown.plainText("<@&7> <@&8>", resolver: roles), "@Mods @role")
+    }
+}
+
+final class ClientIdentityTests: XCTestCase {
+    func testLaunchSignatureClearsTheClientModBits() throws {
+        let uuid = try XCTUnwrap(UUID(uuidString: ClientIdentity.launchSignature)).uuid
+        let bytes = withUnsafeBytes(of: uuid) { Array($0) }
+        let high = bytes[0..<8].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
+        let low = bytes[8..<16].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
+        XCTAssertEqual(high & 0x0080_1010_0810_0800, 0)
+        XCTAssertEqual(low & 0x2081_0040_0100_0800, 0)
+    }
+
+    func testPropertiesLookLikeTheMacApp() {
+        let p = ClientIdentity.properties
+        XCTAssertEqual(p["os"] as? String, "Mac OS X")
+        XCTAssertEqual(p["browser"] as? String, "Discord Client")
+        XCTAssertEqual(p["has_client_mods"] as? Bool, false)
+        XCTAssertGreaterThan(p["client_build_number"] as? Int ?? 0, 0)
+        // The Darwin version ("24.2.0"), with the SDK version as its major number.
+        let os = p["os_version"] as? String ?? ""
+        XCTAssertEqual(os.split(separator: ".").count, 3)
+        XCTAssertEqual(p["os_sdk_version"] as? String, String(os.split(separator: ".")[0]))
+        XCTAssertTrue((p["browser_user_agent"] as? String ?? "").contains("discord/\(ClientIdentity.clientVersion)"))
+    }
+}

@@ -37,12 +37,33 @@ public enum Markdown {
     public struct Resolver {
         public var user: (Snowflake) -> String?
         public var channel: (Snowflake) -> String?
+        public var role: (Snowflake) -> String?
 
         public init(user: @escaping (Snowflake) -> String? = { _ in nil },
-                    channel: @escaping (Snowflake) -> String? = { _ in nil }) {
+                    channel: @escaping (Snowflake) -> String? = { _ in nil },
+                    role: @escaping (Snowflake) -> String? = { _ in nil }) {
             self.user = user
             self.channel = channel
+            self.role = role
         }
+    }
+
+    /// The message as plain text, the way it reads on screen: names instead of `<@id>` tokens, `:name:` for
+    /// custom emoji, dates for timestamps, and no formatting characters. Spoilers stay hidden. For
+    /// notifications, which can't show styling.
+    public static func plainText(_ source: String, resolver: Resolver = Resolver()) -> String {
+        var out = ""
+        var inSpoiler = false
+        for span in parse(source, resolver: resolver) {
+            if span.style.contains(.spoiler) {
+                if !inSpoiler { out += "(spoiler)" }
+                inSpoiler = true
+                continue
+            }
+            inSpoiler = false
+            out += span.text
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// One shared formatter: creating a DateFormatter per timestamp is expensive.
@@ -233,7 +254,7 @@ public enum Markdown {
             func digits(_ s: Substring) -> Bool { !s.isEmpty && s.allSatisfy(\.isNumber) }
 
             if inner.hasPrefix("@&"), digits(inner.dropFirst(2)) {
-                return Span("@role", base.union(.mention))
+                return Span("@" + (resolver.role(String(inner.dropFirst(2))) ?? "role"), base.union(.mention))
             }
             if inner.hasPrefix("@") {
                 let id = inner.dropFirst(inner.hasPrefix("@!") ? 2 : 1)

@@ -3,11 +3,15 @@ import DuhcordCore
 
 /// The middle column: text and voice channels under their categories, or the DM list. Who's in each voice
 /// channel is listed under it, and the voice bar at the bottom shows the call we're in.
-final class ChannelListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class ChannelListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onSelect: ((Snowflake) -> Void)?
     var onJoinVoice: ((Channel) -> Void)?
+    /// "Mark as Read" on a channel.
+    var onMarkRead: ((Snowflake) -> Void)?
+    /// "Message" on someone in a voice channel: open the DM with them.
+    var onMessageUser: ((Snowflake) -> Void)?
     /// Someone in a voice channel was clicked: show their profile card beside `rect` in `view`.
-    var onShowProfile: ((_ userID: Snowflake, _ guildID: Snowflake, _ rect: NSRect, _ view: NSView) -> Void)?
+    var onShowProfile: ((_ userID: Snowflake, _ guildID: Snowflake?, _ rect: NSRect, _ view: NSView) -> Void)?
     /// "Voice Connected" in the voice bar was clicked.
     var onShowVoiceDetails: (() -> Void)?
     /// People in voice channels whose names we don't know yet.
@@ -61,12 +65,16 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         table.style = .sourceList
         table.rowSizeStyle = Theme.listRowSize
         table.setAccessibilityLabel("Channels")
+        let menu = NSMenu()
+        menu.delegate = self
+        table.menu = menu
         table.dataSource = self
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked)
-        // Return joins the selected voice channel, so voice works from the keyboard too.
-        table.onReturn = { [weak self] in self?.joinSelectedVoiceChannel() }
+        // Return joins the selected voice channel or opens the selected person's profile, so both work from the
+        // keyboard too.
+        table.onReturn = { [weak self] in self?.activateSelectedRow() }
 
         let scroll = VerticalScrollView()
         scroll.documentView = table
@@ -246,25 +254,100 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
             var inCall = false
             if case .voiceChannel(let c) = item { inCall = c.id == voice.channelID }
             cell.configure(item, store: store, inCall: inCall, size: table.effectiveRowSizeStyle)
+            cell.setAccessibilityCustomActions(nil)
         case .member(let state, let guildID):
             let user = state.member?.user ?? store.memberUser(state.userId, in: guildID)
                 ?? User(id: state.userId, username: "")
             cell.configureMember(name: name(of: state, in: guildID), user: user, size: table.effectiveRowSizeStyle,
                                  speaking: voice.speaking.contains(state.userId), state: state)
+            // VoiceOver can open the profile too (VO-Command-Space lists the actions).
+            let userID = state.userId
+            cell.setAccessibilityCustomActions([NSAccessibilityCustomAction(name: "Show Profile") { [weak self] in
+                self?.showProfile(userID: userID, guildID: guildID)
+                return true
+            }])
         }
+    }
+
+    // MARK: - Right-click menu
+
+    /// Built for the row that was right-clicked, as in the official client.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let row = table.clickedRow
+        guard row >= 0, row < rows.count else { return }
+        menuItems(for: rows[row]).forEach { menu.addItem($0) }
+    }
+
+    private func menuItems(for row: Row) -> [NSMenuItem] {
+        switch row {
+        case .item(.channel(let c)):
+            var items: [NSMenuItem] = [
+                ActionMenuItem("Mark as Read", enabled: store.isUnread(c.id)) { [weak self] in self?.onMarkRead?(c.id) },
+                ActionMenuItem("Copy Link") { Pasteboard.copy(DiscordLink.channel(c.id, guildID: c.guildId)) },
+            ]
+            if c.kind == .dm, let recipient = c.recipients?.first {
+                items += [.separator(), ActionMenuItem("Show \(recipient.displayName)'s Profile") { [weak self] in
+                    guard let self, let index = self.rows.firstIndex(where: { if case .item(.channel(let x)) = $0 { return x.id == c.id }; return false })
+                    else { return }
+                    self.onShowProfile?(recipient.id, nil, self.table.rect(ofRow: index), self.table)
+                }]
+            }
+            return items
+        case .item(.voiceChannel(let c)):
+            let inCall = voice.channelID == c.id
+            let joinOrLeave: NSMenuItem = inCall
+                ? ActionMenuItem("Disconnect", handler: { [weak self] in self?.voice.leave() })
+                : ActionMenuItem("Join", handler: { [weak self] in self?.onJoinVoice?(c) })
+            return [
+                joinOrLeave,
+                ActionMenuItem("Copy Link") { Pasteboard.copy(DiscordLink.channel(c.id, guildID: c.guildId)) },
+            ]
+        case .member(let state, let guildID):
+            let userID = state.userId
+            let user = store.memberUser(userID, in: guildID)
+            var items: [NSMenuItem] = [
+                ActionMenuItem("Show Profile") { [weak self] in self?.showProfile(userID: userID, guildID: guildID) },
+            ]
+            if userID != store.me?.id {
+                items.append(ActionMenuItem("Message") { [weak self] in self?.onMessageUser?(userID) })
+            }
+            if let username = user?.username, !username.isEmpty {
+                items += [.separator(), ActionMenuItem("Copy Username") { Pasteboard.copy(username) }]
+            }
+            return items
+        case .item(.category):
+            return []
+        }
+    }
+
+    /// Shows someone's profile card beside their row in the list.
+    private func showProfile(userID: Snowflake, guildID: Snowflake) {
+        guard let row = rows.firstIndex(where: { if case .member(let s, let g) = $0 { return s.userId == userID && g == guildID }; return false })
+        else { return }
+        table.scrollRowToVisible(row)
+        onShowProfile?(userID, guildID, table.rect(ofRow: row), table)
     }
 
     @objc private func rowClicked() {
         let row = table.clickedRow
         if row >= 0, row < rows.count, case .member(let state, let guildID) = rows[row] {
             onShowProfile?(state.userId, guildID, table.rect(ofRow: row), table)
+            // A click only opens the card; the selection stays on the channel being read.
+            if let focused = store.focusedChannelID { select(focused, scroll: false) }
             return
         }
         join(row: row)
     }
 
-    private func joinSelectedVoiceChannel() {
-        join(row: table.selectedRow)
+    /// Return on the selected row: joins a voice channel, or opens the profile of someone in one.
+    private func activateSelectedRow() {
+        let row = table.selectedRow
+        if row >= 0, row < rows.count, case .member(let state, let guildID) = rows[row] {
+            showProfile(userID: state.userId, guildID: guildID)
+            return
+        }
+        join(row: row)
     }
 
     /// Joins the voice channel in `row`, then puts the selection back on the text channel being read.
@@ -293,11 +376,11 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         return false
     }
 
-    /// Text channels are selected to read them. Voice channels can be selected with the keyboard (Return joins);
-    /// clicking one joins straight away.
+    /// Text channels are selected to read them. Voice channels and the people in them can be selected with the
+    /// keyboard (Return joins, or opens the profile); clicking one does that straight away.
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
         switch rows[row] {
-        case .item(.channel), .item(.voiceChannel): return true
+        case .item(.channel), .item(.voiceChannel), .member: return true
         default: return false
         }
     }

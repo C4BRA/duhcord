@@ -25,6 +25,25 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     private var channelID: Snowflake?
     private var rows: [Row] = []
+
+    /// Text from the toolbar's search field: only messages containing it are shown (by text or author).
+    /// Searches what's loaded, the way Find works in a document; scrolling up loads older messages to search too.
+    var filterText = "" {
+        didSet {
+            guard filterText != oldValue else { return }
+            rebuildRows()
+            table.reloadData()
+            if filterText.isEmpty || !rows.isEmpty { scrollToBottom() }
+            updateEmptyState()
+            if !filterText.isEmpty {
+                let count = rows.count
+                NSAccessibility.post(element: table, notification: .announcementRequested, userInfo: [
+                    .announcement: count == 0 ? "No matches" : "\(count) matching message\(count == 1 ? "" : "s")",
+                    .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+                ])
+            }
+        }
+    }
     private struct LayoutKey: Hashable {
         let id: Snowflake
         let revision: Int
@@ -160,8 +179,9 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         let clip = scrollView.contentView
         let distanceFromBottom = table.bounds.height - clip.bounds.origin.y
 
+        let oldRows = rows
         rebuildRows()
-        table.reloadData()
+        if !applyChanges(from: oldRows) { table.reloadData() }
         updateEmptyState()
 
         if wasAtBottom || oldFirst == nil {
@@ -174,6 +194,49 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
+    /// Updates only the rows that changed: new messages are inserted, trimmed or deleted ones removed, and edited
+    /// ones redrawn. Rows that didn't change keep their views, so a text selection in them survives a new message.
+    /// Returns false when the change isn't a simple one (the caller reloads everything instead).
+    private func applyChanges(from old: [Row]) -> Bool {
+        let new = rows
+        guard !old.isEmpty, !new.isEmpty else { return false }
+        let oldIDs = old.map(\.message.id), newIDs = new.map(\.message.id)
+        if oldIDs == newIDs {
+            let changed = IndexSet(new.indices.filter {
+                new[$0].message.revision != old[$0].message.revision || new[$0].grouped != old[$0].grouped
+            })
+            redraw(changed)
+            return true
+        }
+        // Rows dropped from the top (the cache keeps a fixed number), or older ones added there; then new ones at the bottom.
+        let droppedFront = oldIDs.firstIndex(of: newIDs[0]) ?? 0
+        let addedFront = newIDs.firstIndex(of: oldIDs[0]) ?? 0
+        guard droppedFront == 0 || addedFront == 0 else { return false }
+        let kept = old.count - droppedFront
+        // Everything still here must be in the same order, with nothing deleted from the middle.
+        guard addedFront + kept <= new.count,
+              Array(oldIDs[droppedFront...]) == Array(newIDs[addedFront..<(addedFront + kept)]) else { return false }
+        let addedBack = new.count - addedFront - kept
+        table.beginUpdates()
+        if droppedFront > 0 { table.removeRows(at: IndexSet(integersIn: 0..<droppedFront), withAnimation: []) }
+        if addedFront > 0 { table.insertRows(at: IndexSet(integersIn: 0..<addedFront), withAnimation: []) }
+        if addedBack > 0 { table.insertRows(at: IndexSet(integersIn: (new.count - addedBack)..<new.count), withAnimation: []) }
+        table.endUpdates()
+        // Kept rows can still have been edited, or have lost the message above them they were grouped with.
+        let changed = IndexSet((0..<kept).compactMap { i -> Int? in
+            let before = old[droppedFront + i], after = new[addedFront + i]
+            return before.message.revision != after.message.revision || before.grouped != after.grouped ? addedFront + i : nil
+        })
+        redraw(changed)
+        return true
+    }
+
+    private func redraw(_ rows: IndexSet) {
+        guard !rows.isEmpty else { return }
+        table.reloadData(forRowIndexes: rows, columnIndexes: [0])
+        noteHeights(rows)
+    }
+
     private func rebuildRows() {
         guard let channelID, let messages = store.messages(in: channelID) else {
             rows = []
@@ -182,7 +245,15 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         var result: [Row] = []
         result.reserveCapacity(messages.count)
         var previous: Message?
+        let query = filterText.trimmingCharacters(in: .whitespaces)
         for message in messages {
+            // While searching, each match stands on its own, with its author line.
+            if !query.isEmpty {
+                let text = message.content + " " + message.author.displayName + " " + message.author.username
+                guard text.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil else { continue }
+                result.append(Row(message: message, grouped: false))
+                continue
+            }
             var grouped = false
             if let previous, previous.author.id == message.author.id, message.referencedMessage == nil,
                let a = previous.date, let b = message.date, b.timeIntervalSince(a) < Self.groupWindow {
@@ -209,7 +280,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         }
         loadingSpinner.stopAnimation(nil)
         if rows.isEmpty {
-            emptyLabel.stringValue = "No Messages Yet"
+            emptyLabel.stringValue = filterText.isEmpty ? "No Messages Yet" : "No Matches in Loaded Messages"
             emptyLabel.isHidden = false
         } else {
             emptyLabel.isHidden = true
@@ -320,11 +391,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         // Edits and late link previews bump the revision.
         let key = LayoutKey(id: message.id, revision: message.revision, grouped: row.grouped)
         if let cached = layoutCache[key] { return cached }
-        let mentioned = Dictionary((message.mentions ?? []).map { ($0.id, $0.displayName) }, uniquingKeysWith: { a, _ in a })
-        let resolver = Markdown.Resolver(
-            user: { [store = self.store] id in mentioned[id] ?? store.user(id)?.displayName },
-            channel: { [store = self.store] id in store.channel(id)?.displayName }
-        )
+        let resolver = store.resolver(for: message)
         let built = MessageLayoutBuilder.build(
             message: message, grouped: row.grouped, cellWidth: table.bounds.width, sidePadding: Self.sidePadding,
             headerHeight: Self.headerHeight, topPadding: MessageCell.topPadding(grouped: row.grouped),
@@ -352,7 +419,34 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             guard let self, let cell else { return }
             self.onShowProfile?(message.author.id, self.store.channel(message.channelId)?.guildId, rect, cell)
         }
+        cell.contextItems = { [weak self, weak cell] in
+            guard let self, let cell else { return [] }
+            return self.menuItems(for: message, in: cell)
+        }
+        // VoiceOver: VO-Command-Space on a message offers the author's profile.
+        cell.setAccessibilityCustomActions([NSAccessibilityCustomAction(name: "Show \(message.author.displayName)'s Profile") {
+            [weak cell] in
+            guard let cell else { return false }
+            cell.onAuthorClicked?(cell.authorAnchor)
+            return true
+        }])
         return cell
+    }
+
+    /// The right-click menu for a message, as in the official client: copy it, link to it, see who wrote it.
+    private func menuItems(for message: Message, in cell: MessageCell) -> [NSMenuItem] {
+        let guildID = store.channel(message.channelId)?.guildId
+        return [
+            ActionMenuItem("Copy Text", enabled: !message.content.isEmpty) { Pasteboard.copy(message.content) },
+            ActionMenuItem("Copy Message Link") {
+                Pasteboard.copy(DiscordLink.message(message.id, channelID: message.channelId, guildID: guildID))
+            },
+            .separator(),
+            ActionMenuItem("Show \(message.author.displayName)'s Profile") { [weak cell] in
+                guard let cell else { return }
+                cell.onAuthorClicked?(cell.authorAnchor)
+            },
+        ]
     }
 
     /// What VoiceOver reads for a message: who, when, and what.
@@ -395,6 +489,8 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
     private let bodyView = NSTextView()
     /// The author's picture or name was clicked; the rect is what was clicked, in this cell.
     var onAuthorClicked: ((NSRect) -> Void)?
+    /// The message's own items for the right-click menu.
+    var contextItems: (() -> [NSMenuItem])?
     /// How much of the header line is the author's name, which opens their profile like the picture does.
     var authorNameWidth: CGFloat = 0
     /// Reused between rows; only as many as the busiest message needed are ever created.
@@ -479,6 +575,11 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
 
     // MARK: Author clicks
 
+    /// Where a profile card opened for the author points: their picture, or the start of a grouped message.
+    var authorAnchor: NSRect {
+        current.avatar?.frame ?? NSRect(x: 0, y: 0, width: MessageLayoutBuilder.avatarColumn, height: min(bounds.height, 24))
+    }
+
     private var nameRect: NSRect? {
         guard let header = current.header, authorNameWidth > 0, !headerField.isHidden else { return nil }
         return NSRect(x: header.minX, y: header.minY, width: min(authorNameWidth, header.width), height: header.height)
@@ -516,6 +617,23 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
         super.prepareForReuse()
         cancelMedia()
         onAuthorClicked = nil
+        contextItems = nil
+    }
+
+    /// Right-click anywhere on the message.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let items = contextItems?(), !items.isEmpty else { return super.menu(for: event) }
+        let menu = NSMenu()
+        items.forEach { menu.addItem($0) }
+        return menu
+    }
+
+    /// Right-click on the text: the usual text items (Copy, Look Up, Services), then the message's own.
+    func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
+        guard let items = contextItems?(), !items.isEmpty else { return menu }
+        menu.addItem(.separator())
+        items.forEach { menu.addItem($0) }
+        return menu
     }
 
     /// Every link goes through LinkOpener's checks instead of opening directly.

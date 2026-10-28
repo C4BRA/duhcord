@@ -28,7 +28,7 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
     /// Status, mute or speaking changed.
     var onChange: (() -> Void)?
     /// Something the user should know about, such as a call that ended on its own.
-    var onProblem: ((String) -> Void)?
+    var onProblem: ((_ title: String, _ detail: String) -> Void)?
     /// New connection details, about once a second while `statsWanted` is on.
     var onStats: ((VoiceStats) -> Void)?
     private(set) var latestStats: VoiceStats?
@@ -135,14 +135,14 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
             // We joined voice on another device; Discord moved the call there. Don't send a leave from here.
             endHelperCall()
             reset()
-            onProblem?("Voice moved to another device.")
+            onProblem?("Voice moved to another device", "You joined a voice channel on another device, so the call continues there.")
             return
         }
         guard let newChannel = state.channelId else {
             // A moderator took us out of the channel.
             endHelperCall()
             reset()
-            onProblem?("You were disconnected from the voice channel.")
+            onProblem?("You were disconnected from voice", "A moderator removed you from the voice channel.")
             return
         }
         // Moved by a moderator: Discord also sends a new voice server, which restarts the call there.
@@ -189,7 +189,7 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
         joinTimer = Timer.scheduledTimer(withTimeInterval: Self.joinTimeout, repeats: false) { [weak self] _ in
             guard let self, self.isInCall, self.connection == nil else { return }
             self.leave()
-            self.onProblem?("Couldn't join the voice channel. You may not have permission, or it may be full.")
+            self.onProblem?("Couldn't join the voice channel", "You may not have permission to join it, or it may be full.")
         }
     }
 
@@ -246,7 +246,7 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
         lostConnection.invalidate()
         guard isInCall else { return }
         leave()
-        onProblem?("Voice stopped unexpectedly. Join the channel again to reconnect.")
+        onProblem?("Voice stopped unexpectedly", "Join the channel again to reconnect.")
     }
 
     /// From the helper, on an XPC thread.
@@ -269,13 +269,13 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
             onStats?(stats)
             return
         case .microphoneDenied:
-            onProblem?("Duhcord can't use the microphone, so others can't hear you. "
+            onProblem?("Duhcord can't use the microphone", "Others in the call can't hear you. "
                        + "Allow it in System Settings → Privacy & Security → Microphone, then rejoin the channel.")
         case .ended(let reason):
             connection?.invalidate()
             connection = nil
             leave()
-            if let reason { onProblem?(reason) }
+            if let reason { onProblem?("The call ended", reason) }
             return
         }
         onChange?()

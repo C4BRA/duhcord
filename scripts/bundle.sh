@@ -14,6 +14,18 @@ XPC="$APP/Contents/XPCServices/com.duhcord.app.Updater.xpc"
 VOICE="$APP/Contents/XPCServices/com.duhcord.app.Voice.xpc"
 MIC_REASON="Duhcord uses the microphone only while you're in a voice channel and unmuted."
 
+# Discord's current build number and desktop version, so Duhcord identifies like the official app (see
+# ClientIdentity). If Discord can't be reached, the app falls back to the defaults compiled into it.
+DISCORD_BUILD=""
+DISCORD_CLIENT=""
+if info="$(scripts/discord-build-info.sh)"; then
+    DISCORD_BUILD="$(sed -n 1p <<<"$info")"
+    DISCORD_CLIENT="$(sed -n 2p <<<"$info")"
+    echo "Discord build $DISCORD_BUILD, desktop $DISCORD_CLIENT"
+else
+    echo "warning: couldn't read Discord's current build number; using the defaults in ClientIdentity" >&2
+fi
+
 # The voice helper links libdave; build it first (skipped when the pinned version is already built).
 scripts/build-libdave.sh
 
@@ -94,6 +106,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>NSHighResolutionCapable</key><true/>
     <key>NSMicrophoneUsageDescription</key><string>$MIC_REASON</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>DuhcordDiscordBuildNumber</key><string>$DISCORD_BUILD</string>
+    <key>DuhcordDiscordClientVersion</key><string>$DISCORD_CLIENT</string>
 </dict>
 </plist>
 PLIST

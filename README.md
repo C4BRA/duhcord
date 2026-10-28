@@ -8,7 +8,9 @@ A small, native Discord client for macOS, written in Swift with AppKit: no Elect
 
 - **A Mac-style window**, laid out like Mail: a server sidebar, the channel list, and messages, under a unified toolbar showing the channel's name and topic. It uses system fonts, colours and controls, so dark mode, accent colours and accessibility settings just work.
 - **Messages:** reading and sending, history loaded as you scroll up, and Markdown (bold, italic, underline, strikethrough, code, quotes, spoilers, links, mentions, timestamps).
-- **Unread markers, mention badges** (in the sidebar and on the Dock icon), and notifications for DMs and mentions.
+- **Unread markers, mention badges** (in the sidebar and on the Dock icon), and notifications for DMs and mentions. Click a notification to open its conversation.
+- **Right-click menus** on messages (Copy Text, Copy Message Link, the author's profile), channels and servers (Mark as Read, Copy Link), and people in voice channels (Show Profile, Message).
+- **Search** (⌘F, in the toolbar) shows only the loaded messages in the conversation that match.
 - **Images, GIFs, videos and link previews** shown inline. Spoilers wait for a click, and **Settings → Images** can switch images to click-to-load or off.
 - **Profile pictures and server icons**, loaded at exactly the size shown.
 - **Profiles:** click someone's name or picture in a chat, or their name in a voice channel, for a card with their banner, picture, status, bio, roles, mutual friends and servers, and a box for sending them a quick message. Click the picture on the card for their full profile: what they're doing now, their profile board (favorite games and the like), and lists of mutual friends and servers.
@@ -19,10 +21,11 @@ A small, native Discord client for macOS, written in Swift with AppKit: no Elect
 | Keys | Action |
 |------|--------|
 | ⌘K | Jump to a channel or DM |
+| ⌘F | Search the conversation |
 | ⌥↑ / ⌥↓ | Previous / next channel |
 | ⌥⇧↓ | Next unread channel |
 | ⇧⌘M / ⇧⌘D | Mute / deafen in a call |
-| Return | Join the selected voice channel |
+| Return | Join the selected voice channel, or open the selected person's profile |
 | ⌃⌘S | Show or hide the sidebar |
 | ⇧↩ or ⌥↩ | New line in a message |
 
@@ -102,6 +105,8 @@ scripts/build-libdave.sh # build libdave for the voice helper (bundle.sh runs it
 scripts/bundle.sh        # release build: build/Duhcord.app
 open build/Duhcord.app
 ```
+
+`bundle.sh` also looks up Discord's current build number and desktop version (`scripts/discord-build-info.sh`), so Duhcord describes itself to Discord the way the official Mac app does. Without network access it falls back to the values built into `ClientIdentity`.
 
 CI builds and tests every push and uploads a ready-made `Duhcord.zip`.
 

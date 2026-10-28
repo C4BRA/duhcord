@@ -43,6 +43,10 @@ public final class Store {
     /// Status and activities for everyone we've been told is online. Offline people are dropped, so this only
     /// grows with the number of people online at once.
     private var presences: [Snowflake: Presence] = [:]
+    /// Everyone we've seen (message authors, mentions, DM recipients, members), newest copy wins, so looking
+    /// someone up is one dictionary read instead of a search through every cached message.
+    private var users: [Snowflake: User] = [:]
+    private static let maxRememberedUsers = 20_000
     private var cacheOrder: [Snowflake] = []
     private var fullyLoaded: Set<Snowflake> = []
     /// Computed channel lists, since permission checks run on every unread refresh.
@@ -200,13 +204,22 @@ public final class Store {
 
     public func user(_ id: Snowflake) -> User? {
         if me?.id == id { return me }
-        for list in messageCache.values {
-            if let u = list.last(where: { $0.author.id == id })?.author { return u }
+        return users[id]
+    }
+
+    private func remember(_ user: User) {
+        if users.count >= Self.maxRememberedUsers, users[user.id] == nil {
+            // Keeps memory flat in a very long session: start over from what's still cached.
+            users = [:]
+            for list in messageCache.values { list.forEach(rememberPeople) }
+            for c in channels.values where c.isPrivate { c.recipients?.forEach { users[$0.id] = $0 } }
         }
-        for c in channels.values where c.isPrivate {
-            if let u = c.recipients?.first(where: { $0.id == id }) { return u }
-        }
-        return nil
+        users[user.id] = user
+    }
+
+    private func rememberPeople(in message: Message) {
+        users[message.author.id] = message.author
+        message.mentions?.forEach { users[$0.id] = $0 }
     }
 
     /// Whether a new message deserves a desktop notification.
@@ -224,6 +237,10 @@ public final class Store {
         var existing = messageCache[channelID] ?? []
         let known = Set(existing.map(\.id))
         existing = page.filter { !known.contains($0.id) } + existing
+        for message in page {
+            remember(message.author)
+            message.mentions?.forEach(remember)
+        }
         existing.sort { $0.id.snowflakeValue < $1.id.snowflakeValue }
         messageCache[channelID] = existing
         if newestFirst.count < requestedLimit { fullyLoaded.insert(channelID) }
@@ -243,6 +260,17 @@ public final class Store {
         return last
     }
 
+    /// Marks every unread channel in a server (or, with nil, every DM) read. Returns what to acknowledge.
+    public func markAllRead(guildID: Snowflake?) -> [(channelID: Snowflake, messageID: Snowflake)] {
+        let ids: [Snowflake]
+        if let guildID {
+            ids = channelList(guildID: guildID).compactMap { if case .channel(let c) = $0 { return c.id }; return nil }
+        } else {
+            ids = privateChannels.map(\.id)
+        }
+        return ids.compactMap { id in markRead(id).map { (id, $0) } }
+    }
+
     // MARK: - Gateway events
 
     public func apply(_ event: GatewayEvent) {
@@ -254,7 +282,10 @@ public final class Store {
                 let merged = ready.mergedMembers.flatMap { index < $0.count ? $0[index] : nil }
                 addGuild(guild, mergedMembers: merged)
             }
-            for channel in ready.privateChannels { channels[channel.id] = channel }
+            for channel in ready.privateChannels {
+                channels[channel.id] = channel
+                channel.recipients?.forEach(remember)
+            }
             ready.presences.forEach(setPresence)
             for state in ready.readStates { readStates[state.id] = state }
             // No change events: the session reports READY itself, and the UI reloads everything once then.
@@ -282,6 +313,7 @@ public final class Store {
             // Updates don't always repeat the last message ID.
             if updated.lastMessageId == nil { updated.lastMessageId = channels[channel.id]?.lastMessageId }
             channels[channel.id] = updated
+            channel.recipients?.forEach(remember)
             if let guildID = channel.guildId { channelListCache[guildID] = nil }
             if channel.isPrivate { privateChannelCache = nil }
             mentionTotals = nil
@@ -340,13 +372,17 @@ public final class Store {
             // Calls outside guilds (DMs) aren't supported.
             guard let guildID = state.guildId else { return }
             voiceByGuild[guildID, default: [:]][state.userId] = state.channelId == nil ? nil : state
-            if let member = state.member, member.user != nil { knownMembers[guildID, default: [:]][state.userId] = member }
+            if let member = state.member, let user = member.user {
+                knownMembers[guildID, default: [:]][state.userId] = member
+                remember(user)
+            }
             onChange?(.voice(guildID: guildID))
 
         case .guildMembersChunk(let chunk):
             for member in chunk.members {
                 guard let userID = member.resolvedUserId, member.user != nil else { continue }
                 knownMembers[chunk.guildId, default: [:]][userID] = member
+                if let user = member.user { remember(user) }
             }
             for presence in chunk.presences {
                 setPresence(presence)
@@ -376,6 +412,7 @@ public final class Store {
         voiceByGuild = [:]
         knownMembers = [:]
         presences = [:]
+        users = [:]
         cacheOrder = []
         fullyLoaded = []
         channelListCache = [:]
@@ -412,6 +449,8 @@ public final class Store {
 
     private func handleNewMessage(_ message: Message) {
         let id = message.channelId
+        remember(message.author)
+        message.mentions?.forEach(remember)
         if var channel = channels[id] {
             channel.lastMessageId = message.id
             channels[id] = channel
@@ -456,5 +495,22 @@ public final class Store {
         cacheOrder.removeAll { $0 == channelID }
         messageCache[channelID] = nil
         fullyLoaded.remove(channelID)
+    }
+}
+
+extension Store {
+    /// Names for the mentions in a message: the people it mentions (Discord sends them with it), anyone else we
+    /// know, the server's roles and its channels. Server nicknames win, as in the official client.
+    public func resolver(for message: Message) -> Markdown.Resolver {
+        let mentioned = Dictionary((message.mentions ?? []).map { ($0.id, $0.displayName) }, uniquingKeysWith: { a, _ in a })
+        let guildID = channel(message.channelId)?.guildId
+        return Markdown.Resolver(
+            user: { [weak self] id in
+                guard let self else { return mentioned[id] }
+                return guildID.flatMap { self.memberName(id, in: $0) } ?? mentioned[id] ?? self.user(id)?.displayName
+            },
+            channel: { [weak self] id in self?.channel(id)?.displayName },
+            role: { [weak self] id in guildID.flatMap { self?.guilds[$0]?.roles.first { $0.id == id }?.name } }
+        )
     }
 }

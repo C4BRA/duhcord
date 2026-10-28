@@ -16,6 +16,8 @@ final class ProfileController {
     var onOpenGuild: ((Snowflake) -> Void)?
     /// "Message" in a full profile: show the DM with this person.
     var onOpenDM: ((Snowflake) -> Void)?
+    /// True while the app is locked because Discord can't be reached: nothing opens then.
+    var isLocked: () -> Bool = { false }
 
     let session: DiscordSession
     private var popover: NSPopover?
@@ -44,6 +46,7 @@ final class ProfileController {
     /// which adds their roles and server profile.
     func showCard(userID: Snowflake, guildID: Snowflake?, relativeTo rect: NSRect, of view: NSView) {
         popover?.close()
+        guard !isLocked() else { return }
         let card = ProfileCardViewController(controller: self, userID: userID, guildID: guildID)
         let popover = NSPopover()
         popover.behavior = .transient
@@ -58,6 +61,7 @@ final class ProfileController {
     /// Opens (or brings forward) someone's full profile.
     func showFullProfile(userID: Snowflake, guildID: Snowflake?, tab: Tab = .activity) {
         popover?.close()
+        guard !isLocked() else { return }
         if let existing = windows[userID] {
             existing.select(tab)
             existing.showWindow(nil)
@@ -71,6 +75,12 @@ final class ProfileController {
     }
 
     func closeCard() { popover?.close() }
+
+    /// Closes the card and every full profile (the app is locking).
+    func closeAll() {
+        popover?.close()
+        windows.values.forEach { $0.close() }
+    }
 
     // MARK: - Data
 

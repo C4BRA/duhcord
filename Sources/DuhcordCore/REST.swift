@@ -49,6 +49,13 @@ public final class RESTClient {
         _ = try await request("POST", "/channels/\(channelID)/messages/\(messageID)/ack", body: ["token": NSNull()])
     }
 
+    /// Marks several channels read in one request, as the official client's "Mark as Read" on a server does.
+    public func ackBulk(_ acks: [(channelID: Snowflake, messageID: Snowflake)]) async throws {
+        guard !acks.isEmpty else { return }
+        let states = acks.map { ["channel_id": $0.channelID, "message_id": $0.messageID, "read_state_type": 0] as [String: Any] }
+        _ = try await request("POST", "/read-states/ack-bulk", body: ["read_states": states])
+    }
+
     /// Shows "… is typing" to others in the channel for about 10 seconds.
     public func sendTyping(channelID: Snowflake) async throws {
         _ = try await request("POST", "/channels/\(channelID)/typing")

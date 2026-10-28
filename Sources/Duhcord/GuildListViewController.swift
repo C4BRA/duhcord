@@ -3,8 +3,10 @@ import DuhcordCore
 
 /// The sidebar: Direct Messages, then every server, as a standard macOS source list (like Mail's mailboxes).
 /// Rows follow System Settings → Appearance → Sidebar icon size, or the small size in compact layout.
-final class GuildListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class GuildListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onSelect: ((Place) -> Void)?
+    /// "Mark as Read" on a server or on Direct Messages.
+    var onMarkAllRead: ((Place) -> Void)?
 
     private enum Row: Equatable {
         case place(Place)
@@ -33,6 +35,9 @@ final class GuildListViewController: NSViewController, NSTableViewDataSource, NS
         table.dataSource = self
         table.delegate = self
         table.setAccessibilityLabel("Servers")
+        let menu = NSMenu()
+        menu.delegate = self
+        table.menu = menu
 
         let scroll = VerticalScrollView()
         scroll.documentView = table
@@ -82,6 +87,22 @@ final class GuildListViewController: NSViewController, NSTableViewDataSource, NS
         guard table.rowSizeStyle != Theme.listRowSize else { return }
         table.rowSizeStyle = Theme.listRowSize
         reload()
+    }
+
+    /// Right-click on a server or Direct Messages, as in the official client.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let row = table.clickedRow
+        guard row >= 0, row < rows.count, case .place(let place) = rows[row] else { return }
+        let unread: Bool
+        switch place {
+        case .directMessages: unread = store.privateUnreadCount > 0
+        case .guild(let id): unread = store.guildHasUnread(id)
+        }
+        menu.addItem(ActionMenuItem("Mark as Read", enabled: unread) { [weak self] in self?.onMarkAllRead?(place) })
+        if case .guild(let id) = place {
+            menu.addItem(ActionMenuItem("Copy Link") { Pasteboard.copy("https://discord.com/channels/\(id)") })
+        }
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }

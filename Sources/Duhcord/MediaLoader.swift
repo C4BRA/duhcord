@@ -77,11 +77,8 @@ final class MediaLoader {
     }
 
     private static func fetch(_ url: URL, maxPixel: Int, pointSize: NSSize, queue: OperationQueue?) async -> NSImage? {
-        guard MediaRequest.isAllowedImageURL(url),
-              let result = try? await SecureSession.media.session.data(from: url),
-              (result.1 as? HTTPURLResponse)?.statusCode == 200,
-              result.0.count <= maxBytes, !Task.isCancelled, let queue else { return nil }
-        let data = result.0
+        guard MediaRequest.isAllowedImageURL(url), let data = await CappedDownload.data(from: url, limit: maxBytes),
+              !Task.isCancelled, let queue else { return nil }
         return await withCheckedContinuation { continuation in
             queue.addOperation {
                 continuation.resume(returning: decode(data, maxPixel: maxPixel, pointSize: pointSize))
@@ -104,7 +101,61 @@ final class MediaLoader {
             kCGImageSourceShouldCacheImmediately: true,
         ]
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary) else { return nil }
-        return NSImage(cgImage: image, size: pointSize)
+        // Keep the image's own proportions: the box it was asked for can be a slightly different shape
+        // (a banner that isn't exactly 5:2), and stretching it to the box would distort it.
+        let fit = min(pointSize.width / CGFloat(image.width), pointSize.height / CGFloat(image.height))
+        return NSImage(cgImage: image, size: NSSize(width: CGFloat(image.width) * fit, height: CGFloat(image.height) * fit))
+    }
+}
+
+/// Downloads at most `limit` bytes: a response that says it's bigger is refused before any of it arrives,
+/// and one that runs past the limit anyway is cut off, so an oversized image is never buffered whole.
+private final class CappedDownload: NSObject, URLSessionDataDelegate {
+    private let limit: Int
+    private var data = Data()
+    private var failed = false
+    private var continuation: CheckedContinuation<Data?, Never>?
+
+    private init(limit: Int) {
+        self.limit = limit
+    }
+
+    static func data(from url: URL, limit: Int) async -> Data? {
+        let loader = CappedDownload(limit: limit)
+        let task = SecureSession.media.session.dataTask(with: url)
+        // A per-task delegate gets the data; certificate and host checks still go to SecureSession.
+        task.delegate = loader
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                loader.continuation = continuation
+                task.resume()
+            }
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        let ok = (response as? HTTPURLResponse)?.statusCode == 200 && response.expectedContentLength <= Int64(limit)
+        if ok, response.expectedContentLength > 0 { data.reserveCapacity(Int(response.expectedContentLength)) }
+        failed = !ok
+        completionHandler(ok ? .allow : .cancel)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive chunk: Data) {
+        data.append(chunk)
+        if data.count > limit {
+            failed = true
+            dataTask.cancel()
+        }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        let result = error == nil && !failed ? data : nil
+        data = Data()
+        continuation?.resume(returning: result)
+        continuation = nil
     }
 }
 

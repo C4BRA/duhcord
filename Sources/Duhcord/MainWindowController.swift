@@ -9,7 +9,8 @@ enum Place: Hashable {
 
 /// The three-column window, laid out like Mail: the server sidebar, the channel list, and the messages, under a
 /// unified toolbar that carries the channel's name and topic.
-final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation, NSToolbarDelegate {
+final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation, NSToolbarDelegate,
+                                  NSSearchFieldDelegate {
     let session: DiscordSession
     let voice: VoiceController
     private let guildList: GuildListViewController
@@ -18,6 +19,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private var switcher: QuickSwitcher?
     private var voiceDetails: VoiceDetailsWindowController?
     private let profiles: ProfileController
+    /// The toolbar's search field: finds messages in the conversation on screen (⌘F).
+    private let searchItem = NSSearchToolbarItem(itemIdentifier: .search)
     private let connectionLock = ConnectionLock()
 
     private var place: Place = .directMessages
@@ -83,16 +86,18 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         messages.onShowProfile = { [weak self] userID, guildID, rect, view in
             self?.profiles.showCard(userID: userID, guildID: guildID, relativeTo: rect, of: view)
         }
+        profiles.isLocked = { [weak self] in self?.isLocked ?? false }
         profiles.onOpenGuild = { [weak self] guildID in
             self?.select(place: .guild(guildID))
             self?.window?.makeKeyAndOrderFront(nil)
         }
-        profiles.onOpenDM = { [weak self] userID in
-            self?.session.directMessageChannel(with: userID) { channelID in
-                guard let self, let channelID else { return }
-                self.select(place: .directMessages)
-                self.select(channelID: channelID)
-                self.window?.makeKeyAndOrderFront(nil)
+        profiles.onOpenDM = { [weak self] userID in self?.openDM(with: userID) }
+        channelList.onMessageUser = { [weak self] userID in self?.openDM(with: userID) }
+        channelList.onMarkRead = { [weak self] channelID in self?.session.markRead(channelID: channelID) }
+        guildList.onMarkAllRead = { [weak self] place in
+            switch place {
+            case .directMessages: self?.session.markAllRead(guildID: nil)
+            case .guild(let id): self?.session.markAllRead(guildID: id)
             }
         }
         channelList.onMissingNames = { [weak session] guildID, userIDs in
@@ -105,7 +110,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             // The details belong to one call; they close when it ends.
             if !self.voice.isInCall { self.voiceDetails?.close() }
         }
-        voice.onProblem = { [weak self] message in self?.showVoiceProblem(message) }
+        voice.onProblem = { [weak self] title, detail in self?.showVoiceProblem(title: title, detail: detail) }
         session.store.onChange = { [weak self] change in self?.handle(change) }
         NotificationCenter.default.addObserver(self, selector: #selector(updateDockBadge), name: Settings.didChange, object: nil)
     }
@@ -123,6 +128,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func lock(title: String, detail: String, retry: @escaping () -> Void) {
         guard let window else { return }
         switcher = nil
+        // Nothing stays usable while locked: profiles (and their message boxes) and the call details close too.
+        profiles.closeAll()
+        voiceDetails?.close()
         // Without the main connection Discord drops the call anyway; don't leave it half-running.
         voice.leave()
         connectionLock.show(over: window, title: title, detail: detail, onRetry: retry)
@@ -135,6 +143,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         guard !isLocked else { return false }
         switch menuItem.action {
+        case #selector(findInConversation(_:)):
+            return session.store.focusedChannelID != nil
         case #selector(toggleMute(_:)):
             menuItem.title = voice.muted ? "Unmute" : "Mute"
             return voice.isInCall
@@ -173,11 +183,22 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     @objc private func updateClicked(_ sender: Any?) { updateHandler?() }
 
-    private func showVoiceProblem(_ message: String) {
+    /// Shows the DM with someone, opening it on Discord's side first if there isn't one yet.
+    private func openDM(with userID: Snowflake) {
+        session.directMessageChannel(with: userID) { [weak self] channelID in
+            guard let self, let channelID else { return }
+            self.select(place: .directMessages)
+            self.select(channelID: channelID)
+            self.window?.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// The title says what happened, the detail why or what to do, as Apple's alert guidelines ask.
+    private func showVoiceProblem(title: String, detail: String) {
         guard let window, window.attachedSheet == nil else { return }
         let alert = NSAlert()
-        alert.messageText = "Voice"
-        alert.informativeText = message
+        alert.messageText = title
+        alert.informativeText = detail
         alert.beginSheetModal(for: window)
     }
 
@@ -251,6 +272,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     }
 
     private func select(channelID: Snowflake) {
+        // A search belongs to the conversation it was typed in.
+        if !searchItem.searchField.stringValue.isEmpty {
+            searchItem.searchField.stringValue = ""
+            messages.filterText = ""
+        }
         lastChannel[place] = channelID
         channelList.select(channelID)
         messages.show(channelID: channelID)
@@ -273,6 +299,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         }
         self.switcher = switcher
         switcher.present(over: window)
+    }
+
+    /// ⌘F: search the messages loaded in this conversation.
+    @objc func findInConversation(_ sender: Any?) {
+        if !(window?.toolbar?.isVisible ?? true) { window?.toolbar?.isVisible = true }
+        searchItem.beginSearchInteraction()
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard (notification.object as? NSSearchField) === searchItem.searchField else { return }
+        messages.filterText = searchItem.searchField.stringValue
+    }
+
+    func searchFieldDidEndSearching(_ sender: NSSearchField) {
+        messages.filterText = ""
     }
 
     @objc func selectPreviousChannel(_ sender: Any?) { step(by: -1) }
@@ -353,7 +394,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     @objc func leaveVoice(_ sender: Any?) { voice.leave() }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, .jumpTo]
+        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, .jumpTo, .search]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -362,6 +403,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if id == .search {
+            searchItem.searchField.placeholderString = "Search Conversation"
+            searchItem.searchField.delegate = self
+            searchItem.searchField.sendsSearchStringImmediately = true
+            searchItem.toolTip = "Find messages in this conversation (⌘F)"
+            searchItem.label = "Search"
+            return searchItem
+        }
         let item = NSToolbarItem(itemIdentifier: id)
         item.target = self
         item.isBordered = true
@@ -369,7 +418,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         case .jumpTo:
             item.label = "Jump To"
             item.toolTip = "Jump to a channel or person (⌘K)"
-            item.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Jump To")
+            item.image = NSImage(systemSymbolName: "arrow.right.circle", accessibilityDescription: "Jump To")
             item.action = #selector(showQuickSwitcher(_:))
         case .update:
             item.label = "Update"
@@ -394,6 +443,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
 extension NSToolbarItem.Identifier {
     static let jumpTo = Self("jumpTo")
+    static let search = Self("search")
     static let update = Self("update")
     static let voiceMute = Self("voiceMute")
     static let voiceDeafen = Self("voiceDeafen")

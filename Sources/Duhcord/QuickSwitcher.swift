@@ -71,14 +71,14 @@ final class QuickSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         panel.contentView = background
 
         let glass = NSImageView(image: NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: nil) ?? NSImage())
-        glass.symbolConfiguration = .init(pointSize: 18, weight: .regular)
+        glass.symbolConfiguration = .init(pointSize: Theme.searchFont.pointSize - 2, weight: .regular)
         glass.contentTintColor = .secondaryLabelColor
 
         field.placeholderString = "Jump to a channel or person"
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.font = .systemFont(ofSize: 20)
+        field.font = Theme.searchFont
         field.delegate = self
         field.setAccessibilityLabel("Jump to a channel or person")
 
@@ -224,7 +224,7 @@ private final class SwitcherCell: NSTableCellView {
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
-        icon.symbolConfiguration = .init(pointSize: 14, weight: .regular)
+        icon.symbolConfiguration = .init(textStyle: .body, scale: .medium)
         icon.contentTintColor = .secondaryLabelColor
         title.lineBreakMode = .byTruncatingTail
         subtitle.font = Theme.smallFont

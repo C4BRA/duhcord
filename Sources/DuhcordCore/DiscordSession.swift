@@ -35,6 +35,9 @@ public final class DiscordSession: GatewayClientDelegate {
     private var subscribedGuilds: Set<Snowflake> = []
     /// "guild/user" pairs already asked for, so a name Discord can't give isn't asked for again and again.
     private var requestedMembers: Set<String> = []
+    /// When each "guild/user" presence was last asked for, so reopening a profile doesn't ask again right away.
+    private var presenceRequests: [String: Date] = [:]
+    private static let presenceRequestInterval: TimeInterval = 60
     private var pendingAck: [Snowflake: Snowflake] = [:]
     private var ackTimer: Timer?
 
@@ -69,6 +72,12 @@ public final class DiscordSession: GatewayClientDelegate {
     /// on their own; for anyone else, the official client asks the same way when it opens a profile.
     public func requestPresence(of userID: Snowflake, guildID: Snowflake) {
         guard userID != store.me?.id else { return }
+        let key = guildID + "/" + userID, now = Date()
+        // Presence updates keep arriving once Discord has sent it; asking again within a minute adds nothing
+        // and counts against the gateway's rate limit.
+        if let last = presenceRequests[key], now.timeIntervalSince(last) < Self.presenceRequestInterval { return }
+        if presenceRequests.count > 500 { presenceRequests = presenceRequests.filter { now.timeIntervalSince($0.value) < Self.presenceRequestInterval } }
+        presenceRequests[key] = now
         gateway.requestMembers(guildID: guildID, userIDs: [userID], presences: true)
     }
 
@@ -193,6 +202,18 @@ public final class DiscordSession: GatewayClientDelegate {
         }
     }
 
+    /// "Mark as Read" on a server, or on Direct Messages with nil: one request for all of its channels.
+    public func markAllRead(guildID: Snowflake?) {
+        let acks = store.markAllRead(guildID: guildID)
+        for ack in acks { pendingAck[ack.channelID] = nil }
+        Task {
+            // A few large requests rather than one per channel.
+            for start in stride(from: 0, to: acks.count, by: 100) {
+                try? await rest.ackBulk(Array(acks[start..<min(start + 100, acks.count)]))
+            }
+        }
+    }
+
     private func flushAcks() {
         let acks = pendingAck
         pendingAck = [:]
@@ -227,6 +248,7 @@ public final class DiscordSession: GatewayClientDelegate {
             sessionID = ready.sessionId
             subscribedGuilds = []
             requestedMembers = []
+            presenceRequests = [:]
             delegate?.sessionDidBecomeReady(self)
         case .typingStart(let event):
             guard event.userId != store.me?.id else { break }

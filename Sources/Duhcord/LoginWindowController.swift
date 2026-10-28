@@ -81,6 +81,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
         case .showCode(let url):
             spinner.stopAnimation(nil)
             qrView.image = Self.qrImage(for: url.absoluteString, size: Self.qrSize)
+            qrView.setAccessibilityLabel("Login QR code. Scan it with the Discord app on your phone.")
             status.stringValue = "Scan with the Discord app on your phone:\nYou → Settings → Scan QR Code"
         case .scanned(let username):
             qrView.image = nil
@@ -130,25 +131,27 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
         guard let content = window?.contentView else { return }
 
         let title = NSTextField(labelWithString: "Log in to Duhcord")
-        title.font = .boldSystemFont(ofSize: 17)
+        title.font = Theme.headingFont
 
         qrView.imageScaling = .scaleNone
+        qrView.setAccessibilityElement(true)
+        qrView.setAccessibilityRole(.image)
         qrView.wantsLayer = true
         qrView.layer?.cornerRadius = 8
         qrView.layer?.masksToBounds = true
 
         status.alignment = .center
-        status.font = .systemFont(ofSize: 13)
+        status.font = Theme.bodyFont
 
         note.alignment = .center
-        note.font = .systemFont(ofSize: 12)
+        note.font = Theme.smallFont
         note.textColor = .systemOrange
         note.isHidden = true
 
         let warning = NSTextField(wrappingLabelWithString:
             "Only scan a code from a Duhcord window you opened yourself. Anyone who gets you to scan their code gets your account.")
         warning.alignment = .center
-        warning.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        warning.font = Theme.captionFont
         warning.textColor = .secondaryLabelColor
 
         spinner.style = .spinning
@@ -163,15 +166,15 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
         let stack = NSStackView(views: [title, note, qrView, spinner, status, retry, warning])
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 12
+        stack.spacing = Theme.Spacing.group
         stack.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(stack)
 
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: Theme.Spacing.edge),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Theme.Spacing.edge),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -Theme.Spacing.edge),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -Theme.Spacing.edge),
             qrView.widthAnchor.constraint(equalToConstant: Self.qrSize),
             qrView.heightAnchor.constraint(equalToConstant: Self.qrSize),
             status.widthAnchor.constraint(equalTo: stack.widthAnchor),

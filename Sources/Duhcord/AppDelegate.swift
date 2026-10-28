@@ -3,7 +3,8 @@ import DuhcordCore
 import UserNotifications
 
 @main
-final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate, NSMenuItemValidation,
+                         UNUserNotificationCenterDelegate {
     private static var shared: AppDelegate?
 
     static func main() {
@@ -28,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         Settings.registerDefaults()
         updates = UpdateController()
         NSApp.mainMenu = buildMenu()
+        if canNotify { UNUserNotificationCenter.current().delegate = self }
         if let token = Keychain.loadToken() {
             start(token: token)
         } else {
@@ -84,9 +86,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
     }
 
     @objc private func showSettings(_ sender: Any?) {
-        let controller = settingsWindow ?? SettingsWindowController { [weak self] in self?.logOut(nil) }
+        let controller = settingsWindow ?? SettingsWindowController { [weak self] in self?.confirmLogOut(nil) }
         settingsWindow = controller
         controller.show(accountName: session?.store.me?.displayName)
+    }
+
+    /// Logging out ends the session for good (logging back in takes a new QR scan), so it's confirmed first.
+    @objc private func confirmLogOut(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "Log out of Duhcord?"
+        alert.informativeText = "Your session ends on Discord's side too. To log back in, you'll scan a new QR code with your phone."
+        let logOutButton = alert.addButton(withTitle: "Log Out")
+        logOutButton.hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        // Cancel is the default, so a stray Return doesn't log out.
+        logOutButton.keyEquivalent = ""
+        alert.buttons[1].keyEquivalent = "\r"
+        let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            if response == .alertFirstButtonReturn { self?.logOut(nil) }
+        }
+        if let window = mainWindow?.window, window.attachedSheet == nil {
+            alert.beginSheetModal(for: window, completionHandler: handle)
+        } else {
+            handle(alert.runModal())
+        }
     }
 
     /// Logs out on Discord's side first. If Discord can't be reached the app locks with only a Retry button,
@@ -133,7 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
-        case #selector(showSettings(_:)), #selector(logOut(_:)):
+        case #selector(showSettings(_:)), #selector(confirmLogOut(_:)):
             return session != nil && !isLocked
         default:
             return true
@@ -150,9 +173,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
             mainWindow = main
             main.showWindow(nil)
             updates?.window = main
-            if canNotify {
-                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-            }
         }
         mainWindow?.reload()
     }
@@ -198,10 +218,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         if let channel, !channel.isPrivate {
             content.subtitle = "#" + channel.displayName
         }
-        content.body = message.content.isEmpty ? "Sent an attachment" : message.content
+        // Names instead of <@123> tokens, and no Markdown characters; spoilers stay hidden.
+        let text = Markdown.plainText(message.content, resolver: session.store.resolver(for: message))
+        content.body = text.isEmpty ? (message.attachments.isEmpty ? "Sent a message" : "Sent an attachment") : text
         content.sound = Settings.notificationSound ? .default : nil
+        content.userInfo = ["channelID": message.channelId]
         let request = UNNotificationRequest(identifier: message.id, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        deliver(request)
+    }
+
+    /// Asks for permission the first time there's something to notify about, rather than at launch, so the
+    /// question comes with a reason (Apple's guidance). After that macOS remembers the answer.
+    private func deliver(_ request: UNNotificationRequest) {
+        let center = UNUserNotificationCenter.current()
+        let pending = Handoff(value: request)
+        center.getNotificationSettings { settings in
+            switch settings.authorizationStatus {
+            case .notDetermined:
+                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    if granted { center.add(pending.value) }
+                }
+            case .denied:
+                break
+            default:
+                center.add(pending.value)
+            }
+        }
+    }
+
+    /// Clicking a notification opens its conversation, as in the official client.
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        let channelID = response.notification.request.content.userInfo["channelID"] as? String
+        let done = Handoff(value: completionHandler)
+        let owner = WeakReference(self)
+        DispatchQueue.main.async {
+            defer { done.value() }
+            guard let self = owner.object, let channelID, let main = self.mainWindow, !main.isLocked else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            main.showWindow(nil)
+            main.jump(to: channelID)
+        }
     }
 
     // MARK: - Menu
@@ -214,14 +271,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         appMenu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
-        appMenu.addItem(withTitle: "Log Out", action: #selector(logOut(_:)), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Log Out…", action: #selector(confirmLogOut(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        let services = NSMenu(title: "Services")
+        appMenu.addItem(submenu: services, title: "Services")
+        NSApp.servicesMenu = services
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Duhcord", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
         hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Duhcord", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         main.addItem(submenu: appMenu, title: "Duhcord")
+
+        let file = NSMenu(title: "File")
+        file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        main.addItem(submenu: file, title: "File")
 
         // Without an Edit menu, ⌘C/⌘V don't work in text fields.
         let edit = NSMenu(title: "Edit")
@@ -232,7 +298,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Delete", action: #selector(NSText.delete(_:)), keyEquivalent: "")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        edit.addItem(.separator())
+        let find = NSMenu(title: "Find")
+        find.addItem(withTitle: "Find in Conversation…", action: #selector(MainWindowController.findInConversation(_:)), keyEquivalent: "f")
+        edit.addItem(submenu: find, title: "Find")
         main.addItem(submenu: edit, title: "Edit")
 
         let view = NSMenu(title: "View")
@@ -265,7 +336,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         let window = NSMenu(title: "Window")
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         window.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
-        window.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         window.addItem(.separator())
         window.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         main.addItem(submenu: window, title: "Window")

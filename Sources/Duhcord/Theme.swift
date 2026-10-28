@@ -40,6 +40,10 @@ enum Theme {
     static let smallFont = NSFont.preferredFont(forTextStyle: .subheadline)
     static let captionFont = NSFont.preferredFont(forTextStyle: .caption1)
     static let titleFont = NSFont.preferredFont(forTextStyle: .title3)
+    /// Window headings, like "Log in to Duhcord".
+    static let headingFont = NSFont.preferredFont(forTextStyle: .title2).withWeight(.bold)
+    /// The large search field in Jump To, as in Spotlight.
+    static let searchFont = NSFont.preferredFont(forTextStyle: .title1)
 
     static let messageFont = bodyFont
     static let messageBoldFont = boldFont
@@ -272,5 +276,39 @@ private final class VerticalClipView: NSClipView {
         var bounds = super.constrainBoundsRect(proposedBounds)
         bounds.origin.x = 0
         return bounds
+    }
+}
+
+/// A menu item that runs a closure, for context menus built on the fly.
+final class ActionMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(_ title: String, enabled: Bool = true, handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: enabled ? #selector(run) : nil, keyEquivalent: "")
+        target = self
+        isEnabled = enabled
+    }
+
+    required init(coder: NSCoder) { fatalError("not used") }
+
+    @objc private func run() { handler() }
+}
+
+enum Pasteboard {
+    static func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+}
+
+/// Links to Discord's web app, the same ones "Copy Link" gives in the official client.
+enum DiscordLink {
+    static func channel(_ channelID: Snowflake, guildID: Snowflake?) -> String {
+        "https://discord.com/channels/\(guildID ?? "@me")/\(channelID)"
+    }
+
+    static func message(_ messageID: Snowflake, channelID: Snowflake, guildID: Snowflake?) -> String {
+        channel(channelID, guildID: guildID) + "/" + messageID
     }
 }
