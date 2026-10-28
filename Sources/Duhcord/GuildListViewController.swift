@@ -43,11 +43,12 @@ final class GuildListViewController: NSViewController, NSTableViewDataSource, NS
         NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged), name: Settings.didChange, object: nil)
     }
 
-    /// Keeps the column exactly the sidebar's width, whatever AppKit decided during layout.
+    /// Keeps the column fitted to the list after layout changes. AppKit does the sizing so the source list's row
+    /// insets are taken into account; setting the column to the full visible width made cells wider than their
+    /// rows and clipped anything on the right (mute icons, mention badges).
     override func viewDidLayout() {
         super.viewDidLayout()
-        guard let column = table.tableColumns.first, let clip = table.enclosingScrollView?.contentView else { return }
-        if abs(column.width - clip.bounds.width) > 0.5 { column.width = clip.bounds.width }
+        table.sizeLastColumnToFit()
     }
 
     func reload() {

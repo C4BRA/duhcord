@@ -117,11 +117,12 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         reload()
     }
 
-    /// Keeps the column exactly the list's width, whatever AppKit decided during layout.
+    /// Keeps the column fitted to the list after layout changes. AppKit does the sizing so the source list's row
+    /// insets are taken into account; setting the column to the full visible width made cells wider than their
+    /// rows and clipped anything on the right (mute icons, mention badges).
     override func viewDidLayout() {
         super.viewDidLayout()
-        guard let column = table.tableColumns.first, let clip = table.enclosingScrollView?.contentView else { return }
-        if abs(column.width - clip.bounds.width) > 0.5 { column.width = clip.bounds.width }
+        table.sizeLastColumnToFit()
     }
 
     func show(_ place: Place) {
@@ -244,8 +245,7 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
             let user = state.member?.user ?? store.memberUser(state.userId, in: guildID)
                 ?? User(id: state.userId, username: "")
             cell.configureMember(name: name(of: state, in: guildID), user: user, size: table.effectiveRowSizeStyle,
-                                 speaking: voice.speaking.contains(state.userId),
-                                 muted: state.selfMute || state.mute, deafened: state.selfDeaf || state.deaf)
+                                 speaking: voice.speaking.contains(state.userId), state: state)
         }
     }
 
@@ -309,7 +309,10 @@ private final class ChannelCell: NSTableCellView {
     private let avatar = RemoteImageView()
     private let label = NSTextField(labelWithString: "")
     private let badge = BadgeView()
-    private let status = NSImageView()
+    /// Mute and deafen, in white when the person chose it, in red when a moderator did.
+    private let muteIcon = NSImageView()
+    private let deafenIcon = NSImageView()
+    private lazy var voiceIcons = NSStackView(views: [muteIcon, deafenIcon])
     private var labelAtStart: NSLayoutConstraint!
     private var labelAfterIcon: NSLayoutConstraint!
     private var labelAfterAvatar: NSLayoutConstraint!
@@ -319,16 +322,20 @@ private final class ChannelCell: NSTableCellView {
         identifier = Self.identifier
         label.lineBreakMode = .byTruncatingTail
         icon.symbolConfiguration = .init(pointSize: 12, weight: .medium)
-        status.symbolConfiguration = .init(pointSize: 10, weight: .medium)
-        status.contentTintColor = .tertiaryLabelColor
+        for (view, symbol, label) in [(muteIcon, "mic.slash.fill", "Muted"), (deafenIcon, "speaker.slash.fill", "Deafened")] {
+            view.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+            view.symbolConfiguration = .init(pointSize: 12, weight: .medium)
+        }
+        voiceIcons.spacing = Theme.Spacing.tight
+        voiceIcons.setHuggingPriority(.required, for: .horizontal)
         avatar.cornerRadius = Self.avatarSize / 2
         avatar.layer?.borderColor = NSColor.systemGreen.cgColor
-        [icon, avatar, label, badge, status].forEach {
+        [icon, avatar, label, badge, voiceIcons].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             addSubview($0)
         }
         badge.setContentCompressionResistancePriority(.required, for: .horizontal)
-        status.setContentCompressionResistancePriority(.required, for: .horizontal)
+        voiceIcons.setContentCompressionResistancePriority(.required, for: .horizontal)
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         labelAtStart = label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.tight)
         labelAfterIcon = label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: Theme.Spacing.related)
@@ -346,9 +353,9 @@ private final class ChannelCell: NSTableCellView {
             badge.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: Theme.Spacing.tight),
             badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.related),
             badge.centerYAnchor.constraint(equalTo: centerYAnchor),
-            status.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: Theme.Spacing.tight),
-            status.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.related),
-            status.centerYAnchor.constraint(equalTo: centerYAnchor),
+            voiceIcons.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: Theme.Spacing.tight),
+            voiceIcons.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.related),
+            voiceIcons.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
@@ -364,7 +371,7 @@ private final class ChannelCell: NSTableCellView {
     }
 
     func configure(_ item: ChannelListItem, store: Store, inCall: Bool, size: NSTableView.RowSizeStyle) {
-        status.isHidden = true
+        voiceIcons.isHidden = true
         avatar.layer?.borderWidth = 0
         switch item {
         case .category(let c):
@@ -404,7 +411,7 @@ private final class ChannelCell: NSTableCellView {
     }
 
     /// Someone in a voice channel: picture (ringed in green while they talk), name, and mute/deafen.
-    func configureMember(name: String, user: User, size: NSTableView.RowSizeStyle, speaking: Bool, muted: Bool, deafened: Bool) {
+    func configureMember(name: String, user: User, size: NSTableView.RowSizeStyle, speaking: Bool, state: VoiceState) {
         use(.avatar)
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         avatar.setImage(MediaRequest.avatarURL(for: user, pixels: Int(Self.avatarSize * scale)),
@@ -414,10 +421,20 @@ private final class ChannelCell: NSTableCellView {
         label.font = Theme.listFont(for: size)
         label.textColor = speaking ? .labelColor : .secondaryLabelColor
         badge.count = 0
-        status.isHidden = !(muted || deafened)
-        status.image = NSImage(systemSymbolName: deafened ? "speaker.slash.fill" : "mic.slash.fill",
-                               accessibilityDescription: deafened ? "Deafened" : "Muted")
-        setAccessibilityLabel(name + (speaking ? ", speaking" : "") + (deafened ? ", deafened" : muted ? ", muted" : ""))
+
+        let muted = state.selfMute || state.mute
+        let deafened = state.selfDeaf || state.deaf
+        muteIcon.isHidden = !muted
+        deafenIcon.isHidden = !deafened
+        // A moderator's mute or deafen wins over the person's own.
+        muteIcon.contentTintColor = state.mute ? .systemRed : .labelColor
+        deafenIcon.contentTintColor = state.deaf ? .systemRed : .labelColor
+        voiceIcons.isHidden = !(muted || deafened)
+
+        var spoken = name + (speaking ? ", speaking" : "")
+        if deafened { spoken += state.deaf ? ", deafened by a moderator" : ", deafened" }
+        if muted { spoken += state.mute ? ", muted by a moderator" : ", muted" }
+        setAccessibilityLabel(spoken)
     }
 }
 
@@ -494,7 +511,7 @@ private final class VoiceBar: NSView {
             statusLabel.textColor = .secondaryLabelColor
             statusLabel.toolTip = nil
         case .connected(let encrypted):
-            statusLabel.stringValue = encrypted ? "Voice Connected · End-to-End Encrypted" : "Voice Connected"
+            statusLabel.stringValue = "Voice Connected"
             statusLabel.textColor = .systemGreen
             statusLabel.toolTip = encrypted
                 ? "Only the people in this call can hear it."
