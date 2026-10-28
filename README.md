@@ -32,7 +32,11 @@ Link previews, embeds and image attachments are shown inline, built to stay chea
 - **Images are fetched at display size.** Duhcord only fetches from Discord's image proxy, asking for exactly the size it draws (usually tens of KB). It decodes straight to that size, so the full image is never built.
 - **No layout jumps.** Discord sends image sizes up front, so space is reserved before an image arrives.
 - **On screen only.** Images load for messages on screen and stop when you scroll away. A small memory cache that macOS can empty holds them, and nothing is saved to disk.
-- **No playback.** Videos and GIFs show a still frame with a ▶ that opens the original.
+- **GIFs move on hover** (or when visible, under **Settings → Animate GIFs**), at most a few at once, and stop when Duhcord isn't in front.
+  - Tenor and Giphy GIFs play as the tiny MP4s Discord provides, using the Mac's hardware video decoder.
+  - Uploaded GIFs are decoded one frame at a time.
+- **Videos play inline on click**, with sound, through Apple's built-in video engine. Only a few seconds are buffered, the player is torn down as soon as it stops, and only one plays at a time. YouTube and similar links open in your browser.
+- **Streams use Duhcord's own connection.** Video streams go through the same connection rules as everything else: Discord's hosts only, no token, no redirects.
 - **Your choice.** Spoilers wait for a click. **Settings → Images** switches between Always, Click to load and Off.
 
 Other files show up as links that open in your browser. Custom emoji show as `:name:`.

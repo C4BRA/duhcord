@@ -554,3 +554,39 @@ final class EmbedTests: XCTestCase {
         XCTAssertEqual(store.messages(in: "c")?.first?.embeds.first?.title, "Example")
     }
 }
+
+final class VideoTests: XCTestCase {
+    func testPlayableVideosAndGIFs() throws {
+        let gifv = Embed(type: "gifv", url: "https://tenor.com/x",
+                         thumbnail: EmbedMedia(url: nil, proxyUrl: "https://images-ext-1.discordapp.net/t", width: 400, height: 300),
+                         video: EmbedMedia(url: "https://media.tenor.com/x.mp4",
+                                           proxyUrl: "https://images-ext-1.discordapp.net/external/x/media.tenor.com/x.mp4",
+                                           width: 400, height: 300))
+        XCTAssertNotNil(gifv.playableVideoURL)
+        let youtube = Embed(type: "video", url: "https://youtube.com/watch?v=1",
+                            video: EmbedMedia(url: "https://www.youtube.com/embed/1", proxyUrl: nil, width: 1280, height: 720))
+        XCTAssertNil(youtube.playableVideoURL, "YouTube has no stream; it opens in the browser")
+
+        let mp4 = Attachment(id: "1", filename: "clip.mp4", url: "https://cdn.discordapp.com/a/clip.mp4",
+                             proxyUrl: "https://media.discordapp.net/a/clip.mp4", contentType: "video/mp4", width: 1920, height: 1080)
+        XCTAssertTrue(mp4.isPlayableVideo)
+        let webm = Attachment(id: "2", filename: "clip.webm", url: "https://cdn.discordapp.com/a/clip.webm",
+                              contentType: "video/webm", width: 640, height: 360)
+        XCTAssertFalse(webm.isPlayableVideo)
+        let gif = Attachment(id: "3", filename: "a.gif", url: "https://cdn.discordapp.com/a/a.gif", contentType: "image/gif", width: 100, height: 100)
+        XCTAssertTrue(gif.isGIF && gif.isImage)
+    }
+
+    func testVideoHostsIncludeDiscordCDNOnly() {
+        XCTAssertTrue(MediaRequest.isAllowedVideoHost("cdn.discordapp.com"))
+        XCTAssertTrue(MediaRequest.isAllowedVideoHost("media.discordapp.net"))
+        XCTAssertFalse(MediaRequest.isAllowedVideoHost("media.tenor.com"))
+        XCTAssertFalse(MediaRequest.isAllowedHost("cdn.discordapp.com"), "still images keep coming from the re-encoding proxy only")
+    }
+
+    func testAnimatedRequestKeepsOriginalFormat() throws {
+        let url = try XCTUnwrap(MediaRequest.url(proxy: "https://media.discordapp.net/a/a.gif", pixelWidth: 200, pixelHeight: 100, format: nil))
+        XCTAssertFalse(url.absoluteString.contains("format="))
+        XCTAssertTrue(url.absoluteString.contains("width=200"))
+    }
+}

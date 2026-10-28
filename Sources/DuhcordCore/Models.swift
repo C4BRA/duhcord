@@ -195,6 +195,11 @@ public struct Attachment: Codable, Hashable {
     }
 
     public var isImage: Bool { (contentType ?? "").hasPrefix("image/") && width != nil && height != nil }
+    public var isGIF: Bool { contentType == "image/gif" }
+    /// Videos macOS can play (MP4 and QuickTime). WebM and others stay links.
+    public var isPlayableVideo: Bool {
+        ["video/mp4", "video/quicktime", "video/x-m4v"].contains(contentType ?? "") && width != nil && height != nil
+    }
     /// Discord hides attachments named SPOILER_… until clicked.
     public var isSpoiler: Bool { filename.hasPrefix("SPOILER_") }
 }
@@ -260,6 +265,13 @@ public struct Embed: Codable, Hashable {
         self.thumbnail = thumbnail
         self.image = image
         self.video = video
+    }
+
+    /// A video Duhcord can stream itself: one Discord proxies (Tenor/Giphy GIFs, direct video links).
+    /// YouTube and similar players have no such stream and open in the browser instead.
+    public var playableVideoURL: String? {
+        guard let proxy = video?.proxyUrl, let host = URL(string: proxy)?.host, MediaRequest.isAllowedHost(host) else { return nil }
+        return proxy
     }
 
     /// A bare image or GIF link, which Discord shows as just the picture.

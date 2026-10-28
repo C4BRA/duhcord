@@ -11,11 +11,12 @@ final class SettingsWindowController: NSWindowController {
                                               trackingMode: .selectOne, target: nil, action: nil)
     private let compact = NSButton(checkboxWithTitle: "Compact message spacing", target: nil, action: nil)
     private let mediaPreviews = NSPopUpButton()
+    private let animateGIFs = NSPopUpButton()
     private let checkForUpdates = NSButton(checkboxWithTitle: "Check for updates automatically", target: nil, action: nil)
 
     init(onLogOut: @escaping () -> Void) {
         self.onLogOut = onLogOut
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 300),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 400),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Settings"
         super.init(window: window)
@@ -39,6 +40,9 @@ final class SettingsWindowController: NSWindowController {
         mediaPreviews.addItems(withTitles: Settings.MediaPreviews.allCases.map(\.title))
         mediaPreviews.target = self
         mediaPreviews.action = #selector(changed)
+        animateGIFs.addItems(withTitles: Settings.AnimateGIFs.allCases.map(\.title))
+        animateGIFs.target = self
+        animateGIFs.action = #selector(changed)
         notifications.target = self
         notifications.action = #selector(changed)
         [sound, dockBadge, compact, checkForUpdates].forEach {
@@ -59,6 +63,7 @@ final class SettingsWindowController: NSWindowController {
             [label("Text size:"), textSize],
             [NSGridCell.emptyContentView, compact],
             [label("Images:"), mediaPreviews],
+            [label("Animate GIFs:"), animateGIFs],
             [label("Updates:"), checkForUpdates],
         ])
         grid.column(at: 0).xPlacement = .trailing
@@ -94,6 +99,7 @@ final class SettingsWindowController: NSWindowController {
         compact.state = Settings.compactMessages ? .on : .off
         checkForUpdates.state = Settings.checkForUpdates ? .on : .off
         mediaPreviews.selectItem(at: Settings.mediaPreviews.rawValue)
+        animateGIFs.selectItem(at: Settings.animateGIFs.rawValue)
         sound.isEnabled = Settings.notifications != .off
     }
 
@@ -105,6 +111,7 @@ final class SettingsWindowController: NSWindowController {
         Settings.compactMessages = compact.state == .on
         Settings.checkForUpdates = checkForUpdates.state == .on
         Settings.mediaPreviews = Settings.MediaPreviews(rawValue: mediaPreviews.indexOfSelectedItem) ?? .always
+        Settings.animateGIFs = Settings.AnimateGIFs(rawValue: animateGIFs.indexOfSelectedItem) ?? .onHover
         sound.isEnabled = Settings.notifications != .off
     }
 

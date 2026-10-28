@@ -32,6 +32,20 @@ enum Settings {
         }
     }
 
+    enum AnimateGIFs: Int, CaseIterable {
+        case onHover = 0
+        case whenVisible = 1
+        case never = 2
+
+        var title: String {
+            switch self {
+            case .onHover: return "On hover"
+            case .whenVisible: return "When visible"
+            case .never: return "Never"
+            }
+        }
+    }
+
     enum TextSize: Int, CaseIterable {
         case small = 0
         case medium = 1
@@ -64,6 +78,7 @@ enum Settings {
         static let compact = "compactMessages"
         static let checkForUpdates = "checkForUpdates"
         static let mediaPreviews = "mediaPreviews"
+        static let animateGIFs = "animateGIFs"
     }
 
     static func registerDefaults() {
@@ -75,6 +90,7 @@ enum Settings {
             Key.compact: false,
             Key.checkForUpdates: true,
             Key.mediaPreviews: MediaPreviews.always.rawValue,
+            Key.animateGIFs: AnimateGIFs.onHover.rawValue,
         ])
     }
 
@@ -108,6 +124,12 @@ enum Settings {
     static var mediaPreviews: MediaPreviews {
         get { MediaPreviews(rawValue: defaults.integer(forKey: Key.mediaPreviews)) ?? .always }
         set { set(newValue.rawValue, for: Key.mediaPreviews) }
+    }
+
+    /// When GIFs move. Videos always wait for a click.
+    static var animateGIFs: AnimateGIFs {
+        get { AnimateGIFs(rawValue: defaults.integer(forKey: Key.animateGIFs)) ?? .onHover }
+        set { set(newValue.rawValue, for: Key.animateGIFs) }
     }
 
     /// Check GitHub for a new release at launch and once a day.
