@@ -66,7 +66,7 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         // Return joins the selected voice channel, so voice works from the keyboard too.
         table.onReturn = { [weak self] in self?.joinSelectedVoiceChannel() }
 
-        let scroll = NSScrollView()
+        let scroll = VerticalScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true

@@ -14,7 +14,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     private let emptyLabel = NSTextField(labelWithString: "")
     private let loadingSpinner = NSProgressIndicator()
-    private let scrollView = NSScrollView()
+    private let scrollView = VerticalScrollView()
     private let table = NSTableView()
     private let input = ComposerView()
     private let typingTabs = TypingTabsView()

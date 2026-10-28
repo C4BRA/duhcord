@@ -34,7 +34,7 @@ final class GuildListViewController: NSViewController, NSTableViewDataSource, NS
         table.delegate = self
         table.setAccessibilityLabel("Servers")
 
-        let scroll = NSScrollView()
+        let scroll = VerticalScrollView()
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true

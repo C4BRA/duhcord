@@ -252,3 +252,25 @@ extension NSFont {
         return NSFont(descriptor: descriptor, size: pointSize) ?? self
     }
 }
+
+/// A scroll view for lists, which only ever scroll up and down. Lists fit their width to the view, so there's
+/// nothing to the side; this also stops a sideways swipe on the trackpad from nudging or bouncing the list.
+/// Resize the sidebar or column to see more of a long name.
+final class VerticalScrollView: NSScrollView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        contentView = VerticalClipView()
+        hasHorizontalScroller = false
+        horizontalScrollElasticity = .none
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+}
+
+private final class VerticalClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var bounds = super.constrainBoundsRect(proposedBounds)
+        bounds.origin.x = 0
+        return bounds
+    }
+}

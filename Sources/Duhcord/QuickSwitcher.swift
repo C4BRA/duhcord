@@ -95,7 +95,7 @@ final class QuickSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         table.target = self
         table.doubleAction = #selector(pickSelected)
 
-        let scroll = NSScrollView()
+        let scroll = VerticalScrollView()
         scroll.documentView = table
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
