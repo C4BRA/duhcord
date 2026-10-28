@@ -1,7 +1,11 @@
 import CryptoKit
 import DuhcordUpdateKit
 import Foundation
+import OSLog
 import Security
+
+/// Visible with: log show --last 1h --predicate 'subsystem == "com.duhcord.app.Updater"'
+private let log = Logger(subsystem: "com.duhcord.app.Updater", category: "install")
 
 // The installer helper: an XPC service inside Duhcord.app. It's the one part of Duhcord outside the sandbox,
 // because a sandboxed app can't replace itself. macOS starts it only when Duhcord asks and it exits afterwards.
@@ -20,7 +24,10 @@ private let signingRequirement: String? = {
           SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
           SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: UInt32(kSecCSSigningInformation)), &info) == errSecSuccess,
           let certificates = (info as? [String: Any])?[kSecCodeInfoCertificates as String] as? [SecCertificate],
-          let leaf = certificates.first else { return nil }
+          let leaf = certificates.first else {
+        log.error("helper has no signing certificate (ad-hoc build?); refusing all requests")
+        return nil
+    }
     let sha1 = Insecure.SHA1.hash(data: SecCertificateCopyData(leaf) as Data).map { String(format: "%02x", $0) }.joined()
     return "identifier \"\(UpdateKit.appBundleIdentifier)\" and certificate leaf = H\"\(sha1)\""
 }()
@@ -29,12 +36,16 @@ final class Installer: NSObject, DuhcordUpdaterProtocol {
     private let fileManager = FileManager.default
 
     func install(archive: FileHandle, manifest: Data, signature: Data, reply: @escaping (String?) -> Void) {
+        log.info("install requested")
         do {
             try perform(archive: archive, manifestData: manifest, signature: signature)
+            log.info("install finished")
             reply(nil)
         } catch let error as UpdateError {
+            log.error("install failed: \(error.localizedDescription, privacy: .public)")
             reply(error.localizedDescription)
         } catch {
+            log.error("install failed: \(String(describing: error), privacy: .public)")
             reply(UpdateError.installFailed(error.localizedDescription).localizedDescription)
         }
     }
@@ -167,7 +178,11 @@ final class Installer: NSObject, DuhcordUpdaterProtocol {
 final class ServiceDelegate: NSObject, NSXPCListenerDelegate {
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         // Ad-hoc builds have no certificate to check callers against, so they accept nobody.
-        guard signingRequirement != nil else { return false }
+        guard signingRequirement != nil else {
+            log.error("rejected connection: helper isn't release-signed")
+            return false
+        }
+        log.info("accepted connection from pid \(connection.processIdentifier, privacy: .public)")
         connection.exportedInterface = NSXPCInterface(with: DuhcordUpdaterProtocol.self)
         connection.exportedObject = Installer()
         connection.resume()
@@ -175,6 +190,7 @@ final class ServiceDelegate: NSObject, NSXPCListenerDelegate {
     }
 }
 
+log.info("helper started; caller requirement: \(signingRequirement ?? "none", privacy: .public)")
 let delegate = ServiceDelegate()
 let listener = NSXPCListener.service()
 // Only Duhcord itself, signed with the same certificate as this helper, may connect. macOS enforces this.

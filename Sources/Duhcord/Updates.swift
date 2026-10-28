@@ -35,7 +35,8 @@ enum Updates {
         }
         guard let handle = try? FileHandle(forReadingFrom: archive),
               let helper = connection.remoteObjectProxyWithErrorHandler({ error in
-                  finish("The installer couldn't be started: \(error.localizedDescription)")
+                  let nsError = error as NSError
+                  finish("The installer couldn't be started: \(nsError.localizedDescription) (\(nsError.domain) \(nsError.code))")
               }) as? DuhcordUpdaterProtocol else {
             finish("The installer couldn't be started.")
             return
