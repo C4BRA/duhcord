@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 
 public enum GatewayEvent {
     case ready(ReadyEvent)
@@ -74,6 +71,9 @@ public final class GatewayClient: NSObject {
     private var reconnectAttempt = 0
     private var stopped = false
 
+    /// Where to reconnect: the resume address while a session can be resumed, else the main gateway.
+    private var reconnectURL: URL { (sessionID != nil ? resumeURL : nil) ?? ClientIdentity.gatewayURL }
+
     public init(token: String) {
         self.token = token
         super.init()
@@ -92,7 +92,7 @@ public final class GatewayClient: NSObject {
         queue.async {
             guard !self.stopped else { return }
             self.reconnectAttempt = 0
-            let url = (self.sessionID != nil ? self.resumeURL : nil) ?? ClientIdentity.gatewayURL
+            let url = self.reconnectURL
             self.open(url: url)
             self.publish(state: .connecting)
         }
@@ -153,16 +153,11 @@ public final class GatewayClient: NSObject {
     private func scheduleReconnect(closeCode: Int?) {
         guard !stopped else { return }
         if let closeCode {
-            if closeCode == 4004 {
-                stopped = true
-                teardown(closeCode: .normalClosure)
-                publish(state: .authenticationFailed)
-                return
-            }
             if Self.fatalCloseCodes.contains(closeCode) {
                 stopped = true
                 teardown(closeCode: .normalClosure)
-                publish(state: .closed(code: closeCode))
+                // 4004: the token was rejected.
+                publish(state: closeCode == 4004 ? .authenticationFailed : .closed(code: closeCode))
                 return
             }
             // These codes invalidate the session, so we must identify from scratch.
@@ -183,7 +178,7 @@ public final class GatewayClient: NSObject {
         publish(state: .reconnecting)
         queue.asyncAfter(deadline: .now() + Double.random(in: 1...3)) { [weak self] in
             guard let self, !self.stopped, self.task == nil else { return }
-            let url = (self.sessionID != nil ? self.resumeURL : nil) ?? ClientIdentity.gatewayURL
+            let url = self.reconnectURL
             self.open(url: url)
         }
     }
@@ -215,28 +210,67 @@ public final class GatewayClient: NSObject {
         }
     }
 
-    private struct Header: Decodable {
+    /// One gateway frame, parsed once: op/s/t are read, then `d` is decoded as the type `t` calls for.
+    /// Event types Duhcord doesn't use never have their `d` decoded.
+    private struct Payload: Decodable {
         let op: Int
         let s: Int?
-        let t: String?
-    }
+        let event: GatewayEvent?
+        let heartbeatInterval: Double?
+        let resumable: Bool?
 
-    private struct Frame<D: Decodable>: Decodable {
-        let d: D
-    }
+        private enum Keys: String, CodingKey { case op, s, t, d }
+        private struct Hello: Decodable { let heartbeatInterval: Double }
+        private struct Deleted: Decodable { let id: Snowflake }
 
-    private struct Hello: Decodable {
-        let heartbeatInterval: Double
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: Keys.self)
+            // Locals rather than the properties, so the helper below doesn't capture self before init finishes.
+            let opcode = try c.decode(Int.self, forKey: .op)
+            op = opcode
+            s = try c.decodeIfPresent(Int.self, forKey: .s)
+            let type = try c.decodeIfPresent(String.self, forKey: .t)
+
+            func d<T: Decodable>(_: T.Type) -> T? {
+                do {
+                    return try c.decode(T.self, forKey: .d)
+                } catch {
+                    #if DEBUG
+                    print("[gateway] failed to decode \(type ?? "op \(opcode)"): \(error)")
+                    #endif
+                    return nil
+                }
+            }
+
+            heartbeatInterval = opcode == Op.hello ? d(Hello.self)?.heartbeatInterval : nil
+            resumable = opcode == Op.invalidSession ? d(Bool.self) : nil
+            switch opcode == Op.dispatch ? (type ?? "") : "" {
+            case "READY": event = d(ReadyEvent.self).map { .ready($0) }
+            case "RESUMED": event = .resumed
+            case "GUILD_CREATE": event = d(Guild.self).map { .guildCreate($0) }
+            case "GUILD_DELETE": event = d(Deleted.self).map { .guildDelete($0.id) }
+            case "CHANNEL_CREATE": event = d(Channel.self).map { .channelCreate($0) }
+            case "CHANNEL_UPDATE": event = d(Channel.self).map { .channelUpdate($0) }
+            case "CHANNEL_DELETE": event = d(Channel.self).map { .channelDelete($0) }
+            case "MESSAGE_CREATE": event = d(Message.self).map { .messageCreate($0) }
+            case "MESSAGE_UPDATE": event = d(MessageUpdate.self).map { .messageUpdate($0) }
+            case "MESSAGE_DELETE": event = d(MessageDelete.self).map { .messageDelete($0) }
+            case "MESSAGE_ACK": event = d(MessageAck.self).map { .messageAck($0) }
+            case "TYPING_START": event = d(TypingStart.self).map { .typingStart($0) }
+            case "CHANNEL_UNREAD_UPDATE": event = d(ChannelUnreadUpdate.self).map { .channelUnreadUpdate($0) }
+            default: event = nil
+            }
+        }
     }
 
     private func handle(_ data: Data) {
-        guard let header = try? decoder.decode(Header.self, from: data) else { return }
-        if let s = header.s { sequence = s }
+        guard let payload = try? decoder.decode(Payload.self, from: data) else { return }
+        if let s = payload.s { sequence = s }
 
-        switch header.op {
+        switch payload.op {
         case Op.hello:
-            guard let hello = try? decoder.decode(Frame<Hello>.self, from: data).d else { return }
-            startHeartbeat(intervalMS: hello.heartbeatInterval)
+            guard let interval = payload.heartbeatInterval else { return }
+            startHeartbeat(intervalMS: interval)
             if let sessionID, let sequence {
                 sendResume(sessionID: sessionID, sequence: sequence)
             } else {
@@ -251,83 +285,38 @@ public final class GatewayClient: NSObject {
             reconnectAttempt = 0
             scheduleReconnect(closeCode: nil)
         case Op.invalidSession:
-            let resumable = (try? decoder.decode(Frame<Bool>.self, from: data).d) ?? false
-            if !resumable {
+            if payload.resumable != true {
                 sessionID = nil
                 sequence = nil
             }
             reconnectAttempt = 0
             scheduleReconnect(closeCode: nil)
         case Op.dispatch:
-            if let t = header.t { dispatch(type: t, data: data) }
+            if let event = payload.event { dispatch(event) }
         default:
             break
         }
     }
 
-    /// Decodes only the event types we use. Everything else is dropped after reading the header.
-    private func dispatch(type: String, data: Data) {
-        func decode<T: Decodable>(_: T.Type) -> T? {
-            do {
-                return try decoder.decode(Frame<T>.self, from: data).d
-            } catch {
-                #if DEBUG
-                print("[gateway] failed to decode \(type): \(error)")
-                #endif
-                return nil
-            }
-        }
-
-        let event: GatewayEvent?
-        switch type {
-        case "READY":
-            if let ready = decode(ReadyEvent.self) {
-                sessionID = ready.sessionId
-                // The resume URL comes from the server and our token is sent to it, so only accept Discord hosts.
-                if let urlString = ready.resumeGatewayUrl, let url = URL(string: urlString + "/?v=9&encoding=json"),
-                   url.scheme == "wss", SecureSession.isAllowed(host: url.host) {
-                    resumeURL = url
-                } else {
-                    resumeURL = nil
-                }
-                reconnectAttempt = 0
-                publish(state: .connected)
-                event = .ready(ready)
+    private func dispatch(_ event: GatewayEvent) {
+        switch event {
+        case .ready(let ready):
+            sessionID = ready.sessionId
+            // The resume URL comes from the server and our token is sent to it, so only accept Discord hosts.
+            if let urlString = ready.resumeGatewayUrl, let url = URL(string: urlString + "/?v=9&encoding=json"),
+               url.scheme == "wss", SecureSession.isAllowed(host: url.host) {
+                resumeURL = url
             } else {
-                event = nil
+                resumeURL = nil
             }
-        case "RESUMED":
             reconnectAttempt = 0
             publish(state: .connected)
-            event = .resumed
-        case "GUILD_CREATE":
-            event = decode(Guild.self).map { .guildCreate($0) }
-        case "GUILD_DELETE":
-            struct Deleted: Decodable { let id: Snowflake }
-            event = decode(Deleted.self).map { .guildDelete($0.id) }
-        case "CHANNEL_CREATE":
-            event = decode(Channel.self).map { .channelCreate($0) }
-        case "CHANNEL_UPDATE":
-            event = decode(Channel.self).map { .channelUpdate($0) }
-        case "CHANNEL_DELETE":
-            event = decode(Channel.self).map { .channelDelete($0) }
-        case "MESSAGE_CREATE":
-            event = decode(Message.self).map { .messageCreate($0) }
-        case "MESSAGE_UPDATE":
-            event = decode(MessageUpdate.self).map { .messageUpdate($0) }
-        case "MESSAGE_DELETE":
-            event = decode(MessageDelete.self).map { .messageDelete($0) }
-        case "MESSAGE_ACK":
-            event = decode(MessageAck.self).map { .messageAck($0) }
-        case "TYPING_START":
-            event = decode(TypingStart.self).map { .typingStart($0) }
-        case "CHANNEL_UNREAD_UPDATE":
-            event = decode(ChannelUnreadUpdate.self).map { .channelUnreadUpdate($0) }
+        case .resumed:
+            reconnectAttempt = 0
+            publish(state: .connected)
         default:
-            event = nil
+            break
         }
-
-        guard let event else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.delegate?.gateway(self, didReceive: event)
