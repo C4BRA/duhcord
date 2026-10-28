@@ -1,4 +1,5 @@
 import CDave
+import DuhcordVoiceKit
 import Foundation
 
 /// End-to-end encryption for a call (Discord's DAVE protocol), on top of libdave.
@@ -49,6 +50,20 @@ final class Dave {
     }
 
     static var maxProtocolVersion: UInt16 { daveMaxSupportedProtocolVersion() }
+
+    /// The call's current protocol version; 0 while end-to-end encryption is off.
+    var protocolVersion: UInt16 { daveSessionGetProtocolVersion(session) }
+
+    /// The call's privacy code, the same 30 digits the official app shows. Nil until we're in the group.
+    var privacyCode: String? {
+        guard protocolVersion != Self.disabledVersion else { return nil }
+        var output: UnsafeMutablePointer<UInt8>?
+        var length = 0
+        daveSessionGetLastEpochAuthenticator(session, &output, &length)
+        guard let output else { return nil }
+        defer { daveFree(output) }
+        return PrivacyCode.format(Array(UnsafeBufferPointer(start: output, count: length)))
+    }
 
     // MARK: - Media
 

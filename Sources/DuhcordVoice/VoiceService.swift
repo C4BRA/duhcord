@@ -6,6 +6,7 @@ final class VoiceService: NSObject, DuhcordVoiceProtocol {
     private weak var connection: NSXPCConnection?
     private let queue = DispatchQueue(label: "duhcord.voice", qos: .userInteractive)
     private var call: VoiceCall?
+    private var statsWanted = false
 
     init(connection: NSXPCConnection) {
         self.connection = connection
@@ -23,6 +24,7 @@ final class VoiceService: NSObject, DuhcordVoiceProtocol {
             }
             self.call = call
             call.start()
+            call.setStatsWanted(statsWanted)
         }
     }
 
@@ -34,6 +36,13 @@ final class VoiceService: NSObject, DuhcordVoiceProtocol {
         queue.async { [self] in
             call?.stop(reason: nil)
             call = nil
+        }
+    }
+
+    func setStatsWanted(_ wanted: Bool) {
+        queue.async { [self] in
+            statsWanted = wanted
+            call?.setStatsWanted(wanted)
         }
     }
 

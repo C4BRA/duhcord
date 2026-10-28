@@ -29,6 +29,17 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
     var onChange: (() -> Void)?
     /// Something the user should know about, such as a call that ended on its own.
     var onProblem: ((String) -> Void)?
+    /// New connection details, about once a second while `statsWanted` is on.
+    var onStats: ((VoiceStats) -> Void)?
+    private(set) var latestStats: VoiceStats?
+
+    /// Whether the helper should measure and send connection details: only while the details panel is open.
+    var statsWanted = false {
+        didSet {
+            guard statsWanted != oldValue, connection != nil else { return }
+            helper?.setStatsWanted(statsWanted)
+        }
+    }
 
     private let session: DiscordSession
     private var connection: NSXPCConnection?
@@ -170,6 +181,7 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
         status = .connecting
         onChange?()
         helper?.join(data)
+        if statsWanted { helper?.setStatsWanted(true) }
     }
 
     private func startJoinTimer() {
@@ -192,6 +204,7 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
         voiceSessionID = nil
         server = nil
         speaking = []
+        latestStats = nil
         onChange?()
     }
 
@@ -251,6 +264,10 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
             status = .connected(endToEndEncrypted: encrypted)
         case .speaking(let userIDs):
             speaking = Set(userIDs)
+        case .stats(let stats):
+            latestStats = stats
+            onStats?(stats)
+            return
         case .microphoneDenied:
             onProblem?("Duhcord can't use the microphone, so others can't hear you. "
                        + "Allow it in System Settings → Privacy & Security → Microphone, then rejoin the channel.")

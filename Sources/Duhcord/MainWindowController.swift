@@ -16,6 +16,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private let channelList: ChannelListViewController
     private let messages: MessagesViewController
     private var switcher: QuickSwitcher?
+    private var voiceDetails: VoiceDetailsWindowController?
     private let connectionLock = ConnectionLock()
 
     private var place: Place = .directMessages
@@ -73,12 +74,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         guildList.onSelect = { [weak self] place in self?.select(place: place) }
         channelList.onSelect = { [weak self] channelID in self?.select(channelID: channelID) }
         channelList.onJoinVoice = { [weak self] channel in self?.voice.join(channel) }
+        channelList.onShowVoiceDetails = { [weak self] in self?.showVoiceDetails() }
         channelList.onMissingNames = { [weak session] guildID, userIDs in
             session?.requestMemberNames(guildID: guildID, userIDs: userIDs)
         }
         voice.onChange = { [weak self] in
-            self?.channelList.voiceChanged()
-            self?.refreshVoiceToolbar()
+            guard let self else { return }
+            self.channelList.voiceChanged()
+            self.refreshVoiceToolbar()
+            // The details belong to one call; they close when it ends.
+            if !self.voice.isInCall { self.voiceDetails?.close() }
         }
         voice.onProblem = { [weak self] message in self?.showVoiceProblem(message) }
         session.store.onChange = { [weak self] change in self?.handle(change) }
@@ -309,6 +314,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             return
         }
         item.toolTip = item.label
+    }
+
+    private func showVoiceDetails() {
+        guard voice.isInCall else { return }
+        if voiceDetails == nil {
+            let details = VoiceDetailsWindowController(voice: voice)
+            details.onClose = { [weak self] in self?.voiceDetails = nil }
+            voiceDetails = details
+        }
+        voiceDetails?.show()
     }
 
     @objc func toggleMute(_ sender: Any?) { voice.toggleMute() }

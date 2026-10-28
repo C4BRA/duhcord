@@ -6,6 +6,8 @@ import DuhcordCore
 final class ChannelListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     var onSelect: ((Snowflake) -> Void)?
     var onJoinVoice: ((Channel) -> Void)?
+    /// "Voice Connected" in the voice bar was clicked.
+    var onShowVoiceDetails: (() -> Void)?
     /// People in voice channels whose names we don't know yet.
     var onMissingNames: ((Snowflake, [Snowflake]) -> Void)?
 
@@ -77,6 +79,7 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         voiceBar.onMute = { [weak self] in self?.voice.toggleMute() }
         voiceBar.onDeafen = { [weak self] in self?.voice.toggleDeafen() }
         voiceBar.onLeave = { [weak self] in self?.voice.leave() }
+        voiceBar.onShowDetails = { [weak self] in self?.onShowVoiceDetails?() }
 
         let container = NSVisualEffectView()
         container.material = .sidebar
@@ -438,14 +441,16 @@ private final class ChannelCell: NSTableCellView {
     }
 }
 
-/// The call we're in, docked at the bottom of the channel list: where, whether it's connected and end-to-end
-/// encrypted, and mute, deafen and leave. Same margins and type as the rest of the sidebar.
+/// The call we're in, docked at the bottom of the channel list: where and whether it's connected, mute, deafen
+/// and leave, and room for video, screen sharing and activities (not available yet). "Voice Connected" opens
+/// the connection details. Same margins and type as the rest of the sidebar.
 private final class VoiceBar: NSView {
     var onMute: (() -> Void)?
     var onDeafen: (() -> Void)?
     var onLeave: (() -> Void)?
+    var onShowDetails: (() -> Void)?
 
-    private let statusLabel = NSTextField(labelWithString: "")
+    private let statusLabel = NSButton(title: "", target: nil, action: nil)
     private let placeLabel = NSTextField(labelWithString: "")
     private let muteButton = VoiceBar.button("Mute")
     private let deafenButton = VoiceBar.button("Deafen")
@@ -453,10 +458,12 @@ private final class VoiceBar: NSView {
 
     init() {
         super.init(frame: .zero)
-        statusLabel.font = Theme.smallFont.withWeight(.semibold)
+        statusLabel.isBordered = false
+        statusLabel.target = self
+        statusLabel.action = #selector(showDetails)
+        statusLabel.lineBreakMode = .byTruncatingTail
         placeLabel.font = Theme.smallFont
         placeLabel.lineBreakMode = .byTruncatingTail
-        statusLabel.lineBreakMode = .byTruncatingTail
         [statusLabel, placeLabel].forEach { $0.setContentCompressionResistancePriority(.defaultLow, for: .horizontal) }
         leaveButton.image = Self.symbol("phone.down.fill", "Disconnect")
         leaveButton.contentTintColor = .systemRed
@@ -469,7 +476,14 @@ private final class VoiceBar: NSView {
 
         let divider = NSBox()
         divider.boxType = .separator
-        let views: [NSView] = [divider, statusLabel, placeLabel, muteButton, deafenButton, leaveButton]
+        let comingSoon = NSStackView(views: [
+            Self.box("video.fill", "Video"),
+            Self.box("display", "Share Your Screen"),
+            Self.box("gamecontroller.fill", "Activities"),
+        ])
+        comingSoon.distribution = .fillEqually
+        comingSoon.spacing = Theme.Spacing.related
+        let views: [NSView] = [divider, statusLabel, placeLabel, muteButton, deafenButton, leaveButton, comingSoon]
         views.forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             addSubview($0)
@@ -485,8 +499,11 @@ private final class VoiceBar: NSView {
             placeLabel.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: Theme.Spacing.tight / 2),
             placeLabel.leadingAnchor.constraint(equalTo: statusLabel.leadingAnchor),
             placeLabel.trailingAnchor.constraint(lessThanOrEqualTo: muteButton.leadingAnchor, constant: -Theme.Spacing.related),
+            comingSoon.topAnchor.constraint(equalTo: placeLabel.bottomAnchor, constant: Theme.Spacing.group),
+            comingSoon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.group),
+            comingSoon.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.group),
             // The same 12 pt bottom margin as the message box next to it.
-            placeLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Theme.Spacing.group),
+            comingSoon.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Theme.Spacing.group),
 
             leaveButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.related),
             deafenButton.trailingAnchor.constraint(equalTo: leaveButton.leadingAnchor, constant: -Theme.Spacing.tight),
@@ -507,15 +524,13 @@ private final class VoiceBar: NSView {
                 serverDeafened: Bool) {
         switch status {
         case .idle, .connecting:
-            statusLabel.stringValue = "Connecting…"
-            statusLabel.textColor = .secondaryLabelColor
+            setStatus("Connecting…", color: .secondaryLabelColor)
+            statusLabel.isEnabled = false
             statusLabel.toolTip = nil
-        case .connected(let encrypted):
-            statusLabel.stringValue = "Voice Connected"
-            statusLabel.textColor = .systemGreen
-            statusLabel.toolTip = encrypted
-                ? "Only the people in this call can hear it."
-                : "Setting up end-to-end encryption. Nothing you say is sent until it's ready."
+        case .connected:
+            setStatus("Voice Connected", color: .systemGreen)
+            statusLabel.isEnabled = true
+            statusLabel.toolTip = "Show connection details"
         }
         if serverMuted || serverDeafened {
             placeLabel.stringValue = serverDeafened ? "Deafened by a moderator" : "Muted by a moderator"
@@ -534,6 +549,15 @@ private final class VoiceBar: NSView {
         deafenButton.toolTip = deafened ? "Undeafen" : "Deafen"
     }
 
+    private func setStatus(_ text: String, color: NSColor) {
+        statusLabel.attributedTitle = NSAttributedString(string: text, attributes: [
+            .font: Theme.smallFont.withWeight(.semibold),
+            .foregroundColor: color,
+        ])
+        statusLabel.setAccessibilityLabel(text)
+    }
+
+    @objc private func showDetails() { onShowDetails?() }
     @objc private func mute() { onMute?() }
     @objc private func deafen() { onDeafen?() }
     @objc private func leave() { onLeave?() }
@@ -541,6 +565,19 @@ private final class VoiceBar: NSView {
     private static func symbol(_ name: String, _ label: String) -> NSImage? {
         NSImage(systemSymbolName: name, accessibilityDescription: label)?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+    }
+
+    /// A video, screen sharing or activities button, shown for where they'll go but not available yet.
+    private static func box(_ symbolName: String, _ label: String) -> NSButton {
+        let button = NSButton(title: "", target: nil, action: nil)
+        button.bezelStyle = .rounded
+        button.controlSize = .large
+        button.imagePosition = .imageOnly
+        button.image = symbol(symbolName, label)
+        button.isEnabled = false
+        button.toolTip = "\(label) — coming soon"
+        button.setAccessibilityLabel("\(label), coming soon")
+        return button
     }
 
     /// Borderless until hovered, like toolbar accessory buttons elsewhere in macOS.

@@ -29,7 +29,7 @@ A small, native Discord client for macOS, written in Swift with AppKit: no Elect
 
 ## Voice
 
-Voice channels in the channel list show who's in them, with a green ring around whoever is talking. Click a channel to join it. The bar at the bottom of the channel list and the toolbar both have mute, deafen and disconnect.
+Voice channels in the channel list show who's in them, with a green ring around whoever is talking. Click a channel to join it. The bar at the bottom of the channel list and the toolbar both have mute, deafen and disconnect. Click **Voice Connected** to see the server, ping, packet loss and whether the call is end-to-end encrypted. **Show advanced details** adds everything else, including the call's privacy code. Duhcord only measures these while that window is open.
 
 - **End-to-end encrypted.** Calls use Discord's DAVE protocol through Discord's own open-source library, libdave, so Discord's servers relay the audio without being able to hear it. Nothing you say is sent until the bar shows **End-to-End Encrypted**.
 - **Kept away from your login.** Calls run in a separate helper process, sandboxed on its own with only network and microphone access. It gets a voice token that's good for one call, never your account token. libdave is C++, and running it there keeps any bug in it away from your login.

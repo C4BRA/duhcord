@@ -28,6 +28,8 @@ final class VoiceCall {
     private var lastSequence = -1
     private var resuming = false
     private var resumeAttempted = false
+    /// Round trips measured from heartbeat acknowledgements: when (uptime nanoseconds) and how long (ms).
+    private var pings: [(time: UInt64, milliseconds: Double)] = []
 
     // UDP
     private var udp: NWConnection?
@@ -56,10 +58,12 @@ final class VoiceCall {
     // Diagnostics: counts only, logged every 10 seconds while they change.
     private struct Stats: Equatable {
         var received = 0, unknownSender = 0, unreadable = 0, undecryptable = 0, played = 0
-        var spoken = 0, sent = 0, notEncrypted = 0
+        var spoken = 0, sent = 0, notEncrypted = 0, lost = 0
     }
     private var stats = Stats()
     private var loggedStats = Stats()
+    /// Sends `VoiceEvent.stats` every second while the app's details panel is open.
+    private var statsTimer: DispatchSourceTimer?
 
     // Reporting
     private var connected = false
@@ -97,6 +101,8 @@ final class VoiceCall {
     }
 
     func setMuted(_ muted: Bool, deafened: Bool) {
+        // Nothing is received while deafened; forget where everyone was so the gap doesn't count as loss.
+        if deafened, !self.deafened { lastPacketSequence.removeAll() }
         self.muted = muted
         self.deafened = deafened
         if talking, muted || deafened { stopTalking() }
@@ -107,6 +113,7 @@ final class VoiceCall {
         guard !stopped else { return }
         stopped = true
         heartbeat?.cancel()
+        statsTimer?.cancel()
         timers.forEach { $0.cancel() }
         socket?.cancel(with: .normalClosure, reason: nil)
         socket = nil
@@ -208,8 +215,12 @@ final class VoiceCall {
             ready(d)
         case 4: // Session description
             sessionDescription(d)
-        case 6: // Heartbeat ACK
+        case 6: // Heartbeat ACK: echoes the time we sent, which gives the round trip
             awaitingAck = false
+            if let sent = (d["t"] as? NSNumber)?.doubleValue {
+                let milliseconds = Date().timeIntervalSince1970 * 1000 - sent
+                if (0..<60_000).contains(milliseconds) { recordPing(milliseconds) }
+            }
         case 9: // Resumed
             resuming = false
             resumeAttempted = false
@@ -390,7 +401,11 @@ final class VoiceCall {
             return
         }
         // Drop duplicates and stragglers that arrive after newer packets.
-        if let last = lastPacketSequence[packet.ssrc], Int16(bitPattern: packet.sequence &- last) <= 0 { return }
+        if let last = lastPacketSequence[packet.ssrc] {
+            let step = Int16(bitPattern: packet.sequence &- last)
+            if step <= 0 { return }
+            stats.lost += Int(step) - 1
+        }
         lastPacketSequence[packet.ssrc] = packet.sequence
 
         guard let frame = dave?.decrypt(packet.payload, from: userID) else {
@@ -540,6 +555,43 @@ final class VoiceCall {
             held back (no end-to-end key) \(s.notEncrypted, privacy: .public); e2ee \(self.encrypted, privacy: .public)
             """)
         }
+    }
+
+    func setStatsWanted(_ wanted: Bool) {
+        statsTimer?.cancel()
+        statsTimer = nil
+        guard wanted, !stopped else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: 1)
+        timer.setEventHandler { [weak self] in self?.reportStats() }
+        statsTimer = timer
+        timer.resume()
+    }
+
+    private func recordPing(_ milliseconds: Double) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        pings.append((now, milliseconds))
+        pings.removeAll { now - $0.time > 300_000_000_000 }
+    }
+
+    private func reportStats() {
+        guard connected, !stopped else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        // "c-ord12-816a989c.discord.media:443" → "c-ord12-816a989c"
+        let server = String(request.endpoint.prefix { $0 != "." && $0 != ":" })
+        let transport: String
+        switch mode {
+        case .aes256GCM?: transport = "AES-256-GCM"
+        case .xChaCha20Poly1305?: transport = "XChaCha20-Poly1305"
+        case nil: transport = "None"
+        }
+        onEvent?(.stats(VoiceStats(
+            server: server,
+            pings: pings.map { .init(age: Double(now - $0.time) / 1e9, milliseconds: $0.milliseconds) },
+            packetsReceived: stats.received - stats.unreadable, packetsLost: stats.lost, packetsSent: stats.sent,
+            unreadable: stats.unreadable, undecryptable: stats.undecryptable, endToEndEncrypted: encrypted,
+            transport: transport, daveProtocolVersion: Int(dave?.protocolVersion ?? 0), privacyCode: dave?.privacyCode,
+            microphone: AudioDevices.defaultInputName, output: AudioDevices.defaultOutputName)))
     }
 
     private func startSpeakingReports() {

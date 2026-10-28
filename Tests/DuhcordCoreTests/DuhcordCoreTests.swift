@@ -872,4 +872,28 @@ final class VoiceTransportTests: XCTestCase {
         store.apply(.voiceStateUpdate(try makeDiscordDecoder().decode(VoiceState.self, from: Data(voice.utf8))))
         XCTAssertEqual(store.memberName("7", in: "100"), "seven")
     }
+
+    func testPrivacyCodeFormat() {
+        // Six groups of five bytes, big-endian, modulo 100000, zero-padded; extra bytes are ignored.
+        XCTAssertEqual(PrivacyCode.format(Array(0..<32)), "09060 60585 12110 63635 15160 66685")
+        XCTAssertEqual(PrivacyCode.format([UInt8](repeating: 0xff, count: 30)), "27775 27775 27775 27775 27775 27775")
+        XCTAssertNil(PrivacyCode.format(Array(0..<29)))
+    }
+
+    func testVoiceStatsSummaryAndEncoding() throws {
+        let stats = VoiceStats(server: "c-ord12-816a989c", pings: [.init(age: 20, milliseconds: 40), .init(age: 5, milliseconds: 60)],
+                               packetsReceived: 990, packetsLost: 10, packetsSent: 5, unreadable: 0, undecryptable: 0,
+                               endToEndEncrypted: true, transport: "AES-256-GCM", daveProtocolVersion: 1,
+                               privacyCode: nil, microphone: "MacBook Pro Microphone", output: nil)
+        XCTAssertEqual(stats.lossPercent, 1, accuracy: 0.0001)
+        XCTAssertEqual(stats.averagePing, 50)
+        let event = VoiceEvent.stats(stats)
+        XCTAssertEqual(try JSONDecoder().decode(VoiceEvent.self, from: JSONEncoder().encode(event)), event)
+
+        let empty = VoiceStats(server: "", pings: [], packetsReceived: 0, packetsLost: 0, packetsSent: 0, unreadable: 0,
+                               undecryptable: 0, endToEndEncrypted: false, transport: "", daveProtocolVersion: 0,
+                               privacyCode: nil, microphone: nil, output: nil)
+        XCTAssertEqual(empty.lossPercent, 0)
+        XCTAssertNil(empty.averagePing)
+    }
 }

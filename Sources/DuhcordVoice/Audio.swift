@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import os
 
 /// Mixes everyone's decoded audio for the speakers.
@@ -185,5 +186,26 @@ final class AudioIO {
             onFrame?(Array(pending.prefix(Opus.frameSize)))
             pending.removeFirst(Opus.frameSize)
         }
+    }
+}
+
+/// The names of the system's default microphone and speakers, for the connection details panel.
+enum AudioDevices {
+    static var defaultInputName: String? { name(of: kAudioHardwarePropertyDefaultInputDevice) }
+    static var defaultOutputName: String? { name(of: kAudioHardwarePropertyDefaultOutputDevice) }
+
+    private static func name(of selector: AudioObjectPropertySelector) -> String? {
+        var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var device = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device) == noErr,
+              device != kAudioObjectUnknown else { return nil }
+        address.mSelector = kAudioObjectPropertyName
+        var name: Unmanaged<CFString>?
+        size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        let status = withUnsafeMutablePointer(to: &name) { AudioObjectGetPropertyData(device, &address, 0, nil, &size, $0) }
+        guard status == noErr, let name else { return nil }
+        return name.takeRetainedValue() as String
     }
 }
