@@ -214,7 +214,9 @@ final class GIFAnimator {
     /// Fetches the GIF through the media session (or the cache) and animates it, calling `frame` on the main thread.
     func start(_ url: URL, frame: @escaping (CGImage) -> Void, failed: @escaping () -> Void) {
         stop = false
-        Task { [weak self] in
+        let owner = WeakReference(self)
+        let callbacks = Handoff(value: (frame: frame, failed: failed))
+        Task {
             let data: Data
             if let cached = Self.cache.object(forKey: url as NSURL) {
                 data = cached as Data
@@ -222,22 +224,26 @@ final class GIFAnimator {
                 guard MediaRequest.isAllowedImageURL(url),
                       let result = try? await SecureSession.media.session.data(from: url),
                       (result.1 as? HTTPURLResponse)?.statusCode == 200 else {
-                    await MainActor.run { failed() }
+                    await MainActor.run { callbacks.value.failed() }
                     return
                 }
                 data = result.0
                 Self.cache.setObject(data as NSData, forKey: url as NSURL, cost: data.count)
             }
+            let bytes = Handoff(value: data)
             await MainActor.run {
-                guard let self, !self.stop else { return }
+                guard let animator = owner.object, !animator.stop else { return }
+                let data = bytes.value
+                let frame = callbacks.value.frame
+                let failed = callbacks.value.failed
                 // Only hand ImageIO's animator formats it's meant for.
                 guard let source = CGImageSourceCreateWithData(data as CFData, nil),
                       let type = CGImageSourceGetType(source) as String?, Self.animatableTypes.contains(type) else {
                     failed()
                     return
                 }
-                let status = CGAnimateImageDataWithBlock(data as CFData, nil) { [weak self] _, image, stopPointer in
-                    guard let self, !self.stop else {
+                let status = CGAnimateImageDataWithBlock(data as CFData, nil) { [weak animator] _, image, stopPointer in
+                    guard let animator, !animator.stop else {
                         stopPointer.pointee = true
                         return
                     }

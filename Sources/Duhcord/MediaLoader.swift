@@ -49,9 +49,11 @@ final class MediaLoader {
 
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let maxPixel = Int((max(pointSize.width, pointSize.height) * scale).rounded(.up))
-        tasks[url] = Task { [weak self] in
-            let image = await Self.fetch(url, maxPixel: maxPixel, pointSize: pointSize, queue: self?.decodeQueue)
-            await MainActor.run { self?.finish(url, image: image) }
+        let owner = WeakReference(self)
+        let queue = Handoff(value: decodeQueue)
+        tasks[url] = Task {
+            let image = Handoff(value: await Self.fetch(url, maxPixel: maxPixel, pointSize: pointSize, queue: queue.value))
+            await MainActor.run { owner.object?.finish(url, image: image.value) }
         }
         return token
     }

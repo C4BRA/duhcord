@@ -38,7 +38,6 @@ public final class RESTClient {
         return try decoder.decode(LossyArray<Message>.self, from: data).elements
     }
 
-    @discardableResult
     /// The sent message comes back over the gateway, so the response isn't decoded.
     public func sendMessage(_ content: String, to channelID: Snowflake, nonce: String) async throws {
         let body: [String: Any] = ["content": content, "nonce": nonce, "tts": false, "flags": 0]
