@@ -223,7 +223,7 @@ final class ProfileHeaderView: NSView {
             $0.translatesAutoresizingMaskIntoConstraints = false
             addSubview($0)
         }
-        bannerHeight = banner.heightAnchor.constraint(equalToConstant: bannerHeight)
+        self.bannerHeight = banner.heightAnchor.constraint(equalToConstant: bannerHeight)
         NSLayoutConstraint.activate([
             banner.topAnchor.constraint(equalTo: topAnchor),
             banner.leadingAnchor.constraint(equalTo: leadingAnchor),
