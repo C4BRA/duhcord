@@ -6,7 +6,9 @@ import Foundation
 /// new desktop builds.
 public enum ClientIdentity {
     public static let apiBase = URL(string: "https://discord.com/api/v9")!
-    public static let gatewayURL = URL(string: "wss://gateway.discord.gg/?v=9&encoding=json")!
+    /// Query for every gateway connection. zlib-stream compresses everything Discord sends us (see ZlibStream).
+    static let gatewayQuery = "/?v=9&encoding=json&compress=zlib-stream"
+    public static let gatewayURL = URL(string: "wss://gateway.discord.gg" + gatewayQuery)!
 
     static let clientVersion = "0.0.330"
     static let electronVersion = "32.2.7"

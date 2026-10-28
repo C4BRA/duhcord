@@ -52,6 +52,8 @@ public final class GatewayClient: NSObject {
     }
 
     /// Close codes after which reconnecting is pointless.
+    /// Cap on one decompressed message. The largest READY is tens of MB; this stops a decompression bomb.
+    static let maxMessageSize = 128 * 1024 * 1024
     private static let fatalCloseCodes: Set<Int> = [4004, 4010, 4011, 4012, 4013, 4014]
 
     public weak var delegate: GatewayClientDelegate?
@@ -62,6 +64,8 @@ public final class GatewayClient: NSObject {
     private let session = SecureSession.shared.session
 
     private var task: URLSessionWebSocketTask?
+    /// Decompresses the current socket's stream; replaced with every new socket.
+    private var inflater: ZlibStream?
     private var heartbeatTimer: DispatchSourceTimer?
     private var awaitingAck = false
     private var sequence: Int?
@@ -135,8 +139,9 @@ public final class GatewayClient: NSObject {
         request.setValue(ClientIdentity.userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("https://discord.com", forHTTPHeaderField: "Origin")
         let task = session.webSocketTask(with: request)
-        // READY for a user account can be several megabytes.
+        // READY for a user account can be several megabytes, even compressed.
         task.maximumMessageSize = 64 * 1024 * 1024
+        inflater = ZlibStream(maxMessageSize: Self.maxMessageSize)
         self.task = task
         task.resume()
         receive(on: task)
@@ -148,6 +153,7 @@ public final class GatewayClient: NSObject {
         awaitingAck = false
         task?.cancel(with: closeCode, reason: nil)
         task = nil
+        inflater = nil
     }
 
     private func scheduleReconnect(closeCode: Int?) {
@@ -197,7 +203,18 @@ public final class GatewayClient: NSObject {
                     case .string(let text):
                         self.handle(Data(text.utf8))
                     case .data(let data):
-                        self.handle(data)
+                        // Compressed frames. A stream that fails to decompress can't be picked up mid-way,
+                        // so drop the socket and resume on a fresh one.
+                        do {
+                            guard let inflater = self.inflater else { throw ZlibStream.Failure.corrupt }
+                            if let message = try inflater.push(data) { self.handle(message) }
+                        } catch {
+                            #if DEBUG
+                            print("[gateway] couldn't decompress: \(error)")
+                            #endif
+                            self.scheduleReconnect(closeCode: nil)
+                            return
+                        }
                     @unknown default:
                         break
                     }
@@ -303,7 +320,7 @@ public final class GatewayClient: NSObject {
         case .ready(let ready):
             sessionID = ready.sessionId
             // The resume URL comes from the server and our token is sent to it, so only accept Discord hosts.
-            if let urlString = ready.resumeGatewayUrl, let url = URL(string: urlString + "/?v=9&encoding=json"),
+            if let urlString = ready.resumeGatewayUrl, let url = URL(string: urlString + ClientIdentity.gatewayQuery),
                url.scheme == "wss", SecureSession.isAllowed(host: url.host) {
                 resumeURL = url
             } else {

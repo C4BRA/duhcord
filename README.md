@@ -48,6 +48,7 @@ Other files show up as links that open in your browser. Custom emoji show as `:n
 ## How it stays light
 
 - It's a native AppKit app built only for Apple silicon (arm64), with no bundled browser. The app is a few MB.
+- Everything Discord sends over the live connection arrives compressed (`zlib-stream`), usually 3–10× smaller, and is unpacked by macOS's built-in Compression framework. One decompressed message is capped at 128 MB, so a malicious stream can't exhaust memory.
 - It only decodes the gateway event types it uses and drops the rest after reading the header.
 - It keeps messages in memory for at most 8 channels, 300 messages each, so memory doesn't grow over time.
 - It never loads history in the background. Older messages load only when you scroll up.

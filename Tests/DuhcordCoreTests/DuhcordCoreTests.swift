@@ -691,3 +691,40 @@ final class LinkGuardNormalizationTests: XCTestCase {
         guard case .warn = LinkGuard.check(URL(string: "https://discord.com/api/v10/oauth2/authorize?client_id=1&scope=identify")!) else { return XCTFail() }
     }
 }
+
+final class ZlibStreamTests: XCTestCase {
+    // Two gateway messages from one zlib stream, each ended with a sync flush (recorded with Python's zlib).
+    private let hello = Data(base64Encoded: "eJyqVsovULIyNNBRSlGyqlbKSE0sKklKTSyJz8wrSS0qS8xRsjIxNDI1qK0FAAAA//8=")!
+    private let ack = Data(base64Encoded: "qlYqUbLKK83J0VEqhjHAeg3BekECtQAAAAD//w==")!
+
+    func testMessagesShareOneStream() throws {
+        let stream = ZlibStream(maxMessageSize: 1024)
+        XCTAssertEqual(try stream.push(hello).map { String(decoding: $0, as: UTF8.self) },
+                       #"{"op":10,"d":{"heartbeat_interval":41250}}"#)
+        // The second message refers back to the first, so it only decodes on the same stream.
+        XCTAssertEqual(try stream.push(ack).map { String(decoding: $0, as: UTF8.self) },
+                       #"{"t":null,"s":null,"op":11,"d":null}"#)
+    }
+
+    func testMessageSplitAcrossFrames() throws {
+        let stream = ZlibStream(maxMessageSize: 1024)
+        let cut = hello.count / 2
+        XCTAssertNil(try stream.push(hello.prefix(cut)))
+        XCTAssertEqual(try stream.push(hello.dropFirst(cut)).map { String(decoding: $0, as: UTF8.self) },
+                       #"{"op":10,"d":{"heartbeat_interval":41250}}"#)
+    }
+
+    func testOversizedMessageIsRefused() {
+        let stream = ZlibStream(maxMessageSize: 10)
+        XCTAssertThrowsError(try stream.push(hello))
+    }
+
+    func testGarbageIsRefused() {
+        let stream = ZlibStream(maxMessageSize: 1024)
+        XCTAssertThrowsError(try stream.push(Data([0x12, 0x34, 0x56, 0x00, 0x00, 0xFF, 0xFF])))
+    }
+
+    func testGatewayAsksForCompression() {
+        XCTAssertTrue(ClientIdentity.gatewayURL.absoluteString.hasSuffix("compress=zlib-stream"))
+    }
+}
