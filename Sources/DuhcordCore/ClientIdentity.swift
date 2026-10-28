@@ -20,10 +20,10 @@ public enum ClientIdentity {
         return value
     }
 
-    /// The Discord desktop app version (e.g. "0.0.350").
-    static let clientVersion = bundled("DuhcordDiscordClientVersion") ?? "0.0.350"
+    /// The Discord desktop app version (e.g. "0.0.420").
+    static let clientVersion = bundled("DuhcordDiscordClientVersion") ?? "0.0.420"
     /// Discord's web build number, which gates features and experiments on Discord's side.
-    static let buildNumber = bundled("DuhcordDiscordBuildNumber").flatMap(Int.init) ?? 397_417
+    static let buildNumber = bundled("DuhcordDiscordBuildNumber").flatMap(Int.init) ?? 653_945
     static let electronVersion = "35.1.5"
     static let chromeVersion = "134.0.6998.179"
 
