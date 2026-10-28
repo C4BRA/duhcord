@@ -45,12 +45,16 @@ struct MessageLayout {
     var boxes: [Box] = []
     var texts: [Text] = []
     var media: [Media] = []
+    /// The author's profile picture, beside the name line (not on grouped follow-up messages).
+    var avatar: (frame: NSRect, url: URL?)?
 }
 
 enum MessageLayoutBuilder {
     static let imageMax = NSSize(width: 360, height: 270)
     static let thumbnailSize: CGFloat = 72
     static let embedMaxWidth: CGFloat = 440
+    static let avatarSize: CGFloat = 32
+    static let avatarColumn: CGFloat = 42
     private static let bar: CGFloat = 4
     private static let pad: CGFloat = 10
 
@@ -58,13 +62,17 @@ enum MessageLayoutBuilder {
                       topPadding: CGFloat, bottomPadding: CGFloat, resolver: Markdown.Resolver) -> MessageLayout {
         let mode = Settings.mediaPreviews
         let showMedia = mode != .off
-        let x = sidePadding
-        let width = max(50, cellWidth - 2 * sidePadding)
+        // Everything sits right of a column for profile pictures, so follow-ups line up under the name.
+        let x = sidePadding + avatarColumn
+        let width = max(50, cellWidth - 2 * sidePadding - avatarColumn)
         let box = NSSize(width: min(imageMax.width, width), height: imageMax.height)
         var layout = MessageLayout()
         var y = topPadding
 
         if !grouped {
+            let scale = NSScreen.main?.backingScaleFactor ?? 2
+            layout.avatar = (NSRect(x: sidePadding, y: y + 2, width: avatarSize, height: avatarSize),
+                             MediaRequest.avatarURL(for: message.author, pixels: Int(avatarSize * scale)))
             layout.header = NSRect(x: x, y: y, width: width, height: headerHeight)
             y += headerHeight
         }
@@ -152,7 +160,7 @@ enum MessageLayoutBuilder {
             y = boxBottom
         }
 
-        layout.height = y + bottomPadding
+        layout.height = max(y, layout.avatar?.frame.maxY ?? 0) + bottomPadding
         return layout
     }
 

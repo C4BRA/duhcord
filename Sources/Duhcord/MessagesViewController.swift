@@ -17,6 +17,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private let scrollView = NSScrollView()
     private let table = NSTableView()
     private let input = ComposerView()
+    private let typingTabs = TypingTabsView()
+    private var typingTimer: Timer?
 
     private var channelID: Snowflake?
     private var rows: [Row] = []
@@ -67,6 +69,13 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         input.placeholder = "Message"
         input.font = Theme.messageFont
         input.onSend = { [weak self] text in self?.send(text) }
+        input.onTextChange = { [weak self] text in
+            guard let self, Settings.sendTypingIndicator, let channelID = self.channelID,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            self.session.userIsTyping(in: channelID)
+        }
+        session.onTypingChange = { [weak self] in self?.refreshTyping() }
+        scrollView.automaticallyAdjustsContentInsets = false
         // Growing the box shrinks the message list; stay pinned to the newest message if we were.
         input.onHeightChange = { [weak self] in
             guard let self, self.isAtBottom else { return }
@@ -80,7 +89,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         let divider = NSBox()
         divider.boxType = .separator
 
-        [titleLabel, divider, scrollView, input, emptyLabel].forEach {
+        [titleLabel, divider, scrollView, typingTabs, input, emptyLabel].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
         }
@@ -95,6 +104,11 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             input.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 8),
+            // The tabs' bottom edge is the message box's top edge, so they rise out from behind it.
+            typingTabs.bottomAnchor.constraint(equalTo: input.topAnchor),
+            typingTabs.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 14),
+            typingTabs.heightAnchor.constraint(equalToConstant: TypingTabsView.tabSize.height),
+            typingTabs.widthAnchor.constraint(equalToConstant: 7 * (TypingTabsView.tabSize.width + 4)),
             input.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.sidePadding),
             input.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Self.sidePadding),
             input.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
@@ -224,6 +238,32 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
+    // MARK: - Typing tabs
+
+    private func refreshTyping() {
+        let wasAtBottom = isAtBottom
+        typingTabs.update(session.typing.entries)
+        // Keep the newest message clear of the tabs while any are showing.
+        let inset: CGFloat = typingTabs.hasTabs ? TypingTabsView.tabSize.height - 8 : 0
+        if scrollView.contentInsets.bottom != inset {
+            scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: inset, right: 0)
+            if wasAtBottom { scrollToBottom() }
+        }
+        // One timer, set for the next tab that needs to lower or leave. None while there are no tabs.
+        typingTimer?.invalidate()
+        typingTimer = nil
+        if let deadline = session.typing.nextDeadline {
+            let timer = Timer(fire: deadline, interval: 0, repeats: false) { [weak self] _ in
+                guard let self else { return }
+                self.session.typing.tick(at: Date())
+                self.refreshTyping()
+            }
+            timer.tolerance = 0.5
+            RunLoop.main.add(timer, forMode: .common)
+            typingTimer = timer
+        }
+    }
+
     // MARK: - Sending
 
     private func send(_ text: String) {
@@ -291,6 +331,7 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
     static func topPadding(grouped: Bool) -> CGFloat { grouped ? 1 : (Settings.compactMessages ? 4 : 10) }
 
     private let headerField = NSTextField(labelWithString: "")
+    private let avatarView = RemoteImageView()
     private let bodyView = NSTextView()
     /// Reused between rows; only as many as the busiest message needed are ever created.
     private var embedTexts: [NSTextView] = []
@@ -304,6 +345,8 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
         identifier = Self.identifier
         headerField.lineBreakMode = .byTruncatingTail
         setUpText(bodyView)
+        avatarView.cornerRadius = MessageLayoutBuilder.avatarSize / 2
+        addSubview(avatarView)
         addSubview(headerField)
         addSubview(bodyView)
     }
@@ -326,6 +369,11 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
         current = layout
         headerField.isHidden = header == nil
         if let header { headerField.attributedStringValue = header }
+        avatarView.isHidden = layout.avatar == nil
+        if let avatar = layout.avatar {
+            avatarView.frame = avatar.frame
+            avatarView.setImage(avatar.url, pointSize: avatar.frame.size)
+        }
         bodyView.textStorage?.setAttributedString(layout.body.text)
         bodyView.isHidden = layout.body.text.length == 0
 
@@ -359,7 +407,10 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
         needsDisplay = true
     }
 
-    func cancelMedia() { mediaViews.forEach { $0.cancel() } }
+    func cancelMedia() {
+        mediaViews.forEach { $0.cancel() }
+        avatarView.cancel()
+    }
 
     override func prepareForReuse() {
         super.prepareForReuse()
@@ -380,6 +431,7 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
     override func layout() {
         super.layout()
         if let header = current.header { headerField.frame = header }
+        if let avatar = current.avatar { avatarView.frame = avatar.frame }
         bodyView.frame = current.body.frame
         for (i, text) in current.texts.enumerated() where i < embedTexts.count {
             embedTexts[i].frame = text.frame

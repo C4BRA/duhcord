@@ -18,6 +18,12 @@ public final class DiscordSession: GatewayClientDelegate {
         }
     }
 
+    /// Who is typing in the channel on screen.
+    public let typing = TypingTracker()
+    /// Called on the main thread whenever `typing` changes.
+    public var onTypingChange: (() -> Void)?
+    private var lastTypingSent: [Snowflake: Date] = [:]
+
     private let gateway: GatewayClient
     private var loading: Set<Snowflake> = []
     private var subscribedGuilds: Set<Snowflake> = []
@@ -72,6 +78,7 @@ public final class DiscordSession: GatewayClientDelegate {
     /// Switches the focused channel, loading its latest messages if they aren't cached.
     public func open(channelID: Snowflake) {
         store.focusedChannelID = channelID
+        if typing.focus(channelID) { onTypingChange?() }
         if let guildID = store.channel(channelID)?.guildId, !subscribedGuilds.contains(guildID) {
             subscribedGuilds.insert(guildID)
             gateway.subscribe(toGuild: guildID)
@@ -90,7 +97,18 @@ public final class DiscordSession: GatewayClientDelegate {
 
     public func isLoading(_ channelID: Snowflake) -> Bool { loading.contains(channelID) }
 
+    /// Tells the channel we're typing: on the first keystroke, then at most every 8 seconds, since Discord shows
+    /// it for about 10. Failures are ignored: a missed typing notice isn't worth interrupting anyone for.
+    public func userIsTyping(in channelID: Snowflake) {
+        let now = Date()
+        if let last = lastTypingSent[channelID], now.timeIntervalSince(last) < 8 { return }
+        lastTypingSent[channelID] = now
+        Task { try? await rest.sendTyping(channelID: channelID) }
+    }
+
     public func send(_ content: String, to channelID: Snowflake, completion: @escaping (Error?) -> Void) {
+        // Sending ends our typing indicator on Discord's side; the next keystroke starts a fresh one.
+        lastTypingSent[channelID] = nil
         let nonce = String(UInt64(Date().timeIntervalSince1970 * 1000 - 1_420_070_400_000) << 22)
         Task { @MainActor in
             do {
@@ -147,7 +165,13 @@ public final class DiscordSession: GatewayClientDelegate {
         case .ready:
             subscribedGuilds = []
             delegate?.sessionDidBecomeReady(self)
+        case .typingStart(let event):
+            guard event.userId != store.me?.id else { break }
+            let user = event.member?.user ?? store.user(event.userId) ?? User(id: event.userId, username: "Someone")
+            let name = event.member?.nick.flatMap { $0.isEmpty ? nil : $0 } ?? user.displayName
+            if typing.typing(user, name: name, in: event.channelId, at: Date()) { onTypingChange?() }
         case .messageCreate(let message):
+            if typing.messageArrived(from: message.author.id, in: message.channelId, at: Date()) { onTypingChange?() }
             if isActive, message.channelId == store.focusedChannelID {
                 markRead(channelID: message.channelId)
             }

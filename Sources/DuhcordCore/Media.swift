@@ -12,6 +12,49 @@ public enum MediaRequest {
             && host.dropFirst("images-ext-".count).dropLast(".discordapp.net".count).allSatisfy(\.isNumber)
     }
 
+    /// Hosts still images may come from: the proxies, plus Discord's CDN for avatars and server icons.
+    /// The CDN is limited to those paths by `isAllowedImageURL`.
+    public static func isAllowedImageHost(_ host: String?) -> Bool {
+        isAllowedHost(host) || host?.lowercased() == "cdn.discordapp.com"
+    }
+
+    /// Profile pictures and server icons on Discord's CDN are Discord's own resized, re-encoded copies.
+    /// Nothing else from the CDN is fetched as a still image.
+    public static func isAllowedImageURL(_ url: URL) -> Bool {
+        guard url.scheme == "https", let host = url.host?.lowercased() else { return false }
+        if isAllowedHost(host) { return true }
+        guard host == "cdn.discordapp.com" else { return false }
+        return ["/avatars/", "/icons/", "/embed/avatars/"].contains { url.path.hasPrefix($0) }
+    }
+
+    /// Discord's CDN only serves power-of-two sizes from 16 to 4096.
+    public static func cdnSize(forPixels pixels: Int) -> Int {
+        var size = 16
+        while size < pixels, size < 4096 { size *= 2 }
+        return size
+    }
+
+    /// A user's profile picture at roughly `pixels` across, or Discord's default avatar if they have none.
+    /// Animated avatars come back as a still WebP.
+    public static func avatarURL(for user: User, pixels: Int) -> URL? {
+        if let hash = user.avatar, !hash.isEmpty {
+            return URL(string: "https://cdn.discordapp.com/avatars/\(user.id)/\(hash).webp?size=\(cdnSize(forPixels: pixels))")
+        }
+        let index: UInt64
+        if let tag = user.discriminator, tag != "0", let number = UInt64(tag) {
+            index = number % 5
+        } else {
+            index = (user.id.snowflakeValue >> 22) % 6
+        }
+        return URL(string: "https://cdn.discordapp.com/embed/avatars/\(index).png")
+    }
+
+    /// A server's icon at roughly `pixels` across, or nil if it has none.
+    public static func iconURL(for guild: Guild, pixels: Int) -> URL? {
+        guard let hash = guild.icon, !hash.isEmpty else { return nil }
+        return URL(string: "https://cdn.discordapp.com/icons/\(guild.id)/\(hash).webp?size=\(cdnSize(forPixels: pixels))")
+    }
+
     /// Hosts videos and GIF videos may stream from: the image proxies plus Discord's own file CDN, which some
     /// uploaded videos are only served from. Never a third-party host, and never with the token.
     public static func isAllowedVideoHost(_ host: String?) -> Bool {

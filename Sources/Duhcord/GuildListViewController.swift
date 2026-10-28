@@ -112,6 +112,8 @@ private final class GuildCell: NSTableCellView {
 
     private let tile = NSView()
     private let label = NSTextField(labelWithString: "")
+    /// The server's icon, drawn over the initials once it has loaded.
+    private let icon = RemoteImageView()
     private let pill = NSView()
     private let badge = NSTextField(labelWithString: "")
     private var pillHeight: CGFloat = 8
@@ -134,7 +136,8 @@ private final class GuildCell: NSTableCellView {
         badge.layer?.backgroundColor = NSColor.systemRed.cgColor
         badge.layer?.cornerRadius = 7
 
-        [tile, label, pill, badge].forEach(addSubview)
+        icon.imageScaling = .scaleAxesIndependently
+        [tile, label, icon, pill, badge].forEach(addSubview)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -145,6 +148,7 @@ private final class GuildCell: NSTableCellView {
         tile.frame = NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size)
         let labelHeight: CGFloat = 18
         label.frame = NSRect(x: tile.frame.minX, y: tile.frame.midY - labelHeight / 2, width: size, height: labelHeight)
+        icon.frame = tile.frame
         pill.frame = NSRect(x: 0, y: bounds.midY - pillHeight / 2, width: 4, height: pillHeight)
         badge.frame = NSRect(x: tile.frame.maxX - 12, y: tile.frame.minY - 2, width: 16, height: 14)
     }
@@ -164,6 +168,7 @@ private final class GuildCell: NSTableCellView {
         let selected = (superview as? NSTableRowView)?.isSelected ?? false
         let unread: Bool
         let mentions: Int
+        var iconURL: URL?
         switch place {
         case .directMessages:
             label.stringValue = "DM"
@@ -173,6 +178,8 @@ private final class GuildCell: NSTableCellView {
         case .guild(let id):
             let name = store.guilds[id]?.name ?? ""
             label.stringValue = Theme.initials(name)
+            let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+            iconURL = store.guilds[id].flatMap { MediaRequest.iconURL(for: $0, pixels: Int(40 * scale)) }
             toolTip = name
             unread = store.guildHasUnread(id)
             mentions = store.guildMentionCount(id)
@@ -182,7 +189,13 @@ private final class GuildCell: NSTableCellView {
             pill.layer?.backgroundColor = NSColor.labelColor.cgColor
         }
         tile.layer?.cornerRadius = selected ? 12 : 20
+        icon.cornerRadius = selected ? 12 : 20
         label.textColor = selected ? .white : .labelColor
+        // Initials show until (or unless) the icon loads; servers without an icon keep them.
+        icon.setImage(iconURL, pointSize: NSSize(width: 40, height: 40)) { [weak self] loaded in
+            self?.icon.isHidden = !loaded
+            self?.label.isHidden = loaded
+        }
         pill.isHidden = !(unread || selected)
         // A taller pill marks the selected guild; a short one marks unread.
         pillHeight = selected ? 28 : 8

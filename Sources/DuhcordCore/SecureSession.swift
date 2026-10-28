@@ -15,7 +15,7 @@ public final class SecureSession: NSObject, URLSessionDelegate, URLSessionTaskDe
     public static let shared = SecureSession(isAllowed: SecureSession.isAllowed(host:), followsRedirects: false)
     public static let updates = SecureSession(isAllowed: SecureSession.isUpdateHost(_:), followsRedirects: true)
     /// Images for embeds and attachments: Discord's image proxies only, never the token, no redirects.
-    public static let media = SecureSession(isAllowed: MediaRequest.isAllowedHost(_:), followsRedirects: false)
+    public static let media = SecureSession(isAllowed: MediaRequest.isAllowedImageHost(_:), followsRedirects: false)
     /// Video and GIF streams: the image proxies plus Discord's file CDN. Never the token, no redirects.
     public static let video = SecureSession(isAllowed: MediaRequest.isAllowedVideoHost(_:), followsRedirects: false)
 

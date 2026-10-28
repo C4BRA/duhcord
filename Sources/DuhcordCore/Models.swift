@@ -21,13 +21,17 @@ public struct User: Codable, Hashable {
     public let globalName: String?
     public let avatar: String?
     public let bot: Bool?
+    /// "0" for accounts on the new username system; older accounts still have a four-digit tag.
+    public let discriminator: String?
 
-    public init(id: Snowflake, username: String, globalName: String? = nil, avatar: String? = nil, bot: Bool? = nil) {
+    public init(id: Snowflake, username: String, globalName: String? = nil, avatar: String? = nil, bot: Bool? = nil,
+                discriminator: String? = nil) {
         self.id = id
         self.username = username
         self.globalName = globalName
         self.avatar = avatar
         self.bot = bot
+        self.discriminator = discriminator
     }
 
     public var displayName: String {
@@ -374,6 +378,19 @@ public struct MessageUpdate: Decodable {
     public let attachments: [Attachment]?
     /// Discord fetches link previews after the message is sent and delivers them as an update.
     public let embeds: [Embed]?
+}
+
+/// Someone started typing. Discord repeats it every ~8–10 seconds while they keep going.
+public struct TypingStart: Decodable {
+    public struct Member: Decodable {
+        public let user: User?
+        public let nick: String?
+    }
+
+    public let channelId: Snowflake
+    public let guildId: Snowflake?
+    public let userId: Snowflake
+    public let member: Member?
 }
 
 public struct MessageDelete: Decodable {

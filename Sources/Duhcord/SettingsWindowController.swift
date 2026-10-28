@@ -11,12 +11,13 @@ final class SettingsWindowController: NSWindowController {
                                               trackingMode: .selectOne, target: nil, action: nil)
     private let compact = NSButton(checkboxWithTitle: "Compact message spacing", target: nil, action: nil)
     private let mediaPreviews = NSPopUpButton()
+    private let sendTyping = NSButton(checkboxWithTitle: "Show when I'm typing", target: nil, action: nil)
     private let animateGIFs = NSPopUpButton()
     private let checkForUpdates = NSButton(checkboxWithTitle: "Check for updates automatically", target: nil, action: nil)
 
     init(onLogOut: @escaping () -> Void) {
         self.onLogOut = onLogOut
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 400),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 440),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "Settings"
         super.init(window: window)
@@ -45,7 +46,7 @@ final class SettingsWindowController: NSWindowController {
         animateGIFs.action = #selector(changed)
         notifications.target = self
         notifications.action = #selector(changed)
-        [sound, dockBadge, compact, checkForUpdates].forEach {
+        [sound, dockBadge, compact, checkForUpdates, sendTyping].forEach {
             $0.target = self
             $0.action = #selector(changed)
         }
@@ -63,6 +64,7 @@ final class SettingsWindowController: NSWindowController {
             [label("Text size:"), textSize],
             [NSGridCell.emptyContentView, compact],
             [label("Images:"), mediaPreviews],
+            [label("Privacy:"), sendTyping],
             [label("Animate GIFs:"), animateGIFs],
             [label("Updates:"), checkForUpdates],
         ])
@@ -99,6 +101,7 @@ final class SettingsWindowController: NSWindowController {
         compact.state = Settings.compactMessages ? .on : .off
         checkForUpdates.state = Settings.checkForUpdates ? .on : .off
         mediaPreviews.selectItem(at: Settings.mediaPreviews.rawValue)
+        sendTyping.state = Settings.sendTypingIndicator ? .on : .off
         animateGIFs.selectItem(at: Settings.animateGIFs.rawValue)
         sound.isEnabled = Settings.notifications != .off
     }
@@ -111,6 +114,7 @@ final class SettingsWindowController: NSWindowController {
         Settings.compactMessages = compact.state == .on
         Settings.checkForUpdates = checkForUpdates.state == .on
         Settings.mediaPreviews = Settings.MediaPreviews(rawValue: mediaPreviews.indexOfSelectedItem) ?? .always
+        Settings.sendTypingIndicator = sendTyping.state == .on
         Settings.animateGIFs = Settings.AnimateGIFs(rawValue: animateGIFs.indexOfSelectedItem) ?? .onHover
         sound.isEnabled = Settings.notifications != .off
     }

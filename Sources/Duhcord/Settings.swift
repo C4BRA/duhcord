@@ -79,6 +79,7 @@ enum Settings {
         static let checkForUpdates = "checkForUpdates"
         static let mediaPreviews = "mediaPreviews"
         static let animateGIFs = "animateGIFs"
+        static let sendTyping = "sendTypingIndicator"
     }
 
     static func registerDefaults() {
@@ -91,6 +92,7 @@ enum Settings {
             Key.checkForUpdates: true,
             Key.mediaPreviews: MediaPreviews.always.rawValue,
             Key.animateGIFs: AnimateGIFs.onHover.rawValue,
+            Key.sendTyping: true,
         ])
     }
 
@@ -130,6 +132,12 @@ enum Settings {
     static var animateGIFs: AnimateGIFs {
         get { AnimateGIFs(rawValue: defaults.integer(forKey: Key.animateGIFs)) ?? .onHover }
         set { set(newValue.rawValue, for: Key.animateGIFs) }
+    }
+
+    /// Let others see "… is typing" while you write a message.
+    static var sendTypingIndicator: Bool {
+        get { defaults.bool(forKey: Key.sendTyping) }
+        set { set(newValue, for: Key.sendTyping) }
     }
 
     /// Check GitHub for a new release at launch and once a day.

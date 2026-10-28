@@ -240,6 +240,9 @@ public final class Store {
             }
             if let changed { onChange?(.unread(channelID: changed)) }
 
+        case .typingStart:
+            break
+
         case .messageAck(let ack):
             // Read on another device.
             readStates[ack.channelId] = ReadState(id: ack.channelId, lastMessageId: ack.messageId, mentionCount: 0)

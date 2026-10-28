@@ -592,3 +592,82 @@ final class VideoTests: XCTestCase {
         XCTAssertTrue(url.absoluteString.contains("width=200"))
     }
 }
+
+final class TypingTrackerTests: XCTestCase {
+    private let alice = User(id: "1", username: "alice")
+    private let t0 = Date(timeIntervalSince1970: 1_000_000)
+
+    func testRaiseLowerAndExpire() {
+        let tracker = TypingTracker()
+        tracker.focus("c")
+        XCTAssertTrue(tracker.typing(alice, name: "Alice", in: "c", at: t0))
+        XCTAssertFalse(tracker.typing(alice, name: "Alice", in: "other", at: t0), "other channels are ignored")
+        XCTAssertEqual(tracker.nextDeadline, t0.addingTimeInterval(10))
+
+        // Still typing at 9 s: stays raised.
+        XCTAssertFalse(tracker.tick(at: t0.addingTimeInterval(9)))
+        XCTAssertTrue(tracker.entries[0].raised)
+
+        // Silent for 10 s: lowers halfway.
+        XCTAssertTrue(tracker.tick(at: t0.addingTimeInterval(10)))
+        XCTAssertFalse(tracker.entries[0].raised)
+        XCTAssertEqual(tracker.nextDeadline, t0.addingTimeInterval(70))
+
+        // Gone a minute after lowering.
+        XCTAssertFalse(tracker.tick(at: t0.addingTimeInterval(69)))
+        XCTAssertTrue(tracker.tick(at: t0.addingTimeInterval(70)))
+        XCTAssertTrue(tracker.entries.isEmpty)
+        XCTAssertNil(tracker.nextDeadline)
+    }
+
+    func testMessageLowersAndTypingAgainRaises() {
+        let tracker = TypingTracker()
+        tracker.focus("c")
+        tracker.typing(alice, name: "Alice", in: "c", at: t0)
+        XCTAssertTrue(tracker.messageArrived(from: "1", in: "c", at: t0.addingTimeInterval(3)))
+        XCTAssertFalse(tracker.entries[0].raised)
+        XCTAssertTrue(tracker.typing(alice, name: "Alice", in: "c", at: t0.addingTimeInterval(5)))
+        XCTAssertTrue(tracker.entries[0].raised)
+        XCTAssertNil(tracker.entries[0].loweredAt)
+    }
+
+    func testSwitchingChannelsClears() {
+        let tracker = TypingTracker()
+        tracker.focus("c")
+        tracker.typing(alice, name: "Alice", in: "c", at: t0)
+        XCTAssertTrue(tracker.focus("d"))
+        XCTAssertTrue(tracker.entries.isEmpty)
+    }
+
+    func testTypingStartDecodes() throws {
+        let json = """
+        {"channel_id": "c", "guild_id": "g", "user_id": "1", "timestamp": 1700000000,
+         "member": {"nick": "Al", "roles": [], "user": {"id": "1", "username": "alice", "avatar": "abc"}}}
+        """
+        let event = try makeDiscordDecoder().decode(TypingStart.self, from: Data(json.utf8))
+        XCTAssertEqual(event.member?.nick, "Al")
+        XCTAssertEqual(event.member?.user?.avatar, "abc")
+    }
+}
+
+final class AvatarTests: XCTestCase {
+    func testAvatarAndIconURLs() {
+        let user = User(id: "80351110224678912", username: "nelly", avatar: "8342729096ea3675442027381ff50dfe")
+        XCTAssertEqual(MediaRequest.avatarURL(for: user, pixels: 64)?.absoluteString,
+                       "https://cdn.discordapp.com/avatars/80351110224678912/8342729096ea3675442027381ff50dfe.webp?size=64")
+        XCTAssertEqual(MediaRequest.avatarURL(for: User(id: "1", username: "old", discriminator: "1337"), pixels: 64)?.absoluteString,
+                       "https://cdn.discordapp.com/embed/avatars/2.png")
+        let guild = Guild(id: "9", name: "g", icon: "abc")
+        XCTAssertEqual(MediaRequest.iconURL(for: guild, pixels: 80)?.absoluteString, "https://cdn.discordapp.com/icons/9/abc.webp?size=128")
+        XCTAssertNil(MediaRequest.iconURL(for: Guild(id: "9", name: "g"), pixels: 80))
+    }
+
+    func testCDNIsLimitedToAvatarsAndIcons() {
+        XCTAssertTrue(MediaRequest.isAllowedImageURL(URL(string: "https://cdn.discordapp.com/avatars/1/a.webp?size=64")!))
+        XCTAssertTrue(MediaRequest.isAllowedImageURL(URL(string: "https://cdn.discordapp.com/embed/avatars/3.png")!))
+        XCTAssertFalse(MediaRequest.isAllowedImageURL(URL(string: "https://cdn.discordapp.com/attachments/1/2/raw.png")!))
+        XCTAssertFalse(MediaRequest.isAllowedImageURL(URL(string: "http://cdn.discordapp.com/avatars/1/a.webp")!))
+        XCTAssertEqual(MediaRequest.cdnSize(forPixels: 80), 128)
+        XCTAssertEqual(MediaRequest.cdnSize(forPixels: 64), 64)
+    }
+}

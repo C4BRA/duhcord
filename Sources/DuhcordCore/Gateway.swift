@@ -16,6 +16,7 @@ public enum GatewayEvent {
     case messageDelete(MessageDelete)
     case messageAck(MessageAck)
     case channelUnreadUpdate(ChannelUnreadUpdate)
+    case typingStart(TypingStart)
 }
 
 public protocol GatewayClientDelegate: AnyObject {
@@ -318,6 +319,8 @@ public final class GatewayClient: NSObject {
             event = decode(MessageDelete.self).map { .messageDelete($0) }
         case "MESSAGE_ACK":
             event = decode(MessageAck.self).map { .messageAck($0) }
+        case "TYPING_START":
+            event = decode(TypingStart.self).map { .typingStart($0) }
         case "CHANNEL_UNREAD_UPDATE":
             event = decode(ChannelUnreadUpdate.self).map { .channelUnreadUpdate($0) }
         default:

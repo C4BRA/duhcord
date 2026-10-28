@@ -39,6 +39,10 @@ Link previews, embeds and image attachments are shown inline, built to stay chea
 - **Streams use Duhcord's own connection.** Video streams go through the same connection rules as everything else: Discord's hosts only, no token, no redirects.
 - **Your choice.** Spoilers wait for a click. **Settings → Images** switches between Always, Click to load and Off.
 
+**Profile pictures and server icons** load at exactly the size shown (64 px avatars, 128 px icons, from Discord's own resized copies). One copy per person is shared by all their messages, and animated ones show as a still.
+
+**Typing tabs:** when someone types in the channel you're viewing, a small tab with their profile picture springs up from behind the message box. When they stop or send, it sinks halfway, and it slides away a minute later. Each movement is a single Core Animation spring drawn by the window server, so nothing runs between changes. **Settings → Privacy → Show when I'm typing** controls whether others see you typing.
+
 Other files show up as links that open in your browser. Custom emoji show as `:name:`.
 
 ## How it stays light
@@ -56,7 +60,7 @@ Other files show up as links that open in your browser. Custom emoji show as `:n
 - CI runs `scripts/verify-bundle.sh` on every build and fails if either protection is missing or the app gains a permission beyond that file.
 - Your token is stored only in the Keychain (readable only while your Mac is unlocked, this device only, never synced) and is sent only to Discord.
 - All network traffic goes through one hardened connection layer (`SecureSession`):
-  - it only connects to `discord.com` and `*.discord.gg` (images: only Discord's image proxies, without the token);
+  - it only connects to `discord.com` and `*.discord.gg` (images: only Discord's image proxies and its avatar/icon CDN paths, without the token);
   - certificates must chain to Apple's built-in roots, so interception tools that add their own root certificate are refused;
   - redirects are refused, so the token can never be forwarded to another host;
   - nothing is cached or written to disk.

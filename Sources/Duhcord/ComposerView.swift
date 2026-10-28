@@ -4,6 +4,8 @@ import AppKit
 /// Return sends; Shift-Return or Option-Return inserts a newline.
 final class ComposerView: NSView, NSTextViewDelegate {
     var onSend: ((String) -> Void)?
+    /// Called as the user types, with the current text (used to send typing notices).
+    var onTextChange: ((String) -> Void)?
     /// Called when the height changes, so the parent can keep the message list pinned to the bottom.
     var onHeightChange: (() -> Void)?
 
@@ -105,6 +107,7 @@ final class ComposerView: NSView, NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         updateHeight()
         textView.needsDisplay = true
+        onTextChange?(textView.string)
     }
 
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {

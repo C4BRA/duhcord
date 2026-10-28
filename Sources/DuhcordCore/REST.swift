@@ -53,6 +53,11 @@ public final class RESTClient {
         _ = try await request("POST", "/channels/\(channelID)/messages/\(messageID)/ack", body: ["token": NSNull()])
     }
 
+    /// Shows "… is typing" to others in the channel for about 10 seconds.
+    public func sendTyping(channelID: Snowflake) async throws {
+        _ = try await request("POST", "/channels/\(channelID)/typing")
+    }
+
     /// Invalidates the token on Discord's side, so a copy of it is useless afterwards.
     public func logout() async throws {
         _ = try await request("POST", "/auth/logout", body: ["provider": NSNull(), "voip_provider": NSNull()])

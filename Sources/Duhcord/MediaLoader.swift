@@ -75,7 +75,7 @@ final class MediaLoader {
     }
 
     private static func fetch(_ url: URL, maxPixel: Int, pointSize: NSSize, queue: OperationQueue?) async -> NSImage? {
-        guard MediaRequest.isAllowedHost(url.host),
+        guard MediaRequest.isAllowedImageURL(url),
               let result = try? await SecureSession.media.session.data(from: url),
               (result.1 as? HTTPURLResponse)?.statusCode == 200,
               result.0.count <= maxBytes, !Task.isCancelled, let queue else { return nil }
@@ -103,5 +103,56 @@ final class MediaLoader {
         ]
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary) else { return nil }
         return NSImage(cgImage: image, size: pointSize)
+    }
+}
+
+/// An image view that shows a remote image through MediaLoader and cancels when it's reused.
+/// Used for profile pictures and server icons.
+final class RemoteImageView: NSImageView {
+    private var url: URL?
+    private var token: MediaLoader.Token?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        imageScaling = .scaleProportionallyUpOrDown
+        wantsLayer = true
+        layer?.masksToBounds = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    var cornerRadius: CGFloat {
+        get { layer?.cornerRadius ?? 0 }
+        set { layer?.cornerRadius = newValue }
+    }
+
+    /// Shows the image at `url` (nil clears it). `onLoad` reports whether an image is showing.
+    func setImage(_ url: URL?, pointSize: NSSize, onLoad: ((Bool) -> Void)? = nil) {
+        guard url != self.url else {
+            onLoad?(image != nil)
+            return
+        }
+        cancel()
+        self.url = url
+        image = nil
+        guard let url else {
+            onLoad?(false)
+            return
+        }
+        token = MediaLoader.shared.load(url, pointSize: pointSize) { [weak self] loaded in
+            guard let self, self.url == url else { return }
+            self.token = nil
+            self.image = loaded
+            onLoad?(loaded != nil)
+        }
+    }
+
+    func cancel() {
+        if let token, let url {
+            MediaLoader.shared.cancel(token, for: url)
+            // Not loaded yet: forget the URL so the next setImage starts the load again.
+            self.url = nil
+        }
+        token = nil
     }
 }
