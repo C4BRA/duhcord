@@ -176,10 +176,28 @@ final class Installer: NSObject, DuhcordUpdaterProtocol {
 }
 
 final class ServiceDelegate: NSObject, NSXPCListenerDelegate {
+    /// Checks the caller's code signature against the requirement. Done by hand because
+    /// NSXPCListener.setConnectionCodeSigningRequirement isn't supported on an app's own XPC service listener:
+    /// calling it there aborts the helper at launch.
+    static func callerIsDuhcord(_ connection: NSXPCConnection) -> Bool {
+        guard let signingRequirement else { return false }
+        var requirement: SecRequirement?
+        var code: SecCode?
+        let attributes = [kSecGuestAttributePid: connection.processIdentifier] as CFDictionary
+        guard SecRequirementCreateWithString(signingRequirement as CFString, [], &requirement) == errSecSuccess, let requirement,
+              SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code else { return false }
+        return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
+    }
+
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         // Ad-hoc builds have no certificate to check callers against, so they accept nobody.
         guard signingRequirement != nil else {
             updaterLog.error("rejected connection: helper isn't release-signed")
+            return false
+        }
+        // Only Duhcord itself, signed with the same certificate as this helper, may talk to it.
+        guard Self.callerIsDuhcord(connection) else {
+            updaterLog.error("rejected connection from pid \(connection.processIdentifier, privacy: .public): not signed as Duhcord")
             return false
         }
         updaterLog.info("accepted connection from pid \(connection.processIdentifier, privacy: .public)")
@@ -193,7 +211,5 @@ final class ServiceDelegate: NSObject, NSXPCListenerDelegate {
 updaterLog.info("helper started; caller requirement: \(signingRequirement ?? "none", privacy: .public)")
 let delegate = ServiceDelegate()
 let listener = NSXPCListener.service()
-// Only Duhcord itself, signed with the same certificate as this helper, may connect. macOS enforces this.
-if let signingRequirement { listener.setConnectionCodeSigningRequirement(signingRequirement) }
 listener.delegate = delegate
 listener.resume()

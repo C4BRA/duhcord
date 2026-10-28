@@ -447,7 +447,9 @@ final class UpdateVerifierTests: XCTestCase {
     }
 
     func testDowngradesAndSameVersionAreRejected() throws {
-        let m = try UpdateVerifier.verify(manifest: manifest(version: "1.2.0"), signature: sign(manifest(version: "1.2.0")), keys: keys)
+        // Encode once: JSON key order can differ between encodes, and the signature covers the exact bytes.
+        let data = manifest(version: "1.2.0")
+        let m = try UpdateVerifier.verify(manifest: data, signature: sign(data), keys: keys)
         XCTAssertNoThrow(try UpdateVerifier.checkApplicable(m, installedVersion: "1.1.9"))
         XCTAssertThrowsError(try UpdateVerifier.checkApplicable(m, installedVersion: "1.2.0"))
         XCTAssertThrowsError(try UpdateVerifier.checkApplicable(m, installedVersion: "1.10.0"))
