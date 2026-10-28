@@ -78,6 +78,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
 
     @objc private func checkForUpdates(_ sender: Any?) { updates?.checkNow() }
 
+    /// The README on GitHub: what Duhcord does, its shortcuts and how it keeps you safe.
+    @objc private func showHelp(_ sender: Any?) {
+        NSWorkspace.shared.open(URL(string: "https://github.com/C4BRA/duhcord#readme")!)
+    }
+
     @objc private func showSettings(_ sender: Any?) {
         let controller = settingsWindow ?? SettingsWindowController { [weak self] in self?.logOut(nil) }
         settingsWindow = controller
@@ -230,6 +235,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         main.addItem(submenu: edit, title: "Edit")
 
+        let view = NSMenu(title: "View")
+        let sidebar = view.addItem(withTitle: "Show Sidebar", action: #selector(NSSplitViewController.toggleSidebar(_:)), keyEquivalent: "s")
+        sidebar.keyEquivalentModifierMask = [.control, .command]
+        let fullScreen = view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        fullScreen.keyEquivalentModifierMask = [.control, .command]
+        main.addItem(submenu: view, title: "View")
+
         let go = NSMenu(title: "Go")
         go.addItem(withTitle: "Jump to Channel…", action: #selector(MainWindowController.showQuickSwitcher(_:)), keyEquivalent: "k")
         let prev = go.addItem(withTitle: "Previous Channel", action: #selector(MainWindowController.selectPreviousChannel(_:)), keyEquivalent: String(Character(UnicodeScalar(NSUpArrowFunctionKey)!)))
@@ -240,11 +252,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         unread.keyEquivalentModifierMask = [.option, .shift]
         main.addItem(submenu: go, title: "Go")
 
+        // Keyboard control of calls, so voice works without the mouse.
+        let voice = NSMenu(title: "Voice")
+        let mute = voice.addItem(withTitle: "Mute", action: #selector(MainWindowController.toggleMute(_:)), keyEquivalent: "m")
+        mute.keyEquivalentModifierMask = [.command, .shift]
+        let deafen = voice.addItem(withTitle: "Deafen", action: #selector(MainWindowController.toggleDeafen(_:)), keyEquivalent: "d")
+        deafen.keyEquivalentModifierMask = [.command, .shift]
+        voice.addItem(.separator())
+        voice.addItem(withTitle: "Disconnect", action: #selector(MainWindowController.leaveVoice(_:)), keyEquivalent: "")
+        main.addItem(submenu: voice, title: "Voice")
+
         let window = NSMenu(title: "Window")
         window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        window.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         window.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        window.addItem(.separator())
+        window.addItem(withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
         main.addItem(submenu: window, title: "Window")
         NSApp.windowsMenu = window
+
+        let help = NSMenu(title: "Help")
+        help.addItem(withTitle: "Duhcord Help", action: #selector(showHelp(_:)), keyEquivalent: "?")
+        main.addItem(submenu: help, title: "Help")
+        NSApp.helpMenu = help
 
         return main
     }

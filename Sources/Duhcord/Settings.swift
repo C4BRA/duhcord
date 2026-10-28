@@ -48,35 +48,12 @@ enum Settings {
         }
     }
 
-    enum TextSize: Int, CaseIterable {
-        case small = 0
-        case medium = 1
-        case large = 2
-
-        var title: String {
-            switch self {
-            case .small: return "Small"
-            case .medium: return "Medium"
-            case .large: return "Large"
-            }
-        }
-
-        var pointSize: CGFloat {
-            switch self {
-            case .small: return 12
-            case .medium: return 13
-            case .large: return 15
-            }
-        }
-    }
-
     private static let defaults = UserDefaults.standard
 
     enum Key {
         static let notifications = "notifications"
         static let sound = "notificationSound"
         static let dockBadge = "dockBadge"
-        static let textSize = "textSize"
         static let compact = "compactMessages"
         static let checkForUpdates = "checkForUpdates"
         static let mediaPreviews = "mediaPreviews"
@@ -89,7 +66,6 @@ enum Settings {
             Key.notifications: NotificationLevel.directMessagesAndMentions.rawValue,
             Key.sound: true,
             Key.dockBadge: true,
-            Key.textSize: TextSize.medium.rawValue,
             Key.compact: false,
             Key.checkForUpdates: true,
             Key.mediaPreviews: MediaPreviews.always.rawValue,
@@ -113,13 +89,8 @@ enum Settings {
         set { set(newValue, for: Key.dockBadge) }
     }
 
-    static var textSize: TextSize {
-        get { TextSize(rawValue: defaults.integer(forKey: Key.textSize)) ?? .medium }
-        set { set(newValue.rawValue, for: Key.textSize) }
-    }
-
-    /// Tighter spacing between messages.
-    static var compactMessages: Bool {
+    /// Tighter spacing everywhere: messages, and small sidebar and list rows.
+    static var compactLayout: Bool {
         get { defaults.bool(forKey: Key.compact) }
         set { set(newValue, for: Key.compact) }
     }
@@ -149,7 +120,7 @@ enum Settings {
     }
 
     /// Settings that change how messages are laid out.
-    static let messageLayoutKeys: Set<String> = [Key.textSize, Key.compact, Key.mediaPreviews, Key.animateGIFs]
+    static let messageLayoutKeys: Set<String> = [Key.compact, Key.mediaPreviews, Key.animateGIFs]
 
     private static func set<T: Equatable>(_ value: T, for key: String) {
         guard defaults.object(forKey: key) as? T != value else { return }

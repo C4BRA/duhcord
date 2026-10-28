@@ -1,6 +1,7 @@
 import AppKit
 
-/// A sheet that covers the main window while Discord can't be reached. Retry is the only way out.
+/// A sheet over the main window while Discord can't be reached, laid out like a standard alert (app icon, bold
+/// title, detail, default button). Retry is the only way out.
 final class ConnectionLock {
     private let sheet: NSWindow
     private let titleLabel = NSTextField(labelWithString: "")
@@ -13,8 +14,9 @@ final class ConnectionLock {
     var isShown: Bool { parent?.attachedSheet === sheet }
 
     init() {
-        sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 170), styleMask: [.titled], backing: .buffered, defer: true)
-        titleLabel.font = .boldSystemFont(ofSize: 15)
+        sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 150), styleMask: [.titled], backing: .buffered, defer: true)
+        titleLabel.font = Theme.boldFont
+        detail.font = Theme.smallFont
         detail.textColor = .secondaryLabelColor
         spinner.style = .spinning
         spinner.controlSize = .small
@@ -24,19 +26,26 @@ final class ConnectionLock {
         retryButton.target = self
         retryButton.action = #selector(retry)
 
+        let icon = NSImageView(image: NSApp.applicationIconImage ?? NSImage())
+        icon.translatesAutoresizingMaskIntoConstraints = false
         let buttons = NSStackView(views: [spinner, retryButton])
         let stack = NSStackView(views: [titleLabel, detail, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 10
+        stack.spacing = Theme.Spacing.related
         stack.translatesAutoresizingMaskIntoConstraints = false
         let content = sheet.contentView!
+        content.addSubview(icon)
         content.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
-            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -20),
+            icon.topAnchor.constraint(equalTo: content.topAnchor, constant: Theme.Spacing.edge),
+            icon.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Theme.Spacing.edge),
+            icon.widthAnchor.constraint(equalToConstant: 48),
+            icon.heightAnchor.constraint(equalToConstant: 48),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: Theme.Spacing.edge),
+            stack.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: Theme.Spacing.edge),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -Theme.Spacing.edge),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -Theme.Spacing.edge),
             detail.widthAnchor.constraint(equalTo: stack.widthAnchor),
             buttons.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
         ])

@@ -7,9 +7,7 @@ final class SettingsWindowController: NSWindowController {
     private let notifications = NSPopUpButton()
     private let sound = NSButton(checkboxWithTitle: "Play a sound", target: nil, action: nil)
     private let dockBadge = NSButton(checkboxWithTitle: "Show mention count on the Dock icon", target: nil, action: nil)
-    private let textSize = NSSegmentedControl(labels: Settings.TextSize.allCases.map(\.title),
-                                              trackingMode: .selectOne, target: nil, action: nil)
-    private let compact = NSButton(checkboxWithTitle: "Compact message spacing", target: nil, action: nil)
+    private let compact = NSButton(checkboxWithTitle: "Compact layout", target: nil, action: nil)
     private let mediaPreviews = NSPopUpButton()
     private let sendTyping = NSButton(checkboxWithTitle: "Show when I'm typing", target: nil, action: nil)
     private let animateGIFs = NSPopUpButton()
@@ -50,8 +48,6 @@ final class SettingsWindowController: NSWindowController {
             $0.target = self
             $0.action = #selector(changed)
         }
-        textSize.target = self
-        textSize.action = #selector(changed)
 
         let logOut = NSButton(title: "Log Out", target: self, action: #selector(logOutClicked))
         logOut.bezelStyle = .rounded
@@ -61,26 +57,27 @@ final class SettingsWindowController: NSWindowController {
             [label("Notifications:"), notifications],
             [NSGridCell.emptyContentView, sound],
             [NSGridCell.emptyContentView, dockBadge],
-            [label("Text size:"), textSize],
-            [NSGridCell.emptyContentView, compact],
+            [label("Layout:"), compact],
             [label("Images:"), mediaPreviews],
-            [label("Privacy:"), sendTyping],
             [label("Animate GIFs:"), animateGIFs],
+            [label("Privacy:"), sendTyping],
             [label("Updates:"), checkForUpdates],
         ])
         grid.column(at: 0).xPlacement = .trailing
         grid.rowAlignment = .firstBaseline
-        grid.rowSpacing = 10
-        grid.columnSpacing = 8
-        grid.row(at: 1).topPadding = 8
-        grid.row(at: 4).topPadding = 8
+        grid.rowSpacing = Theme.Spacing.related
+        grid.columnSpacing = Theme.Spacing.related
+        // Groups: account, notifications, appearance and media, privacy and updates.
+        grid.row(at: 1).topPadding = Theme.Spacing.group
+        grid.row(at: 4).topPadding = Theme.Spacing.group
+        grid.row(at: 7).topPadding = Theme.Spacing.group
         grid.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(grid)
         NSLayoutConstraint.activate([
-            grid.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
-            grid.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
-            grid.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -20),
-            grid.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -20),
+            grid.topAnchor.constraint(equalTo: content.topAnchor, constant: Theme.Spacing.edge),
+            grid.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: Theme.Spacing.edge),
+            grid.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -Theme.Spacing.edge),
+            grid.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -Theme.Spacing.edge),
         ])
     }
 
@@ -97,8 +94,7 @@ final class SettingsWindowController: NSWindowController {
         notifications.selectItem(at: Settings.notifications.rawValue)
         sound.state = Settings.notificationSound ? .on : .off
         dockBadge.state = Settings.dockBadge ? .on : .off
-        textSize.selectedSegment = Settings.textSize.rawValue
-        compact.state = Settings.compactMessages ? .on : .off
+        compact.state = Settings.compactLayout ? .on : .off
         checkForUpdates.state = Settings.checkForUpdates ? .on : .off
         mediaPreviews.selectItem(at: Settings.mediaPreviews.rawValue)
         sendTyping.state = Settings.sendTypingIndicator ? .on : .off
@@ -110,8 +106,7 @@ final class SettingsWindowController: NSWindowController {
         Settings.notifications = Settings.NotificationLevel(rawValue: notifications.indexOfSelectedItem) ?? .directMessagesAndMentions
         Settings.notificationSound = sound.state == .on
         Settings.dockBadge = dockBadge.state == .on
-        Settings.textSize = Settings.TextSize(rawValue: textSize.selectedSegment) ?? .medium
-        Settings.compactMessages = compact.state == .on
+        Settings.compactLayout = compact.state == .on
         Settings.checkForUpdates = checkForUpdates.state == .on
         Settings.mediaPreviews = Settings.MediaPreviews(rawValue: mediaPreviews.indexOfSelectedItem) ?? .always
         Settings.sendTypingIndicator = sendTyping.state == .on

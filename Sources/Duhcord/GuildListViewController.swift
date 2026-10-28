@@ -1,13 +1,19 @@
 import AppKit
 import DuhcordCore
 
-/// The narrow left column: DMs, then one rounded tile of initials per guild.
+/// The sidebar: Direct Messages, then every server, as a standard macOS source list (like Mail's mailboxes).
+/// Rows follow System Settings → Appearance → Sidebar icon size, or the small size in compact layout.
 final class GuildListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
     var onSelect: ((Place) -> Void)?
 
+    private enum Row: Equatable {
+        case place(Place)
+        case header(String)
+    }
+
     private let store: Store
     private let table = NSTableView()
-    private var places: [Place] = [.directMessages]
+    private var rows: [Row] = []
     private var suppressSelection = false
 
     init(store: Store) {
@@ -18,184 +24,250 @@ final class GuildListViewController: NSViewController, NSTableViewDataSource, NS
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func loadView() {
-        table.addTableColumn(NSTableColumn(identifier: .init("guild")))
+        table.addTableColumn(NSTableColumn(identifier: .init("place")))
         table.fitColumnToWidth()
         table.headerView = nil
-        table.rowHeight = 52
-        table.intercellSpacing = .zero
-        table.backgroundColor = .clear
-        table.selectionHighlightStyle = .none
-        table.style = .plain
+        table.style = .sourceList
+        table.rowSizeStyle = Theme.listRowSize
+        table.floatsGroupRows = false
         table.dataSource = self
         table.delegate = self
+        table.setAccessibilityLabel("Servers")
 
         let scroll = NSScrollView()
         scroll.documentView = table
-        scroll.hasVerticalScroller = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
         scroll.drawsBackground = false
-        scroll.contentInsets = NSEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
-
-        let column = GuildColumnView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        column.addSubview(scroll)
-        NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: column.topAnchor),
-            scroll.bottomAnchor.constraint(equalTo: column.bottomAnchor),
-            scroll.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: column.trailingAnchor, constant: -1),
-        ])
-        view = column
+        view = scroll
+        NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged), name: Settings.didChange, object: nil)
     }
 
-    /// Keeps the column exactly the strip's width, whatever AppKit decided during layout.
+    /// Keeps the column exactly the sidebar's width, whatever AppKit decided during layout.
     override func viewDidLayout() {
         super.viewDidLayout()
         guard let column = table.tableColumns.first, let clip = table.enclosingScrollView?.contentView else { return }
-        let width = clip.bounds.width
-        if abs(column.width - width) > 0.5 {
-            column.width = width
-        }
+        if abs(column.width - clip.bounds.width) > 0.5 { column.width = clip.bounds.width }
     }
 
     func reload() {
-        places = [.directMessages] + store.guildOrder.map { .guild($0) }
+        rows = [.place(.directMessages)]
+        if !store.guildOrder.isEmpty {
+            rows.append(.header("Servers"))
+            rows += store.guildOrder.map { .place(.guild($0)) }
+        }
+        let selected = table.selectedRow >= 0 && table.selectedRow < rows.count ? rows[table.selectedRow] : nil
         table.reloadData()
+        if case .place(let place)? = selected { select(place, scroll: false) }
     }
 
     func refreshIndicators() {
         table.enumerateAvailableRowViews { rowView, row in
-            (rowView.view(atColumn: 0) as? GuildCell)?.configure(place: places[row], store: store)
+            guard row < rows.count, case .place(let place) = rows[row],
+                  let cell = rowView.view(atColumn: 0) as? PlaceCell else { return }
+            cell.configure(place: place, store: store, size: table.effectiveRowSizeStyle)
         }
     }
 
-    func select(_ place: Place) {
-        guard let row = places.firstIndex(of: place) else { return }
+    func select(_ place: Place, scroll: Bool = true) {
+        guard let row = rows.firstIndex(of: .place(place)) else { return }
         suppressSelection = true
         table.selectRowIndexes([row], byExtendingSelection: false)
-        table.scrollRowToVisible(row)
+        if scroll { table.scrollRowToVisible(row) }
         suppressSelection = false
-        refreshIndicators()
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { places.count }
+    @objc private func settingsChanged() {
+        guard table.rowSizeStyle != Theme.listRowSize else { return }
+        table.rowSizeStyle = Theme.listRowSize
+        reload()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let cell = tableView.makeView(withIdentifier: GuildCell.identifier, owner: nil) as? GuildCell ?? GuildCell()
-        cell.configure(place: places[row], store: store)
-        return cell
+        switch rows[row] {
+        case .header(let title):
+            let header = tableView.makeView(withIdentifier: HeaderCell.identifier, owner: nil) as? HeaderCell ?? HeaderCell()
+            header.textField?.stringValue = title
+            return header
+        case .place(let place):
+            let cell = tableView.makeView(withIdentifier: PlaceCell.identifier, owner: nil) as? PlaceCell ?? PlaceCell()
+            cell.configure(place: place, store: store, size: tableView.effectiveRowSizeStyle)
+            return cell
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
+        if case .header = rows[row] { return true }
+        return false
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        if case .place = rows[row] { return true }
+        return false
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        guard !suppressSelection, table.selectedRow >= 0 else { return }
-        // Selection is shown by the tile itself; `select(_:)`, called back from onSelect, refreshes the tiles.
-        onSelect?(places[table.selectedRow])
+        guard !suppressSelection, table.selectedRow >= 0, case .place(let place) = rows[table.selectedRow] else { return }
+        onSelect?(place)
     }
 }
 
-/// Solid darker background with a hairline on the right, so the guild strip is clearly its own column.
-private final class GuildColumnView: NSView {
-    override func draw(_ dirtyRect: NSRect) {
-        Theme.guildColumnBackground.setFill()
-        dirtyRect.fill()
-        NSColor.separatorColor.setFill()
-        NSRect(x: bounds.maxX - 1, y: 0, width: 1, height: bounds.height).fill()
-    }
-}
-
-private final class GuildCell: NSTableCellView {
-    static let identifier = NSUserInterfaceItemIdentifier("GuildCell")
-
-    private let tile = NSView()
-    private let label = NSTextField(labelWithString: "")
-    /// The server's icon, drawn over the initials once it has loaded.
-    private let icon = RemoteImageView()
-    private let pill = NSView()
-    private let badge = NSTextField(labelWithString: "")
-    private var pillHeight: CGFloat = 8
+/// "Servers": a standard source-list section header.
+private final class HeaderCell: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("HeaderCell")
 
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
+        let label = NSTextField(labelWithString: "")
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        textField = label
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.tight),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
 
-        tile.wantsLayer = true
-        tile.layer?.cornerRadius = 14
-        label.alignment = .center
-        label.font = .boldSystemFont(ofSize: 13)
-        label.lineBreakMode = .byClipping
-        pill.wantsLayer = true
-        pill.layer?.cornerRadius = 2
-        badge.font = .boldSystemFont(ofSize: 9)
-        badge.alignment = .center
-        badge.textColor = .white
-        badge.wantsLayer = true
-        badge.layer?.backgroundColor = NSColor.systemRed.cgColor
-        badge.layer?.cornerRadius = 7
+    required init?(coder: NSCoder) { fatalError("not used") }
+}
 
-        icon.imageScaling = .scaleAxesIndependently
-        [tile, label, icon, pill, badge].forEach(addSubview)
+/// One sidebar row: icon, name (bold while unread) and a mention count.
+private final class PlaceCell: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("PlaceCell")
+
+    private let icon = RemoteImageView()
+    private let symbol = NSImageView()
+    /// Shown for servers without an icon.
+    private let monogram = NSTextField(labelWithString: "")
+    private let name = NSTextField(labelWithString: "")
+    private let badge = BadgeView()
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.identifier
+        icon.cornerRadius = Theme.Radius.small
+        monogram.alignment = .center
+        monogram.font = .systemFont(ofSize: 9, weight: .semibold)
+        monogram.textColor = .secondaryLabelColor
+        monogram.wantsLayer = true
+        monogram.layer?.cornerRadius = Theme.Radius.small
+        symbol.symbolConfiguration = .init(pointSize: 13, weight: .regular)
+        symbol.contentTintColor = .controlAccentColor
+        name.lineBreakMode = .byTruncatingTail
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        [icon, symbol, monogram, name, badge].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            addSubview($0)
+        }
+        let size = Theme.IconSize.sidebar
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.tight),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: size),
+            icon.heightAnchor.constraint(equalToConstant: size),
+            symbol.centerXAnchor.constraint(equalTo: icon.centerXAnchor),
+            symbol.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+            monogram.centerXAnchor.constraint(equalTo: icon.centerXAnchor),
+            monogram.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+            monogram.widthAnchor.constraint(equalToConstant: size),
+            name.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: Theme.Spacing.related),
+            name.centerYAnchor.constraint(equalTo: centerYAnchor),
+            badge.leadingAnchor.constraint(greaterThanOrEqualTo: name.trailingAnchor, constant: Theme.Spacing.tight),
+            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.related),
+            badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    override func layout() {
-        super.layout()
-        let size: CGFloat = 40
-        tile.frame = NSRect(x: (bounds.width - size) / 2, y: (bounds.height - size) / 2, width: size, height: size)
-        let labelHeight: CGFloat = 18
-        label.frame = NSRect(x: tile.frame.minX, y: tile.frame.midY - labelHeight / 2, width: size, height: labelHeight)
-        icon.frame = tile.frame
-        pill.frame = NSRect(x: 0, y: bounds.midY - pillHeight / 2, width: 4, height: pillHeight)
-        badge.frame = NSRect(x: tile.frame.maxX - 12, y: tile.frame.minY - 2, width: 16, height: 14)
-    }
-
-    private var lastPlace: Place?
-    private weak var lastStore: Store?
-
-    /// Layer colours are fixed CGColors, so they need refreshing when the appearance changes.
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        if let lastPlace, let lastStore { configure(place: lastPlace, store: lastStore) }
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            monogram.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        }
     }
 
-    func configure(place: Place, store: Store) {
-        lastPlace = place
-        lastStore = store
-        let selected = (superview as? NSTableRowView)?.isSelected ?? false
+    func configure(place: Place, store: Store, size: NSTableView.RowSizeStyle) {
         let unread: Bool
         let mentions: Int
-        var iconURL: URL?
+        let title: String
         switch place {
         case .directMessages:
-            label.stringValue = "DM"
-            toolTip = "Direct Messages"
+            title = "Direct Messages"
             unread = store.privateUnreadCount > 0
             mentions = store.privateMentionCount
+            symbol.image = NSImage(systemSymbolName: "bubble.left.and.bubble.right.fill", accessibilityDescription: nil)
+            symbol.isHidden = false
+            icon.setImage(nil, pointSize: .zero)
+            icon.isHidden = true
+            monogram.isHidden = true
         case .guild(let id):
-            let name = store.guilds[id]?.name ?? ""
-            label.stringValue = Theme.initials(name)
-            let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-            iconURL = store.guilds[id].flatMap { MediaRequest.iconURL(for: $0, pixels: Int(40 * scale)) }
-            toolTip = name
+            let guild = store.guilds[id]
+            title = guild?.name ?? ""
             unread = store.guildHasUnread(id)
             mentions = store.guildMentionCount(id)
+            symbol.isHidden = true
+            monogram.stringValue = Theme.initials(title)
+            monogram.isHidden = false
+            icon.isHidden = false
+            let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+            let pixels = Int(Theme.IconSize.sidebar * scale)
+            icon.setImage(guild.flatMap { MediaRequest.iconURL(for: $0, pixels: pixels) },
+                          pointSize: NSSize(width: Theme.IconSize.sidebar, height: Theme.IconSize.sidebar)) { [weak self] loaded in
+                self?.monogram.isHidden = loaded
+            }
         }
-        effectiveAppearance.performAsCurrentDrawingAppearance {
-            tile.layer?.backgroundColor = (selected ? NSColor.controlAccentColor : NSColor.quaternaryLabelColor).cgColor
-            pill.layer?.backgroundColor = NSColor.labelColor.cgColor
-        }
-        tile.layer?.cornerRadius = selected ? 12 : 20
-        icon.cornerRadius = selected ? 12 : 20
-        label.textColor = selected ? .white : .labelColor
-        // Initials show until (or unless) the icon loads; servers without an icon keep them.
-        icon.setImage(iconURL, pointSize: NSSize(width: 40, height: 40)) { [weak self] loaded in
-            self?.icon.isHidden = !loaded
-            self?.label.isHidden = loaded
-        }
-        pill.isHidden = !(unread || selected)
-        // A taller pill marks the selected guild; a short one marks unread.
-        pillHeight = selected ? 28 : 8
-        badge.isHidden = mentions == 0
-        badge.stringValue = mentions > 99 ? "99+" : String(mentions)
-        needsLayout = true
+        name.stringValue = title
+        name.font = Theme.listFont(for: size, bold: unread)
+        name.textColor = .labelColor
+        badge.count = mentions
+        monogram.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+
+        var spoken = title
+        if mentions > 0 { spoken += ", \(mentions) mention\(mentions == 1 ? "" : "s")" } else if unread { spoken += ", unread" }
+        setAccessibilityLabel(spoken)
     }
+}
+
+/// A source-list count badge (like Mail's unread counts), red because mentions need attention.
+final class BadgeView: NSView {
+    private let label = NSTextField(labelWithString: "")
+
+    var count = 0 {
+        didSet {
+            label.stringValue = count > 99 ? "99+" : String(count)
+            isHidden = count == 0
+        }
+    }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        label.textColor = .white
+        label.alignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: 16),
+            widthAnchor.constraint(greaterThanOrEqualToConstant: 16),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 5),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -5),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        isHidden = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.systemRed.cgColor
+    }
+
+    override var wantsUpdateLayer: Bool { true }
 }

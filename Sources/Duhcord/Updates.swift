@@ -55,35 +55,38 @@ enum Updates {
     }
 }
 
-/// A thin bar across the top of the window. Orange for problems, the accent colour for good news.
+/// The info bar under the toolbar (a titlebar accessory), like Safari's and Mail's: a symbol carries the tone
+/// (orange for problems, the accent colour for news), the text says what's going on, and a button acts on it.
 final class BannerView: NSView {
     enum Tone { case warning, info }
 
     var onAction: (() -> Void)?
+    private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private let button = NSButton(title: "", target: nil, action: nil)
-    private var tone: Tone = .warning
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1)
+        icon.symbolConfiguration = .init(pointSize: 12, weight: .medium)
+        label.font = Theme.smallFont
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         button.bezelStyle = .rounded
         button.controlSize = .small
-        button.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         button.target = self
         button.action = #selector(clicked)
-        [label, button].forEach {
+        [icon, label, button].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             addSubview($0)
         }
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 30),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.group),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: Theme.Spacing.related),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            button.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 10),
-            button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            button.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: Theme.Spacing.related),
+            button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.group),
             button.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
@@ -91,47 +94,14 @@ final class BannerView: NSView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     func show(_ text: String, tone: Tone, action: String?) {
-        self.tone = tone
+        icon.image = NSImage(systemSymbolName: tone == .warning ? "exclamationmark.triangle.fill" : "info.circle.fill",
+                             accessibilityDescription: tone == .warning ? "Warning" : "Information")
+        icon.contentTintColor = tone == .warning ? .systemOrange : .controlAccentColor
         label.stringValue = text
         button.title = action ?? ""
         button.isHidden = action == nil
-        needsDisplay = true
-    }
-
-    /// Drawn with dynamic colours so it follows light and dark mode.
-    override func draw(_ dirtyRect: NSRect) {
-        let base: NSColor = tone == .warning ? .systemOrange : .controlAccentColor
-        base.withAlphaComponent(0.18).setFill()
-        bounds.fill()
-        base.withAlphaComponent(0.35).setFill()
-        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+        setAccessibilityLabel(text)
     }
 
     @objc private func clicked() { onAction?() }
-}
-
-/// Puts an optional banner above the window's content.
-final class BannerContainerViewController: NSViewController {
-    let banner = BannerView()
-    private let content: NSViewController
-
-    init(content: NSViewController) {
-        self.content = content
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    required init?(coder: NSCoder) { fatalError("not used") }
-
-    override func loadView() {
-        addChild(content)
-        banner.isHidden = true
-        let stack = NSStackView(views: [banner, content.view])
-        stack.orientation = .vertical
-        stack.spacing = 0
-        stack.alignment = .leading
-        stack.detachesHiddenViews = true
-        banner.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        content.view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        view = stack
-    }
 }

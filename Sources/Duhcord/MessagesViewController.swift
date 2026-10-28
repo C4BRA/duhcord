@@ -12,8 +12,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private let session: DiscordSession
     private var store: Store { session.store }
 
-    private let titleLabel = NSTextField(labelWithString: "")
     private let emptyLabel = NSTextField(labelWithString: "")
+    private let loadingSpinner = NSProgressIndicator()
     private let scrollView = NSScrollView()
     private let table = NSTableView()
     private let input = ComposerView()
@@ -38,10 +38,10 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private var layoutCache: [LayoutKey: CachedLayout] = [:]
     private var lastWidth: CGFloat = 0
 
-    private static let sidePadding: CGFloat = 16
+    private static let sidePadding = Theme.Spacing.edge
     /// Room between the newest message and the message box.
     private static let bottomInset: CGFloat = 10
-    private static var headerHeight: CGFloat { ceil(Settings.textSize.pointSize * 1.4) }
+    private static let headerHeight = ceil(Theme.messageBoldFont.pointSize * 1.4)
     private static let groupWindow: TimeInterval = 7 * 60
 
     init(session: DiscordSession) {
@@ -54,9 +54,6 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     override func loadView() {
         let root = LiveResizeView()
         root.onEndLiveResize = { [weak self] in self?.updateAllRowHeights() }
-
-        titleLabel.font = .boldSystemFont(ofSize: 14)
-        titleLabel.lineBreakMode = .byTruncatingTail
 
         let column = NSTableColumn(identifier: .init("message"))
         table.addTableColumn(column)
@@ -101,25 +98,21 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
         emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.alignment = .center
+        loadingSpinner.style = .spinning
+        loadingSpinner.controlSize = .regular
+        loadingSpinner.isDisplayedWhenStopped = false
+        table.setAccessibilityLabel("Messages")
 
-        let divider = NSBox()
-        divider.boxType = .separator
-
-        [titleLabel, divider, scrollView, typingTabs, input, emptyLabel].forEach {
+        [scrollView, typingTabs, input, emptyLabel, loadingSpinner].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
         }
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
-            titleLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.sidePadding),
-            titleLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Self.sidePadding),
-            divider.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
-            divider.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            divider.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: divider.bottomAnchor),
+            // The channel's name is in the toolbar; messages start just below it.
+            scrollView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            input.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 12),
+            input.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: Theme.Spacing.group),
             // The tabs' bottom edge is the message box's top edge, so they rise out from behind it.
             typingTabs.bottomAnchor.constraint(equalTo: input.topAnchor),
             typingTabs.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 14),
@@ -127,7 +120,9 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             typingTabs.widthAnchor.constraint(equalToConstant: 7 * (TypingTabsView.tabSize.width + 4)),
             input.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.sidePadding),
             input.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Self.sidePadding),
-            input.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
+            input.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -Theme.Spacing.group),
+            loadingSpinner.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
+            loadingSpinner.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
             emptyLabel.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: scrollView.centerYAnchor),
         ])
@@ -142,11 +137,9 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         layoutCache = [:]
 
         if let channelID, let channel = store.channel(channelID) {
-            titleLabel.stringValue = channel.isPrivate ? "@ " + channel.displayName : "# " + channel.displayName
             input.placeholder = channel.isPrivate ? "Message @\(channel.displayName)" : "Message #\(channel.displayName)"
             input.isEnabled = true
         } else {
-            titleLabel.stringValue = ""
             input.placeholder = ""
             input.isEnabled = false
         }
@@ -200,15 +193,20 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     private func updateEmptyState() {
         guard let channelID else {
-            emptyLabel.stringValue = "Pick a channel"
+            loadingSpinner.stopAnimation(nil)
+            emptyLabel.stringValue = "No Channel Selected"
             emptyLabel.isHidden = false
             return
         }
         if store.messages(in: channelID) == nil {
-            emptyLabel.stringValue = "Loading…"
-            emptyLabel.isHidden = false
-        } else if rows.isEmpty {
-            emptyLabel.stringValue = "No messages yet"
+            // A standard spinner while history loads, like other Mac apps.
+            emptyLabel.isHidden = true
+            loadingSpinner.startAnimation(nil)
+            return
+        }
+        loadingSpinner.stopAnimation(nil)
+        if rows.isEmpty {
+            emptyLabel.stringValue = "No Messages Yet"
             emptyLabel.isHidden = false
         } else {
             emptyLabel.isHidden = true
@@ -343,7 +341,19 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         let cell = tableView.makeView(withIdentifier: MessageCell.identifier, owner: nil) as? MessageCell ?? MessageCell()
         let cached = layout(for: rows[row])
         cell.configure(cached.layout, header: cached.header)
+        cell.setAccessibilityLabel(spokenText(for: rows[row].message))
         return cell
+    }
+
+    /// What VoiceOver reads for a message: who, when, and what.
+    private func spokenText(for message: Message) -> String {
+        var parts = [message.author.displayName]
+        if let date = message.date { parts.append(Theme.timeFormatter.string(from: date)) }
+        if !message.content.isEmpty { parts.append(message.content) }
+        let attachments = message.attachments.count
+        if attachments > 0 { parts.append("\(attachments) attachment\(attachments == 1 ? "" : "s")") }
+        if message.editedTimestamp != nil { parts.append("edited") }
+        return parts.joined(separator: ", ")
     }
 
     /// Rows scrolled out of view stop their image downloads.
@@ -368,7 +378,7 @@ private final class LiveResizeView: NSView {
 private final class MessageCell: NSTableCellView, NSTextViewDelegate {
     static let identifier = NSUserInterfaceItemIdentifier("MessageCell")
     static let bottomPadding: CGFloat = 2
-    static func topPadding(grouped: Bool) -> CGFloat { grouped ? 1 : (Settings.compactMessages ? 4 : 10) }
+    static func topPadding(grouped: Bool) -> CGFloat { grouped ? 1 : (Settings.compactLayout ? Theme.Spacing.tight : Theme.Spacing.group) }
 
     private let headerField = NSTextField(labelWithString: "")
     private let avatarView = RemoteImageView()

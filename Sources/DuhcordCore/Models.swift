@@ -81,10 +81,11 @@ public struct Channel: Decodable, Hashable {
     public var lastMessageId: Snowflake?
     public let recipients: [User]?
     public let permissionOverwrites: [PermissionOverwrite]?
+    public let topic: String?
 
     public init(id: Snowflake, type: Int, guildId: Snowflake? = nil, name: String? = nil, position: Int? = nil,
                 parentId: Snowflake? = nil, lastMessageId: Snowflake? = nil, recipients: [User]? = nil,
-                permissionOverwrites: [PermissionOverwrite]? = nil) {
+                permissionOverwrites: [PermissionOverwrite]? = nil, topic: String? = nil) {
         self.id = id
         self.type = type
         self.guildId = guildId
@@ -94,6 +95,7 @@ public struct Channel: Decodable, Hashable {
         self.lastMessageId = lastMessageId
         self.recipients = recipients
         self.permissionOverwrites = permissionOverwrites
+        self.topic = topic
     }
 
     public var kind: ChannelKind? { ChannelKind(rawValue: type) }

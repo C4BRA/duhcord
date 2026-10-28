@@ -26,7 +26,8 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
     private let store: Store
     private let voice: VoiceController
     private let titleLabel = NSTextField(labelWithString: "")
-    private let table = NSTableView()
+    private let table = KeyTableView()
+    private let emptyLabel = NSTextField(labelWithString: "")
     private let voiceBar = VoiceBar()
     private var place: Place = .directMessages
     private var items: [ChannelListItem] = []
@@ -54,11 +55,14 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         table.fitColumnToWidth()
         table.headerView = nil
         table.style = .sourceList
-        table.rowHeight = 24
+        table.rowSizeStyle = Theme.listRowSize
+        table.setAccessibilityLabel("Channels")
         table.dataSource = self
         table.delegate = self
         table.target = self
         table.action = #selector(rowClicked)
+        // Return joins the selected voice channel, so voice works from the keyboard too.
+        table.onReturn = { [weak self] in self?.joinSelectedVoiceChannel() }
 
         let scroll = NSScrollView()
         scroll.documentView = table
@@ -66,7 +70,7 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
 
-        titleLabel.font = .boldSystemFont(ofSize: 13)
+        titleLabel.font = Theme.boldFont
         titleLabel.lineBreakMode = .byTruncatingTail
 
         voiceBar.isHidden = true
@@ -77,7 +81,10 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         let container = NSVisualEffectView()
         container.material = .sidebar
         container.blendingMode = .behindWindow
-        [titleLabel, scroll, voiceBar].forEach {
+        emptyLabel.textColor = .secondaryLabelColor
+        emptyLabel.alignment = .center
+        emptyLabel.isHidden = true
+        [titleLabel, scroll, voiceBar, emptyLabel].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview($0)
         }
@@ -86,18 +93,28 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         listToBottom = scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         listToBar = scroll.bottomAnchor.constraint(equalTo: voiceBar.topAnchor)
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
-            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            titleLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            scroll.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
+            titleLabel.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: Theme.Spacing.group),
+            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: Theme.Spacing.group),
+            titleLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -Theme.Spacing.group),
+            scroll.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: Theme.Spacing.related),
             scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             voiceBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             voiceBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             voiceBar.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            emptyLabel.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
+            emptyLabel.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
+            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor, constant: -2 * Theme.Spacing.edge),
             listToBottom,
         ])
         view = container
+        NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged), name: Settings.didChange, object: nil)
+    }
+
+    @objc private func settingsChanged() {
+        guard table.rowSizeStyle != Theme.listRowSize else { return }
+        table.rowSizeStyle = Theme.listRowSize
+        reload()
     }
 
     /// Keeps the column exactly the list's width, whatever AppKit decided during layout.
@@ -123,6 +140,8 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         }
         rows = buildRows()
         table.reloadData()
+        emptyLabel.stringValue = place == .directMessages ? "No Direct Messages" : "No Channels You Can See"
+        emptyLabel.isHidden = !rows.isEmpty
         if let focused = store.focusedChannelID { select(focused) }
         refreshVoiceBar()
     }
@@ -220,19 +239,29 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         case .item(let item):
             var inCall = false
             if case .voiceChannel(let c) = item { inCall = c.id == voice.channelID }
-            cell.configure(item, store: store, inCall: inCall)
+            cell.configure(item, store: store, inCall: inCall, size: table.effectiveRowSizeStyle)
         case .member(let state, let guildID):
             let user = state.member?.user ?? store.memberUser(state.userId, in: guildID)
                 ?? User(id: state.userId, username: "")
-            cell.configureMember(name: name(of: state, in: guildID), user: user, speaking: voice.speaking.contains(state.userId),
+            cell.configureMember(name: name(of: state, in: guildID), user: user, size: table.effectiveRowSizeStyle,
+                                 speaking: voice.speaking.contains(state.userId),
                                  muted: state.selfMute || state.mute, deafened: state.selfDeaf || state.deaf)
         }
     }
 
     @objc private func rowClicked() {
-        let row = table.clickedRow
+        join(row: table.clickedRow)
+    }
+
+    private func joinSelectedVoiceChannel() {
+        join(row: table.selectedRow)
+    }
+
+    /// Joins the voice channel in `row`, then puts the selection back on the text channel being read.
+    private func join(row: Int) {
         guard row >= 0, row < rows.count, case .item(.voiceChannel(let channel)) = rows[row] else { return }
         onJoinVoice?(channel)
+        if let focused = store.focusedChannelID { select(focused, scroll: false) }
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
@@ -243,10 +272,10 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         return cell
     }
 
-    /// Members get a little more room for their profile pictures.
+    /// Rows take the system's height for the sidebar size; members get at least enough for their pictures.
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if case .member = rows[row] { return 28 }
-        return 24
+        if case .member = rows[row] { return max(tableView.rowHeight, Theme.IconSize.listAvatar + Theme.Spacing.related) }
+        return tableView.rowHeight
     }
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
@@ -254,10 +283,13 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         return false
     }
 
-    /// Only text channels are selected; clicking a voice channel joins it instead.
+    /// Text channels are selected to read them. Voice channels can be selected with the keyboard (Return joins);
+    /// clicking one joins straight away.
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        if case .item(.channel) = rows[row] { return true }
-        return false
+        switch rows[row] {
+        case .item(.channel), .item(.voiceChannel): return true
+        default: return false
+        }
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -268,7 +300,7 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
 
 private final class ChannelCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("ChannelCell")
-    static let avatarSize: CGFloat = 20
+    static let avatarSize = Theme.IconSize.listAvatar
 
     /// What sits in front of the name.
     private enum Leading { case none, icon, avatar }
@@ -276,7 +308,7 @@ private final class ChannelCell: NSTableCellView {
     private let icon = NSImageView()
     private let avatar = RemoteImageView()
     private let label = NSTextField(labelWithString: "")
-    private let badge = NSTextField(labelWithString: "")
+    private let badge = BadgeView()
     private let status = NSImageView()
     private var labelAtStart: NSLayoutConstraint!
     private var labelAfterIcon: NSLayoutConstraint!
@@ -286,9 +318,6 @@ private final class ChannelCell: NSTableCellView {
         super.init(frame: .zero)
         identifier = Self.identifier
         label.lineBreakMode = .byTruncatingTail
-        badge.alignment = .right
-        badge.font = .boldSystemFont(ofSize: 10)
-        badge.textColor = .systemRed
         icon.symbolConfiguration = .init(pointSize: 12, weight: .medium)
         status.symbolConfiguration = .init(pointSize: 10, weight: .medium)
         status.contentTintColor = .tertiaryLabelColor
@@ -301,24 +330,24 @@ private final class ChannelCell: NSTableCellView {
         badge.setContentCompressionResistancePriority(.required, for: .horizontal)
         status.setContentCompressionResistancePriority(.required, for: .horizontal)
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        labelAtStart = label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4)
-        labelAfterIcon = label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6)
-        labelAfterAvatar = label.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: 7)
+        labelAtStart = label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.tight)
+        labelAfterIcon = label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: Theme.Spacing.related)
+        labelAfterAvatar = label.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: Theme.Spacing.related)
         NSLayoutConstraint.activate([
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.tight),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 16),
+            icon.widthAnchor.constraint(equalToConstant: Theme.IconSize.sidebar),
             // Members sit under their channel's name, lined up with it.
-            avatar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 26),
+            avatar.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: Theme.Spacing.related),
             avatar.centerYAnchor.constraint(equalTo: centerYAnchor),
             avatar.widthAnchor.constraint(equalToConstant: Self.avatarSize),
             avatar.heightAnchor.constraint(equalToConstant: Self.avatarSize),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            badge.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 4),
-            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            badge.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: Theme.Spacing.tight),
+            badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.related),
             badge.centerYAnchor.constraint(equalTo: centerYAnchor),
-            status.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 4),
-            status.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            status.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: Theme.Spacing.tight),
+            status.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.related),
             status.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
@@ -334,16 +363,17 @@ private final class ChannelCell: NSTableCellView {
         if leading != .avatar { avatar.setImage(nil, pointSize: .zero) }
     }
 
-    func configure(_ item: ChannelListItem, store: Store, inCall: Bool) {
+    func configure(_ item: ChannelListItem, store: Store, inCall: Bool, size: NSTableView.RowSizeStyle) {
         status.isHidden = true
         avatar.layer?.borderWidth = 0
         switch item {
         case .category(let c):
             use(.none)
             label.stringValue = c.displayName.uppercased()
-            label.font = .systemFont(ofSize: 11, weight: .semibold)
+            setAccessibilityLabel(c.displayName + ", category")
+            label.font = Theme.captionFont.withWeight(.semibold)
             label.textColor = .secondaryLabelColor
-            badge.stringValue = ""
+            badge.count = 0
         case .channel(let c):
             let unread = store.isUnread(c.id)
             if c.isPrivate {
@@ -355,35 +385,39 @@ private final class ChannelCell: NSTableCellView {
                 icon.contentTintColor = unread ? .labelColor : .secondaryLabelColor
             }
             label.stringValue = c.displayName
-            label.font = unread ? Theme.boldFont : Theme.bodyFont
+            label.font = Theme.listFont(for: size, bold: unread)
             label.textColor = unread ? .labelColor : .secondaryLabelColor
-            let mentions = store.mentionCount(c.id)
-            badge.stringValue = mentions > 0 ? String(mentions) : ""
+            badge.count = store.mentionCount(c.id)
+            var spoken = c.displayName + (c.isPrivate ? "" : ", text channel")
+            if badge.count > 0 { spoken += ", \(badge.count) mention\(badge.count == 1 ? "" : "s")" } else if unread { spoken += ", unread" }
+            setAccessibilityLabel(spoken)
         case .voiceChannel(let c):
             use(.icon)
             icon.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "Voice channel")
             icon.contentTintColor = inCall ? .systemGreen : .secondaryLabelColor
             label.stringValue = c.displayName
-            label.font = inCall ? Theme.boldFont : Theme.bodyFont
+            label.font = Theme.listFont(for: size, bold: inCall)
             label.textColor = inCall ? .labelColor : .secondaryLabelColor
-            badge.stringValue = ""
+            badge.count = 0
+            setAccessibilityLabel(c.displayName + ", voice channel" + (inCall ? ", connected" : ""))
         }
     }
 
     /// Someone in a voice channel: picture (ringed in green while they talk), name, and mute/deafen.
-    func configureMember(name: String, user: User, speaking: Bool, muted: Bool, deafened: Bool) {
+    func configureMember(name: String, user: User, size: NSTableView.RowSizeStyle, speaking: Bool, muted: Bool, deafened: Bool) {
         use(.avatar)
         let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         avatar.setImage(MediaRequest.avatarURL(for: user, pixels: Int(Self.avatarSize * scale)),
                         pointSize: NSSize(width: Self.avatarSize, height: Self.avatarSize))
         avatar.layer?.borderWidth = speaking ? 2 : 0
         label.stringValue = name
-        label.font = Theme.bodyFont
+        label.font = Theme.listFont(for: size)
         label.textColor = speaking ? .labelColor : .secondaryLabelColor
-        badge.stringValue = ""
+        badge.count = 0
         status.isHidden = !(muted || deafened)
         status.image = NSImage(systemSymbolName: deafened ? "speaker.slash.fill" : "mic.slash.fill",
                                accessibilityDescription: deafened ? "Deafened" : "Muted")
+        setAccessibilityLabel(name + (speaking ? ", speaking" : "") + (deafened ? ", deafened" : muted ? ", muted" : ""))
     }
 }
 
@@ -402,7 +436,7 @@ private final class VoiceBar: NSView {
 
     init() {
         super.init(frame: .zero)
-        statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        statusLabel.font = Theme.smallFont.withWeight(.semibold)
         placeLabel.font = Theme.smallFont
         placeLabel.lineBreakMode = .byTruncatingTail
         statusLabel.lineBreakMode = .byTruncatingTail
@@ -425,21 +459,21 @@ private final class VoiceBar: NSView {
         }
         NSLayoutConstraint.activate([
             divider.topAnchor.constraint(equalTo: topAnchor),
-            divider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            divider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            divider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.group),
+            divider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.group),
 
-            statusLabel.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 10),
-            statusLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: muteButton.leadingAnchor, constant: -8),
-            placeLabel.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 2),
+            statusLabel.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: Theme.Spacing.group),
+            statusLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.group),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: muteButton.leadingAnchor, constant: -Theme.Spacing.related),
+            placeLabel.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: Theme.Spacing.tight / 2),
             placeLabel.leadingAnchor.constraint(equalTo: statusLabel.leadingAnchor),
-            placeLabel.trailingAnchor.constraint(lessThanOrEqualTo: muteButton.leadingAnchor, constant: -8),
+            placeLabel.trailingAnchor.constraint(lessThanOrEqualTo: muteButton.leadingAnchor, constant: -Theme.Spacing.related),
             // The same 12 pt bottom margin as the message box next to it.
-            placeLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            placeLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Theme.Spacing.group),
 
-            leaveButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            deafenButton.trailingAnchor.constraint(equalTo: leaveButton.leadingAnchor, constant: -4),
-            muteButton.trailingAnchor.constraint(equalTo: deafenButton.leadingAnchor, constant: -4),
+            leaveButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.related),
+            deafenButton.trailingAnchor.constraint(equalTo: leaveButton.leadingAnchor, constant: -Theme.Spacing.tight),
+            muteButton.trailingAnchor.constraint(equalTo: deafenButton.leadingAnchor, constant: -Theme.Spacing.tight),
         ])
         for button in [muteButton, deafenButton, leaveButton] {
             NSLayoutConstraint.activate([
@@ -500,5 +534,19 @@ private final class VoiceBar: NSView {
         button.imagePosition = .imageOnly
         button.toolTip = label
         return button
+    }
+}
+
+/// A table that reports Return, which plain NSTableView ignores.
+private final class KeyTableView: NSTableView {
+    var onReturn: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        // 36 is Return, 76 is Enter on the keypad.
+        if event.keyCode == 36 || event.keyCode == 76, let onReturn {
+            onReturn()
+        } else {
+            super.keyDown(with: event)
+        }
     }
 }

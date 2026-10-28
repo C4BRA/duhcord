@@ -85,11 +85,14 @@ final class UpdateController {
             }
             return
         }
+        if case .available(let manifest) = checker.state {
+            window.setUpdateAvailable { [weak self] in self?.confirm(manifest) }
+        } else {
+            window.setUpdateAvailable(nil)
+        }
         switch checker.state {
-        case .available(let manifest):
-            window.showBanner("Duhcord \(manifest.version) is available.", action: "Update…") { [weak self] in
-                self?.confirm(manifest)
-            }
+        case .available:
+            window.showBanner(nil)
         case .downloading(let manifest):
             window.showBanner("Downloading Duhcord \(manifest.version)…")
         case .ready(let manifest, _):

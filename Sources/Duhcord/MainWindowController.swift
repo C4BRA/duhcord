@@ -7,8 +7,9 @@ enum Place: Hashable {
     case guild(Snowflake)
 }
 
-/// The three-column window: guilds, channels, messages.
-final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
+/// The three-column window, laid out like Mail: the server sidebar, the channel list, and the messages, under a
+/// unified toolbar that carries the channel's name and topic.
+final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation, NSToolbarDelegate {
     let session: DiscordSession
     let voice: VoiceController
     private let guildList: GuildListViewController
@@ -20,7 +21,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private var place: Place = .directMessages
     private var lastChannel: [Place: Snowflake] = [:]
 
-    private let banner: BannerView
+    /// The info bar under the toolbar, for things that need attention (like Safari's and Mail's).
+    private let banner = BannerView()
+    private let bannerAccessory = NSTitlebarAccessoryViewController()
+    private var status: String?
+    private var updateHandler: (() -> Void)?
 
     init(session: DiscordSession) {
         self.session = session
@@ -30,31 +35,40 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         messages = MessagesViewController(session: session)
 
         let split = NSSplitViewController()
-        split.splitView.isVertical = true
-        split.splitView.dividerStyle = .thin
-
-        let guildItem = NSSplitViewItem(viewController: guildList)
-        guildItem.minimumThickness = 64
-        guildItem.maximumThickness = 64
-        guildItem.canCollapse = false
-        let channelItem = NSSplitViewItem(viewController: channelList)
-        channelItem.minimumThickness = 160
-        channelItem.maximumThickness = 320
-        channelItem.canCollapse = true
+        let sidebar = NSSplitViewItem(sidebarWithViewController: guildList)
+        sidebar.minimumThickness = 180
+        sidebar.maximumThickness = 300
+        sidebar.canCollapse = true
+        let channelItem = NSSplitViewItem(contentListWithViewController: channelList)
+        channelItem.minimumThickness = 200
+        channelItem.maximumThickness = 340
         let messageItem = NSSplitViewItem(viewController: messages)
-        messageItem.minimumThickness = 320
-        [guildItem, channelItem, messageItem].forEach(split.addSplitViewItem)
+        messageItem.minimumThickness = 360
+        [sidebar, channelItem, messageItem].forEach(split.addSplitViewItem)
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 680),
-                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
         window.title = "Duhcord"
-        let container = BannerContainerViewController(content: split)
-        banner = container.banner
-        window.contentViewController = container
-        window.setContentSize(NSSize(width: 1000, height: 680))
+        window.contentViewController = split
+        window.toolbarStyle = .unified
+        // Tab moves between the sidebar, the channel list, the message box and the toolbar.
+        window.autorecalculatesKeyViewLoop = true
+        window.setContentSize(NSSize(width: 1100, height: 700))
         window.setFrameAutosaveName("DuhcordMain")
         super.init(window: window)
         window.delegate = self
+
+        let toolbar = NSToolbar(identifier: "DuhcordMain")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        window.toolbar = toolbar
+
+        bannerAccessory.layoutAttribute = .bottom
+        bannerAccessory.view = banner
+        bannerAccessory.isHidden = true
+        window.addTitlebarAccessoryViewController(bannerAccessory)
 
         guildList.onSelect = { [weak self] place in self?.select(place: place) }
         channelList.onSelect = { [weak self] channelID in self?.select(channelID: channelID) }
@@ -62,7 +76,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         channelList.onMissingNames = { [weak session] guildID, userIDs in
             session?.requestMemberNames(guildID: guildID, userIDs: userIDs)
         }
-        voice.onChange = { [weak self] in self?.channelList.voiceChanged() }
+        voice.onChange = { [weak self] in
+            self?.channelList.voiceChanged()
+            self?.refreshVoiceToolbar()
+        }
         voice.onProblem = { [weak self] message in self?.showVoiceProblem(message) }
         session.store.onChange = { [weak self] change in self?.handle(change) }
         NotificationCenter.default.addObserver(self, selector: #selector(updateDockBadge), name: Settings.didChange, object: nil)
@@ -88,19 +105,48 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     func unlock() { connectionLock.hide() }
 
-    /// Keyboard shortcuts in the Go menu are off while locked.
-    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool { !isLocked }
+    /// Keyboard shortcuts are off while locked; voice commands only work in a call, and their titles follow
+    /// the current state.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard !isLocked else { return false }
+        switch menuItem.action {
+        case #selector(toggleMute(_:)):
+            menuItem.title = voice.muted ? "Unmute" : "Mute"
+            return voice.isInCall
+        case #selector(toggleDeafen(_:)):
+            menuItem.title = voice.deafened ? "Undeafen" : "Deafen"
+            return voice.isInCall
+        case #selector(leaveVoice(_:)):
+            return voice.isInCall
+        default:
+            return true
+        }
+    }
 
-    /// Shows the bar across the top of the window, or hides it when `text` is nil.
+    /// Shows the info bar under the toolbar, or hides it when `text` is nil.
     func showBanner(_ text: String?, tone: BannerView.Tone = .info, action: String? = nil, handler: (() -> Void)? = nil) {
         guard let text else {
-            banner.isHidden = true
+            bannerAccessory.isHidden = true
             return
         }
         banner.show(text, tone: tone, action: action)
         banner.onAction = handler
-        banner.isHidden = false
+        bannerAccessory.isHidden = false
     }
+
+    /// An "Update" button in the toolbar while an update is waiting, the way macOS apps flag them quietly.
+    func setUpdateAvailable(_ handler: (() -> Void)?) {
+        updateHandler = handler
+        guard let toolbar = window?.toolbar else { return }
+        let index = toolbar.items.firstIndex { $0.itemIdentifier == .update }
+        if handler != nil, index == nil {
+            toolbar.insertItem(withItemIdentifier: .update, at: toolbar.items.count)
+        } else if handler == nil, let index {
+            toolbar.removeItem(at: index)
+        }
+    }
+
+    @objc private func updateClicked(_ sender: Any?) { updateHandler?() }
 
     private func showVoiceProblem(_ message: String) {
         guard let window, window.attachedSheet == nil else { return }
@@ -110,8 +156,20 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         alert.beginSheetModal(for: window)
     }
 
+    /// A connection status ("Reconnecting…") shown as the window subtitle in place of the topic.
     func setStatus(_ text: String?) {
-        window?.subtitle = text ?? ""
+        status = text
+        updateTitle()
+    }
+
+    /// The window title is the channel's name; the subtitle is its topic, or where it is.
+    private func updateTitle() {
+        guard let window else { return }
+        let channel = session.store.focusedChannelID.flatMap { session.store.channel($0) }
+        window.title = channel?.displayName ?? "Duhcord"
+        let topic = channel?.topic?.split(separator: "\n").first.map(String.init) ?? ""
+        let location = channel.map { $0.isPrivate ? "Direct Message" : ($0.guildId.flatMap { session.store.guilds[$0]?.name } ?? "") } ?? ""
+        window.subtitle = status ?? (topic.isEmpty ? location : topic)
     }
 
     private var indicatorRefreshPending = false
@@ -124,6 +182,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             // nil means "everything" (READY) or a DM channel changed.
             if guildID == nil || place == .guild(guildID!) {
                 channelList.reload()
+                updateTitle()
             }
         case .voice(let guildID):
             if place == .guild(guildID) { channelList.voiceMembersChanged() }
@@ -160,6 +219,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             select(channelID: first)
         } else {
             messages.show(channelID: nil)
+            updateTitle()
         }
     }
 
@@ -168,6 +228,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         channelList.select(channelID)
         messages.show(channelID: channelID)
         session.open(channelID: channelID)
+        updateTitle()
     }
 
     /// Jumps to any channel, switching the guild column if needed.
@@ -213,4 +274,91 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         let next = max(0, min(ids.count - 1, current + delta))
         select(channelID: ids[next])
     }
+
+    // MARK: - Toolbar
+
+    private func refreshVoiceToolbar() {
+        guard let toolbar = window?.toolbar else { return }
+        let voiceIDs: [NSToolbarItem.Identifier] = [.voiceMute, .voiceDeafen, .voiceLeave]
+        let present = toolbar.items.contains { $0.itemIdentifier == .voiceMute }
+        if voice.isInCall, !present {
+            let at = toolbar.items.firstIndex { $0.itemIdentifier == .jumpTo } ?? toolbar.items.count
+            for (offset, id) in voiceIDs.enumerated() { toolbar.insertItem(withItemIdentifier: id, at: at + offset) }
+        } else if !voice.isInCall, present {
+            for index in toolbar.items.indices.reversed() where voiceIDs.contains(toolbar.items[index].itemIdentifier) {
+                toolbar.removeItem(at: index)
+            }
+        }
+        for item in toolbar.items { configureVoiceItem(item) }
+    }
+
+    private func configureVoiceItem(_ item: NSToolbarItem) {
+        let micOff = voice.muted || voice.deafened || voice.serverMuted || voice.serverDeafened
+        let soundOff = voice.deafened || voice.serverDeafened
+        switch item.itemIdentifier {
+        case .voiceMute:
+            item.label = voice.muted ? "Unmute" : "Mute"
+            item.image = NSImage(systemSymbolName: micOff ? "mic.slash.fill" : "mic.fill", accessibilityDescription: item.label)
+        case .voiceDeafen:
+            item.label = voice.deafened ? "Undeafen" : "Deafen"
+            item.image = NSImage(systemSymbolName: soundOff ? "speaker.slash.fill" : "headphones", accessibilityDescription: item.label)
+        case .voiceLeave:
+            item.label = "Disconnect"
+            item.image = NSImage(systemSymbolName: "phone.down.fill", accessibilityDescription: item.label)
+        default:
+            return
+        }
+        item.toolTip = item.label
+    }
+
+    @objc func toggleMute(_ sender: Any?) { voice.toggleMute() }
+    @objc func toggleDeafen(_ sender: Any?) { voice.toggleDeafen() }
+    @objc func leaveVoice(_ sender: Any?) { voice.leave() }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, .jumpTo]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar) + [.voiceMute, .voiceDeafen, .voiceLeave, .update]
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        let item = NSToolbarItem(itemIdentifier: id)
+        item.target = self
+        item.isBordered = true
+        switch id {
+        case .jumpTo:
+            item.label = "Jump To"
+            item.toolTip = "Jump to a channel or person (⌘K)"
+            item.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Jump To")
+            item.action = #selector(showQuickSwitcher(_:))
+        case .update:
+            item.label = "Update"
+            item.toolTip = "A new version of Duhcord is available"
+            item.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: "Update")
+            item.action = #selector(updateClicked(_:))
+        case .voiceMute:
+            item.action = #selector(toggleMute(_:))
+            configureVoiceItem(item)
+        case .voiceDeafen:
+            item.action = #selector(toggleDeafen(_:))
+            configureVoiceItem(item)
+        case .voiceLeave:
+            item.action = #selector(leaveVoice(_:))
+            configureVoiceItem(item)
+        default:
+            return nil
+        }
+        return item
+    }
+}
+
+extension NSToolbarItem.Identifier {
+    static let jumpTo = Self("jumpTo")
+    static let update = Self("update")
+    static let voiceMute = Self("voiceMute")
+    static let voiceDeafen = Self("voiceDeafen")
+    static let voiceLeave = Self("voiceLeave")
 }

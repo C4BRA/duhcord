@@ -1,48 +1,65 @@
 import AppKit
 import DuhcordCore
 
-/// Fonts, colours and message rendering. Everything uses system colours so dark mode just works.
+/// Duhcord's design tokens and message rendering. Every view takes its spacing, type, corner radii and icon sizes
+/// from here, so the app follows one set of rules instead of each view picking its own numbers.
+///
+/// The rules come from Apple's Human Interface Guidelines: system text styles, system colours (so dark mode,
+/// accent colours and Increase Contrast just work), and the macOS spacing rhythm.
 enum Theme {
-    /// Sidebar fonts stay at the system size; message fonts follow the text size setting.
-    static let bodyFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
-    static let boldFont = NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)
-    static let smallFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+    /// The macOS spacing rhythm.
+    enum Spacing {
+        /// Inside one control or between an icon and its label.
+        static let tight: CGFloat = 4
+        /// Between related items.
+        static let related: CGFloat = 8
+        /// Between groups, and the inset of sidebar and list content.
+        static let group: CGFloat = 12
+        /// Window and sheet margins.
+        static let edge: CGFloat = 20
+    }
 
-    static var messageFont: NSFont { messageFonts.regular }
-    static var messageBoldFont: NSFont { messageFonts.bold }
-    static var messageSmallFont: NSFont { messageFonts.small }
-    static var monoFont: NSFont { messageFonts.mono }
+    enum Radius {
+        static let small: CGFloat = 4
+        static let control: CGFloat = 6
+        static let card: CGFloat = 8
+        static let panel: CGFloat = 12
+    }
 
-    /// Message fonts are looked up for every row laid out, so they're made once per text size.
-    private struct MessageFonts {
-        let size: CGFloat
-        let regular, bold, small, mono: NSFont
+    enum IconSize {
+        /// Sidebar and list icons, and server icons in the sidebar.
+        static let sidebar: CGFloat = 18
+        /// Profile pictures in lists.
+        static let listAvatar: CGFloat = 20
+    }
 
-        init(size: CGFloat) {
-            self.size = size
-            regular = .systemFont(ofSize: size)
-            bold = .boldSystemFont(ofSize: size)
-            small = .systemFont(ofSize: size - 2)
-            mono = .monospacedSystemFont(ofSize: size - 1, weight: .regular)
+    // Apple's text styles. macOS has no app-level text size, so these follow the system: the same sizes and
+    // weights as Mail, Messages and Notes.
+    static let bodyFont = NSFont.preferredFont(forTextStyle: .body)
+    static let boldFont = NSFont.preferredFont(forTextStyle: .headline)
+    static let smallFont = NSFont.preferredFont(forTextStyle: .subheadline)
+    static let captionFont = NSFont.preferredFont(forTextStyle: .caption1)
+    static let titleFont = NSFont.preferredFont(forTextStyle: .title3)
+
+    static let messageFont = bodyFont
+    static let messageBoldFont = boldFont
+    static let messageSmallFont = smallFont
+    static let monoFont = NSFont.monospacedSystemFont(ofSize: bodyFont.pointSize - 1, weight: .regular)
+
+    /// Sidebar and list text follows System Settings → Appearance → Sidebar icon size (or Duhcord's compact
+    /// layout, which picks the small size).
+    static func listFont(for size: NSTableView.RowSizeStyle, bold: Bool = false) -> NSFont {
+        let pointSize: CGFloat
+        switch size {
+        case .small: pointSize = NSFont.smallSystemFontSize
+        case .large: pointSize = 15
+        default: pointSize = NSFont.systemFontSize
         }
+        return bold ? .boldSystemFont(ofSize: pointSize) : .systemFont(ofSize: pointSize)
     }
 
-    private static var cachedFonts: MessageFonts?
-
-    private static var messageFonts: MessageFonts {
-        let size = Settings.textSize.pointSize
-        if let cachedFonts, cachedFonts.size == size { return cachedFonts }
-        let fonts = MessageFonts(size: size)
-        cachedFonts = fonts
-        return fonts
-    }
-
-    /// Darker strip behind the guild column so it reads as separate from the channel list.
-    static let guildColumnBackground = NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(white: 0.08, alpha: 1)
-            : NSColor(white: 0.84, alpha: 1)
-    }
+    /// The row size lists use: the system's sidebar setting, or small in compact layout.
+    static var listRowSize: NSTableView.RowSizeStyle { Settings.compactLayout ? .small : .default }
 
     static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -225,5 +242,13 @@ extension NSTableView {
         }
         columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         sizeLastColumnToFit()
+    }
+}
+
+extension NSFont {
+    /// The same font at another weight.
+    func withWeight(_ weight: NSFont.Weight) -> NSFont {
+        let descriptor = fontDescriptor.addingAttributes([.traits: [NSFontDescriptor.TraitKey.weight: weight]])
+        return NSFont(descriptor: descriptor, size: pointSize) ?? self
     }
 }

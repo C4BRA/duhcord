@@ -29,7 +29,11 @@ final class TypingTabsView: NSView {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    /// People whose typing VoiceOver has already announced, so each start of typing is said once.
+    private var announced: Set<Snowflake> = []
+
     func update(_ entries: [TypingTracker.Entry]) {
+        announceNewTypists(entries)
         let shown = Array(entries.prefix(Self.maxTabs))
         let shownIDs = Set(shown.map(\.userID))
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -69,6 +73,19 @@ final class TypingTabsView: NSView {
             overflow.frame = NSRect(origin: NSPoint(x: x, y: -Self.tabSize.height / 2), size: Self.tabSize)
         }
         hasTabs = !entries.isEmpty
+    }
+
+    /// The tabs are visual, so VoiceOver users hear "… is typing" instead, at low priority.
+    private func announceNewTypists(_ entries: [TypingTracker.Entry]) {
+        let raised = Set(entries.filter(\.raised).map(\.userID))
+        defer { announced = raised }
+        guard NSWorkspace.shared.isVoiceOverEnabled, let window = NSApp.mainWindow else { return }
+        for entry in entries where entry.raised && !announced.contains(entry.userID) {
+            NSAccessibility.post(element: window, notification: .announcementRequested, userInfo: [
+                .announcement: "\(entry.name) is typing",
+                .priority: NSAccessibilityPriorityLevel.low.rawValue,
+            ])
+        }
     }
 
     private func hiddenFrame(for x: CGFloat) -> NSRect {
