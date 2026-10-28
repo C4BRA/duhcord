@@ -1,154 +1,136 @@
 # Duhcord
 
-A very small native Discord client for macOS. It's written in Swift with AppKit, with no Electron, no web views and no third-party dependencies.
+A small, native Discord client for macOS, written in Swift with AppKit: no Electron, no web views. Apple silicon only.
 
-> **Warning:** Duhcord logs in with your user token. Discord's Terms of Service forbid third-party clients and automated user accounts, and accounts have been banned for using them. Use it at your own risk, ideally on an account you can afford to lose.
+> **Warning:** Duhcord logs in with your user token. Discord's Terms of Service forbid third-party clients, and accounts have been banned for using them. Use it at your own risk, ideally on an account you can afford to lose.
 
-## What it does
+## Features
 
-- Three columns: servers, channels and messages, using system fonts and colours, with dark mode.
-- Reading and sending messages, with history loaded as you scroll up.
-- Unread markers, mention badges, a Dock badge, and notifications for DMs and mentions.
-- Markdown rendering for bold, italic, underline, strikethrough, code, code blocks, quotes, spoilers, links, mentions and timestamps.
-- Keyboard navigation:
+- **A Mac-style window**, laid out like Mail: a server sidebar, the channel list, and messages, under a unified toolbar showing the channel's name and topic. It uses system fonts, colours and controls, so dark mode, accent colours and accessibility settings just work.
+- **Messages:** reading and sending, history loaded as you scroll up, and Markdown (bold, italic, underline, strikethrough, code, quotes, spoilers, links, mentions, timestamps).
+- **Unread markers, mention badges** (in the sidebar and on the Dock icon), and notifications for DMs and mentions.
+- **Images, GIFs, videos and link previews** shown inline. Spoilers wait for a click, and **Settings → Images** can switch images to click-to-load or off.
+- **Profile pictures and server icons**, loaded at exactly the size shown.
+- **Typing tabs:** when someone types, a tab with their picture rises from behind the message box. It sinks halfway when they stop and leaves a minute later. VoiceOver announces who's typing instead.
+- **Voice channels**, end-to-end encrypted (see [Voice](#voice)).
+- **QR-code login**, the same way the official desktop app logs in (see [Logging in](#logging-in)).
 
-  | Keys | Action |
-  |------|--------|
-  | ⌘K | Jump to a channel or DM |
-  | ⌥↑ / ⌥↓ | Previous / next channel |
-  | ⌥⇧↓ | Next unread channel |
-  | ⇧↩ or ⌥↩ | Insert a newline in a message |
+| Keys | Action |
+|------|--------|
+| ⌘K | Jump to a channel or DM |
+| ⌥↑ / ⌥↓ | Previous / next channel |
+| ⌥⇧↓ | Next unread channel |
+| ⇧⌘M / ⇧⌘D | Mute / deafen in a call |
+| Return | Join the selected voice channel |
+| ⌃⌘S | Show or hide the sidebar |
+| ⇧↩ or ⌥↩ | New line in a message |
 
-## What it leaves out on purpose
+**Left out on purpose:** Nitro, the shop, Discovery, Activities, stickers, the soundboard, profile decorations, the member list, the Friends tab, video, screen sharing and DM calls. Animated profile pictures and icons show as stills, and custom emoji show as `:name:`.
 
-- Nitro, the shop, Discovery and Activities
-- Stickers, soundboard and profile decorations
-- The member list and the Friends tab
-- Video, screen sharing and DM calls (voice channels are supported, see below)
-- Animated profile pictures and server icons (they show as stills)
+## Voice
 
-Link previews, embeds and image attachments are shown inline, built to stay cheap:
-- **Preview text is free.** Discord builds link previews on its own servers and sends them inside the message, so Duhcord never visits the linked sites.
-- **Images are fetched at display size.** Duhcord only fetches from Discord's image proxy, asking for exactly the size it draws (usually tens of KB). It decodes straight to that size, so the full image is never built.
-- **No layout jumps.** Discord sends image sizes up front, so space is reserved before an image arrives.
-- **On screen only.** Images load for messages on screen and stop when you scroll away. A small memory cache that macOS can empty holds them, and nothing is saved to disk.
-- **GIFs move on hover** (or when visible, under **Settings → Animate GIFs**), at most a few at once, and stop when Duhcord isn't in front.
-  - Tenor and Giphy GIFs play as the tiny MP4s Discord provides, using the Mac's hardware video decoder.
-  - Uploaded GIFs are decoded one frame at a time.
-- **Videos play inline on click**, with sound, through Apple's built-in video engine. Only a few seconds are buffered, the player is torn down as soon as it stops, and only one plays at a time. YouTube and similar links open in your browser.
-- **Streams use Duhcord's own connection.** Video streams go through the same connection rules as everything else: Discord's hosts only, no token, no redirects.
-- **Your choice.** Spoilers wait for a click. **Settings → Images** switches between Always, Click to load and Off.
+Voice channels in the channel list show who's in them, with a green ring around whoever is talking. Click a channel to join it. The bar at the bottom of the channel list and the toolbar both have mute, deafen and disconnect.
 
-**Profile pictures and server icons** load at exactly the size shown (64 px avatars, 128 px icons, from Discord's own resized copies). One copy per person is shared by all their messages, and animated ones show as a still.
-
-**Typing tabs:** when someone types in the channel you're viewing, a small tab with their profile picture springs up from behind the message box. When they stop or send, it sinks halfway, and it slides away a minute later. Each movement is a single Core Animation spring drawn by the window server, so nothing runs between changes. **Settings → Privacy → Show when I'm typing** controls whether others see you typing.
-
-**Voice channels:** voice channels are listed with who's in them, and whoever is talking shows in green. Click a channel to join. A bar at the bottom of the channel list shows the call, with mute, deafen and leave.
-- **End-to-end encrypted.** Calls use Discord's DAVE protocol through Discord's own open-source library, libdave, so Discord's servers pass the audio along without being able to hear it. The bar shows 🔒 once the call is end-to-end encrypted, and nothing you say is sent before then.
-- **Kept apart from your login.** Calls run in a separate helper process, sandboxed on its own with only network and microphone access. It gets a one-call voice token, never your account token. libdave is written in C++, and this keeps any bug in it away from your login.
-- **The microphone is off unless you're unmuted.** Muting closes the microphone completely, so macOS's microphone indicator turns off. Deafening stops all audio, and the helper exits when you leave the call.
-- **Light.** Opus audio is encoded and decoded by macOS itself, and echo cancellation and noise suppression come from Apple's voice processing. Nothing is sent while you're quiet. A call uses about 64 kbit/s up while you talk, and about 64 kbit/s down per person talking.
-
-Other files show up as links that open in your browser. Custom emoji show as `:name:`.
+- **End-to-end encrypted.** Calls use Discord's DAVE protocol through Discord's own open-source library, libdave, so Discord's servers relay the audio without being able to hear it. Nothing you say is sent until the bar shows **End-to-End Encrypted**.
+- **Kept away from your login.** Calls run in a separate helper process, sandboxed on its own with only network and microphone access. It gets a voice token that's good for one call, never your account token. libdave is C++, and running it there keeps any bug in it away from your login.
+- **The microphone is only open while you're unmuted.** Muting closes it, so macOS's microphone indicator turns off. Deafening stops all audio. The helper exits when you leave.
+- **Light on resources.** macOS encodes and decodes the audio (Opus) and handles echo and noise (Apple's voice processing). Nothing is sent while you're quiet. A call uses about 64 kbit/s up while you talk, plus about 64 kbit/s down per person talking.
 
 ## How it stays light
 
-- It's a native AppKit app built only for Apple silicon (arm64), with no bundled browser. The app is a few MB.
-- Everything Discord sends over the live connection arrives compressed (`zlib-stream`), usually 3–10× smaller, and is unpacked by macOS's built-in Compression framework. One decompressed message is capped at 128 MB, so a malicious stream can't exhaust memory.
-- It only decodes the gateway event types it uses and drops the rest after reading the header.
-- It keeps messages in memory for at most 8 channels, 300 messages each, so memory doesn't grow over time.
-- It never loads history in the background. Older messages load only when you scroll up.
-- It renders messages with hand-laid-out table cells, and only for the rows on screen.
+- It's a native app of a few MB, with no bundled browser.
+- The live connection is compressed (`zlib-stream`, usually 3–10× smaller) and unpacked by macOS's built-in Compression framework. A single decompressed message is capped at 128 MB.
+- It only decodes the events it uses.
+- It keeps messages for at most 8 channels, 300 each, so memory stays flat. History never loads in the background.
+- Messages are laid out by hand, and only for the rows on screen.
+- Images come from Discord's image proxy at exactly the size drawn and are decoded straight to that size. They load only while on screen and are kept in a small memory cache, never on disk. Link previews come inside messages, so Duhcord never visits linked sites.
+- GIFs animate on hover (or while visible, under **Settings → Animate GIFs**), a few at a time, and only while Duhcord is in front. Videos play on click, one at a time, with a few seconds buffered.
 
 ## Security
 
-- The release app runs in the **App Sandbox** and its only permission is making outgoing network connections (see `Duhcord.entitlements`). It can't read your files, use the camera, microphone, contacts or location, accept incoming connections, or control other apps.
-- The voice helper is sandboxed separately with outgoing network and the microphone only (`DuhcordVoice.entitlements`). It connects only to Discord's voice servers (`*.discord.media`) and never sees the account token.
-- It's signed with the **hardened runtime** and no exceptions: no JIT, no unsigned code, no injected libraries, no debugger attachment.
-- CI runs `scripts/verify-bundle.sh` on every build and fails if either protection is missing or the app gains a permission beyond that file.
-- Your token is stored only in your login Keychain, where other apps can't read it without macOS asking you, and it is sent only to Discord.
-- All network traffic goes through one hardened connection layer (`SecureSession`):
-  - it only connects to `discord.com` and `*.discord.gg` (images: only Discord's image proxies and its avatar/icon CDN paths, without the token);
-  - certificates must chain to Apple's built-in roots, so interception tools that add their own root certificate are refused;
-  - redirects are refused, so the token can never be forwarded to another host;
-  - nothing is cached or written to disk.
-- Links in messages only open if they're `http`/`https`.
-- It has no third-party dependencies.
+- **App Sandbox and hardened runtime, with no exceptions.**
+  - The app can only make outgoing network connections (`Duhcord.entitlements`).
+  - The voice helper can also use the microphone (`DuhcordVoice.entitlements`).
+  - The installer helper has no entitlements at all.
+  - CI's `scripts/verify-bundle.sh` fails the build if any of these change, or if a binary isn't arm64-only.
+- **Your token is only in your login Keychain, and only ever sent to Discord.**
+- **One locked-down connection layer** (`SecureSession`) carries all traffic:
+  - It connects only to Discord's hosts (`discord.com`, `*.discord.gg`; images from Discord's proxies and avatar/icon paths; voice from `*.discord.media`).
+  - Certificates must chain to Apple's built-in roots, so interception tools that install their own root are refused.
+  - Redirects are refused.
+  - Nothing is cached to disk.
+- **Links** only open if they're `http` or `https`. Suspicious ones get a warning first (login-page look-alikes, OAuth grants, links whose text shows a different site).
+- **Third-party code** is limited to libdave and its dependencies (mlspp, BoringSSL, nlohmann/json). It's built from source at pinned commits and linked only into the voice helper. Their licences are in `Duhcord.app/Contents/Resources/Licenses`.
 
-Both protections are enforced by macOS when the app starts. They add no memory, CPU or disk cost.
+## Logging in
 
-## Building
+Duhcord only logs in by QR code; you can never type or paste a password or token.
 
-You need an Apple silicon Mac with macOS 13 or newer, and Xcode 15 or newer (or the Swift 5.9+ command-line tools). Release builds are arm64 only; there is no Intel version.
+1. Duhcord shows a QR code.
+2. In Discord on your phone, go to **You → Settings → Scan QR Code**.
+3. Approve the login on your phone.
 
-```sh
-swift build            # debug build
-swift test             # unit tests for the networking, state and markdown code
-scripts/build-libdave.sh  # builds libdave for the voice helper (needs CMake; done automatically by bundle.sh)
-scripts/bundle.sh      # release build packaged as build/Duhcord.app (sandboxed, hardened runtime)
-open build/Duhcord.app
-```
+Each attempt uses a new encryption key that exists only in memory. Discord sends the token encrypted to it, and the key is discarded afterwards. Only scan codes from a Duhcord window you opened yourself.
 
-Every push is built and tested by CI. Each run uploads a ready-made `Duhcord.zip`.
-
-## Release signing
-
-Release builds are signed with the self-signed **Duhcord Release Signing** certificate. Builds of other branches, pull requests and local builds without the certificate are signed ad-hoc.
-
-macOS doesn't know this certificate, so the first launch of a downloaded copy still needs approval:
-- **macOS 15 and later:** open it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
-- **macOS 13–14:** right-click the app and choose **Open**.
-
-What the certificate gives you:
-- **Updates keep the same identity.** The Keychain keeps trusting new versions, so updates don't keep asking for access to your login.
-- **You can check a download is genuine.** Its certificate fingerprint must match `signing/certificate.sha256`:
-
-  ```sh
-  cd /tmp && codesign -d --extract-certificates /Applications/Duhcord.app && shasum -a 256 codesign0
-  ```
-
-CI refuses to publish a release build signed by any other certificate.
-
-### Setting up the certificate (maintainer, once)
-
-1. On your Mac, run `scripts/create-signing-certificate.sh` from the repo and choose a strong password.
-   It creates the certificate, adds it to your login keychain, and writes everything to `~/Duhcord-signing`.
-2. Back up `~/Duhcord-signing/duhcord-signing.p12` and its password somewhere offline. Without them, future releases can't use the same identity.
-3. Add two secrets on GitHub under **Settings → Secrets and variables → Actions → New repository secret**:
-   - `DUHCORD_SIGNING_P12`: the entire contents of `~/Duhcord-signing/duhcord-signing.p12.base64` (`pbcopy < ~/Duhcord-signing/duhcord-signing.p12.base64` copies it).
-   - `DUHCORD_SIGNING_PASSWORD`: the password from step 1.
-4. Commit the fingerprint from `~/Duhcord-signing/fingerprint.txt` as `signing/certificate.sha256`.
-5. Push to the default branch. The CI log should say "signed by the published Duhcord Release Signing certificate".
-
-Never commit or share the `.p12` file, its `.base64` copy or the password. The fingerprint and `certificate.pem` are public.
+**Log Out** revokes the token on Discord's side before deleting it from the Keychain. If Discord can't be reached, Duhcord stays locked rather than leaving a working token behind.
 
 ## Updates
 
-Duhcord checks GitHub for a new release shortly after launch and then once a day. Turn this off under **Settings → Updates**, or check by hand with **Duhcord → Check for Updates…**. When an update is available, a bar appears at the top of the window. Nothing is installed until you click **Update…**, and Duhcord relaunches when it's done.
+Duhcord checks GitHub for a new release shortly after launch and then once a day; turn this off under **Settings → Updates**. When one is available, an **Update** button appears in the toolbar. Nothing installs until you confirm, and Duhcord then relaunches.
 
-Duhcord can only update itself from your Applications folder (`/Applications` or `~/Applications`). Run from anywhere else, it shows an orange bar asking you to move it.
+It can only update itself from `/Applications` or `~/Applications`. Anywhere else, a bar under the toolbar asks you to move it.
 
-How updates are checked:
-- Every release's `update.json` is signed with the **update approval key**. Duhcord only accepts updates signed by a key built into it, and only if the version is newer than the installed one.
-- The download must match the size and SHA-256 in the signed `update.json`.
-- The update check uses its own connection: GitHub only, never the Discord token, Apple root certificates only.
-- A small installer helper inside the app (`Sources/DuhcordUpdater`) does the install, because a sandboxed app can't replace itself. Before swapping the new version in atomically, it repeats every check above. It also requires that the new app:
-  - is signed with the same certificate,
-  - still has the sandbox and hardened runtime,
-  - has no permissions beyond Duhcord's.
+How an update is checked:
+- `update.json` must be signed with the update approval key built into Duhcord, and the version must be newer.
+- The download must match the size and SHA-256 in `update.json`.
+- An installer helper (`Sources/DuhcordUpdater`) repeats every check, then swaps the new version in atomically. It also requires the new app to:
+  - carry the same signing certificate,
+  - keep the sandbox and hardened runtime,
+  - have no permissions beyond Duhcord's (for the app and both helpers).
 
-  It only accepts requests from Duhcord, has no network access, and runs only during an install.
+  It only accepts requests from Duhcord and has no network access.
 
-### Setting up the update approval key (maintainer, once)
+## Building
 
-1. On your Mac, from the repo folder, run:
-   ```sh
-   swift scripts/create-update-key.swift
-   ```
-   It writes `~/Duhcord-signing/update-key.private` and `update-key.public`, and prints the public key.
-2. Back up `update-key.private` offline, next to your signing certificate. If it's lost, installed copies can't verify new updates and need one manual reinstall.
-3. Add a repository secret named `DUHCORD_UPDATE_KEY` under **Settings → Secrets and variables → Actions**, containing the private key (`pbcopy < ~/Duhcord-signing/update-key.private` copies it).
-4. Add the public key to `trustedPublicKeys` in `Sources/DuhcordUpdateKit/UpdateKit.swift` and push.
+You need an Apple silicon Mac with macOS 13 or newer, and Xcode 15+ (or the Swift 5.9 tools) plus CMake for libdave.
+
+```sh
+swift build              # debug build (the voice helper is included once libdave is built)
+swift test               # unit tests
+scripts/build-libdave.sh # build libdave for the voice helper (bundle.sh runs it too)
+scripts/bundle.sh        # release build: build/Duhcord.app
+open build/Duhcord.app
+```
+
+CI builds and tests every push and uploads a ready-made `Duhcord.zip`.
+
+## Release signing
+
+Release builds are signed with the self-signed **Duhcord Release Signing** certificate; other builds are signed ad-hoc. macOS doesn't know this certificate, so allow the first launch of a download:
+- **macOS 15 and later:** open it once, then click **Open Anyway** in **System Settings → Privacy & Security**.
+- **macOS 13–14:** right-click the app and choose **Open**.
+
+The certificate keeps updates on the same identity, so the Keychain doesn't ask again. To check that a copy is genuine, its fingerprint must match `signing/certificate.sha256`:
+
+```sh
+cd /tmp && codesign -d --extract-certificates /Applications/Duhcord.app && shasum -a 256 codesign0
+```
+
+### Maintainer setup (once)
+
+**Signing certificate:**
+1. Run `scripts/create-signing-certificate.sh` and choose a strong password. Everything goes to `~/Duhcord-signing`.
+2. Back up `duhcord-signing.p12` and its password offline.
+3. Add the repository secrets `DUHCORD_SIGNING_P12` (the contents of `duhcord-signing.p12.base64`) and `DUHCORD_SIGNING_PASSWORD`.
+4. Commit `fingerprint.txt` as `signing/certificate.sha256`.
+
+**Update approval key:**
+1. Run `swift scripts/create-update-key.swift`. It writes `~/Duhcord-signing/update-key.private` and `.public`.
+2. Back up the private key offline. If it's lost, installed copies need one manual reinstall.
+3. Add it as the repository secret `DUHCORD_UPDATE_KEY`.
+4. Add the public key to `trustedPublicKeys` in `Sources/DuhcordUpdateKit/UpdateKit.swift`.
+
+Never commit or share the `.p12`, its `.base64` copy, its password, or `update-key.private`.
 
 ### Publishing a release
 
@@ -157,34 +139,17 @@ git tag -a v1.2.0 -m "What changed in this version"
 git push origin v1.2.0
 ```
 
-The release workflow:
-1. builds and signs the app,
-2. writes and signs `update.json`, using the tag message as the release notes,
-3. publishes a GitHub release with `Duhcord.zip`, `update.json` and `update.json.sig`.
-
-It refuses to publish if the key's public half isn't built into the app.
-
-## Logging in
-
-Duhcord only logs in by QR code, the same way the official desktop app does. You can't type or paste a password or token.
-
-1. Duhcord shows a QR code.
-2. On your phone, open Discord and go to **You → Settings → Scan QR Code**.
-3. Approve the login on your phone.
-
-For each login attempt, Duhcord makes a new encryption key that exists only in memory. Discord sends the token encrypted to that key, and the key is thrown away once the attempt ends. Only scan codes from a Duhcord window you opened yourself.
-
-**Log Out** deletes the token from the Keychain and also logs it out on Discord's side, so any copy of it stops working.
+The release workflow builds and signs the app, signs `update.json` (with the tag message as release notes) and publishes the GitHub release. It refuses tags that aren't on the default branch, and update keys that installed copies wouldn't trust.
 
 ## Layout
 
 ```
-Sources/DuhcordCore       Gateway, REST, models, permissions, store, markdown, update checks (unit tested)
-Sources/DuhcordUpdateKit  Update manifest and signature checks, shared with the installer helper
-Sources/DuhcordUpdater    The installer helper (XPC service)
-Sources/DuhcordVoice      The voice helper (XPC service): voice gateway, UDP audio, DAVE, Opus
-Sources/DuhcordVoiceKit   The voice helper's protocol, packet format and transport encryption
-Sources/CDave             libdave's C header (the library is built by scripts/build-libdave.sh)
 Sources/Duhcord           AppKit UI
-Tests/                Core tests
+Sources/DuhcordCore       Gateway, REST, models, permissions, store, markdown, update checks
+Sources/DuhcordVoice      Voice helper (XPC service): voice gateway, UDP audio, DAVE, Opus
+Sources/DuhcordVoiceKit   Voice helper protocol, packet format, transport encryption
+Sources/CDave             libdave's C header (the library comes from scripts/build-libdave.sh)
+Sources/DuhcordUpdater    Installer helper (XPC service)
+Sources/DuhcordUpdateKit  Update manifest and signature checks, code-signature checks
+Tests/                    Unit tests
 ```
