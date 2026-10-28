@@ -36,8 +36,8 @@ public final class Store {
     private var messageCache: [Snowflake: [Message]] = [:]
     /// Voice channel occupants: guild → user → state.
     private var voiceByGuild: [Snowflake: [Snowflake: VoiceState]] = [:]
-    /// Names of members we've learned (from voice states and member requests): guild → user → name.
-    private var memberNames: [Snowflake: [Snowflake: String]] = [:]
+    /// Members we've learned about (from voice states and member requests): guild → user → member.
+    private var knownMembers: [Snowflake: [Snowflake: Member]] = [:]
     private var cacheOrder: [Snowflake] = []
     private var fullyLoaded: Set<Snowflake> = []
     /// Computed channel lists, since permission checks run on every unread refresh.
@@ -167,7 +167,12 @@ public final class Store {
 
     /// A member's server nickname or display name, if we've seen it.
     public func memberName(_ userID: Snowflake, in guildID: Snowflake) -> String? {
-        memberNames[guildID]?[userID]
+        knownMembers[guildID]?[userID]?.displayName
+    }
+
+    /// The account behind a member, for their profile picture.
+    public func memberUser(_ userID: Snowflake, in guildID: Snowflake) -> User? {
+        knownMembers[guildID]?[userID]?.user ?? user(userID)
     }
 
     /// Our own voice state in a guild, if we're in one of its voice channels.
@@ -253,7 +258,7 @@ public final class Store {
             guilds[id] = nil
             channelListCache[id] = nil
             voiceByGuild[id] = nil
-            memberNames[id] = nil
+            knownMembers[id] = nil
             guildOrder.removeAll { $0 == id }
             channels = channels.filter { $0.value.guildId != id }
             mentionTotals = nil
@@ -316,13 +321,13 @@ public final class Store {
             // Calls outside guilds (DMs) aren't supported.
             guard let guildID = state.guildId else { return }
             voiceByGuild[guildID, default: [:]][state.userId] = state.channelId == nil ? nil : state
-            if let name = state.displayName { memberNames[guildID, default: [:]][state.userId] = name }
+            if let member = state.member, member.user != nil { knownMembers[guildID, default: [:]][state.userId] = member }
             onChange?(.voice(guildID: guildID))
 
         case .guildMembersChunk(let chunk):
             for member in chunk.members {
-                guard let userID = member.resolvedUserId, let name = member.displayName else { continue }
-                memberNames[chunk.guildId, default: [:]][userID] = name
+                guard let userID = member.resolvedUserId, member.user != nil else { continue }
+                knownMembers[chunk.guildId, default: [:]][userID] = member
             }
             // Names are only shown under voice channels for now.
             onChange?(.voice(guildID: chunk.guildId))
@@ -346,7 +351,7 @@ public final class Store {
         readStates = [:]
         messageCache = [:]
         voiceByGuild = [:]
-        memberNames = [:]
+        knownMembers = [:]
         cacheOrder = []
         fullyLoaded = []
         channelListCache = [:]

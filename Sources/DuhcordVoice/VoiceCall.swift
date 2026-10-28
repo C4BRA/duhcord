@@ -53,6 +53,14 @@ final class VoiceCall {
     private var microphoneAllowed = false
     private var audioConfiguration: (capture: Bool, playback: Bool)?
 
+    // Diagnostics: counts only, logged every 10 seconds while they change.
+    private struct Stats: Equatable {
+        var received = 0, unknownSender = 0, unreadable = 0, undecryptable = 0, played = 0
+        var spoken = 0, sent = 0, notEncrypted = 0
+    }
+    private var stats = Stats()
+    private var loggedStats = Stats()
+
     // Reporting
     private var connected = false
     private var encrypted = false
@@ -179,6 +187,12 @@ final class VoiceCall {
               let op = Self.int(json["op"]) else { return }
         if let sequence = Self.int(json["seq"]) { lastSequence = sequence }
         let d = json["d"] as? [String: Any] ?? [:]
+        if op != 3, op != 6, op != 5 {
+            // Opcodes and DAVE transition numbers only; never payload contents.
+            let detail = ["transition_id", "protocol_version", "epoch", "dave_protocol_version", "mode"]
+                .compactMap { key in d[key].map { "\(key)=\($0)" } }.joined(separator: " ")
+            voiceLog.notice("voice gateway op \(op, privacy: .public) \(detail, privacy: .public)")
+        }
 
         switch op {
         case 8: // Hello
@@ -225,6 +239,7 @@ final class VoiceCall {
     private func handleBinary(_ bytes: [UInt8]) {
         guard let message = VoiceBinaryMessage(bytes) else { return }
         lastSequence = Int(message.sequence)
+        voiceLog.notice("voice gateway binary op \(message.opcode, privacy: .public) (\(message.payload.count, privacy: .public) bytes)")
         switch message.opcode {
         case 25: dave?.externalSender(message.payload)
         case 27: dave?.proposals(message.payload)
@@ -269,6 +284,7 @@ final class VoiceCall {
         connected = true
         runAudio()
         startSpeakingReports()
+        startStatsLog()
         reportConnected()
     }
 
@@ -363,12 +379,25 @@ final class VoiceCall {
             startKeepAlive()
             return
         }
-        guard !deafened, let packet = RTP.open(bytes, cipher: cipher), let userID = users[packet.ssrc] else { return }
+        guard !deafened else { return }
+        stats.received += 1
+        guard let packet = RTP.open(bytes, cipher: cipher) else {
+            stats.unreadable += 1
+            return
+        }
+        guard let userID = users[packet.ssrc] else {
+            stats.unknownSender += 1
+            return
+        }
         // Drop duplicates and stragglers that arrive after newer packets.
         if let last = lastPacketSequence[packet.ssrc], Int16(bitPattern: packet.sequence &- last) <= 0 { return }
         lastPacketSequence[packet.ssrc] = packet.sequence
 
-        guard let frame = dave?.decrypt(packet.payload, from: userID) else { return }
+        guard let frame = dave?.decrypt(packet.payload, from: userID) else {
+            stats.undecryptable += 1
+            return
+        }
+        stats.played += 1
         if frame != Opus.silence { heard[userID] = DispatchTime.now().uptimeNanoseconds }
         let decoder: OpusDecoder
         if let existing = decoders[packet.ssrc] {
@@ -409,17 +438,20 @@ final class VoiceCall {
     private func checkMicrophone() {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
+            voiceLog.notice("microphone allowed")
             microphoneAllowed = true
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
                 guard let self else { return }
                 self.queue.async {
+                    voiceLog.notice("microphone request answered: \(granted, privacy: .public)")
                     self.microphoneAllowed = granted
                     if !granted { self.onEvent?(.microphoneDenied) }
                     self.runAudio()
                 }
             }
         default:
+            voiceLog.notice("microphone denied by macOS settings")
             onEvent?(.microphoneDenied)
         }
     }
@@ -431,6 +463,7 @@ final class VoiceCall {
         let playback = !deafened
         if let current = audioConfiguration, current.capture == capture, current.playback == playback { return }
         audioConfiguration = (capture, playback)
+        voiceLog.notice("audio: microphone \(capture, privacy: .public), speakers \(playback, privacy: .public)")
         do {
             try audio.run(capture: capture, playback: playback)
         } catch {
@@ -461,6 +494,7 @@ final class VoiceCall {
             }
         }
         guard talking, let opus = encoder?.encode(frame) else { return }
+        stats.spoken += 1
         sendAudio(opus)
     }
 
@@ -473,9 +507,14 @@ final class VoiceCall {
 
     private func sendAudio(_ opus: [UInt8]) {
         // No end-to-end key yet means nothing is sent, rather than sending without it.
-        guard let cipher, let udp, let sealed = dave?.encrypt(opus, ssrc: ssrc),
-              let packet = try? RTP.seal(sealed, sequence: sendSequence, timestamp: sendTimestamp, ssrc: ssrc,
+        guard let cipher, let udp else { return }
+        guard let sealed = dave?.encrypt(opus, ssrc: ssrc) else {
+            stats.notEncrypted += 1
+            return
+        }
+        guard let packet = try? RTP.seal(sealed, sequence: sendSequence, timestamp: sendTimestamp, ssrc: ssrc,
                                          nonce: sendNonce, cipher: cipher) else { return }
+        stats.sent += 1
         sendSequence &+= 1
         sendNonce &+= 1
         udp.send(content: Data(packet), completion: .idempotent)
@@ -487,6 +526,20 @@ final class VoiceCall {
         guard connected, !stopped, reportedEncryption != encrypted else { return }
         reportedEncryption = encrypted
         onEvent?(.connected(endToEndEncrypted: encrypted))
+    }
+
+    private func startStatsLog() {
+        schedule(after: 10, repeating: 10) { [weak self] in
+            guard let self, self.stats != self.loggedStats else { return }
+            self.loggedStats = self.stats
+            let s = self.stats
+            voiceLog.notice("""
+            audio totals: received \(s.received, privacy: .public), unreadable \(s.unreadable, privacy: .public), \
+            unknown sender \(s.unknownSender, privacy: .public), undecryptable \(s.undecryptable, privacy: .public), \
+            played \(s.played, privacy: .public); spoke \(s.spoken, privacy: .public) frames, sent \(s.sent, privacy: .public), \
+            held back (no end-to-end key) \(s.notEncrypted, privacy: .public); e2ee \(self.encrypted, privacy: .public)
+            """)
+        }
     }
 
     private func startSpeakingReports() {

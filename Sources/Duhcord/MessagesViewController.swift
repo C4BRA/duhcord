@@ -39,6 +39,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private var lastWidth: CGFloat = 0
 
     private static let sidePadding: CGFloat = 16
+    /// Room between the newest message and the message box.
+    private static let bottomInset: CGFloat = 10
     private static var headerHeight: CGFloat { ceil(Settings.textSize.pointSize * 1.4) }
     private static let groupWindow: TimeInterval = 7 * 60
 
@@ -89,6 +91,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         }
         session.onTypingChange = { [weak self] in self?.refreshTyping() }
         scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: Self.bottomInset, right: 0)
         // Growing the box shrinks the message list; stay pinned to the newest message if we were.
         input.onHeightChange = { [weak self] in
             guard let self, self.isAtBottom else { return }
@@ -116,7 +119,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             scrollView.topAnchor.constraint(equalTo: divider.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            input.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 8),
+            input.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 12),
             // The tabs' bottom edge is the message box's top edge, so they rise out from behind it.
             typingTabs.bottomAnchor.constraint(equalTo: input.topAnchor),
             typingTabs.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 14),
@@ -271,7 +274,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         let wasAtBottom = isAtBottom
         typingTabs.update(session.typing.entries)
         // Keep the newest message clear of the tabs while any are showing.
-        let inset: CGFloat = typingTabs.hasTabs ? TypingTabsView.tabSize.height - 8 : 0
+        let inset = Self.bottomInset + (typingTabs.hasTabs ? TypingTabsView.tabSize.height - 8 : 0)
         if scrollView.contentInsets.bottom != inset {
             scrollView.contentInsets = NSEdgeInsets(top: 0, left: 0, bottom: inset, right: 0)
             if wasAtBottom { scrollToBottom() }

@@ -142,9 +142,13 @@ final class Dave {
         withRecognizedUserIDs { ids, count in
             daveSessionProcessProposals(session, payload, payload.count, ids, count, &output, &length)
         }
-        guard let output else { return }
+        guard let output else {
+            voiceLog.notice("DAVE: proposals processed, nothing to commit")
+            return
+        }
         let commitWelcome = Array(UnsafeBufferPointer(start: output, count: length))
         daveFree(output)
+        voiceLog.notice("DAVE: proposals processed, commit \(commitWelcome.count, privacy: .public) bytes")
         if !commitWelcome.isEmpty { sendBinary?(28, commitWelcome) }
     }
 
@@ -152,8 +156,12 @@ final class Dave {
     func announceCommit(transitionID: UInt16, commit: [UInt8]) {
         guard let result = daveSessionProcessCommit(session, commit, commit.count) else { return }
         defer { daveCommitResultDestroy(result) }
-        if daveCommitResultIsIgnored(result) { return }
+        if daveCommitResultIsIgnored(result) {
+            voiceLog.notice("DAVE: commit for transition \(transitionID, privacy: .public) ignored")
+            return
+        }
         if daveCommitResultIsFailed(result) {
+            voiceLog.error("DAVE: commit for transition \(transitionID, privacy: .public) failed; asking to be re-added")
             sendJSON?(31, ["transition_id": Int(transitionID)])
             handleInit(version: daveSessionGetProtocolVersion(session))
         } else {
@@ -168,10 +176,12 @@ final class Dave {
             daveSessionProcessWelcome(session, welcome, welcome.count, ids, count)
         }
         if let result {
+            voiceLog.notice("DAVE: joined the group (transition \(transitionID, privacy: .public))")
             daveWelcomeResultDestroy(result)
             prepareRatchets(transitionID: transitionID, version: daveSessionGetProtocolVersion(session))
             sendReadyIfNeeded(transitionID: transitionID)
         } else {
+            voiceLog.error("DAVE: welcome for transition \(transitionID, privacy: .public) failed; asking to be re-added")
             sendJSON?(31, ["transition_id": Int(transitionID)])
             sendKeyPackage()
         }
@@ -218,6 +228,7 @@ final class Dave {
         guard let output else { return }
         let keyPackage = Array(UnsafeBufferPointer(start: output, count: length))
         daveFree(output)
+        voiceLog.notice("DAVE: key package sent (\(keyPackage.count, privacy: .public) bytes)")
         sendBinary?(26, keyPackage)
     }
 
@@ -235,6 +246,7 @@ final class Dave {
             } else {
                 daveEncryptorSetPassthroughMode(encryptor, true)
             }
+            voiceLog.notice("DAVE: own key for version \(version, privacy: .public): \(ratchet != nil, privacy: .public)")
             onEncryptionChange?(ratchet != nil)
         } else if let handle = decryptors[userID] {
             if let ratchet {

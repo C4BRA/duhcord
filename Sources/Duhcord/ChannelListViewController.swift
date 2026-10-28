@@ -32,6 +32,8 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
     private var items: [ChannelListItem] = []
     private var rows: [Row] = []
     private var suppressSelection = false
+    private var listToBottom: NSLayoutConstraint!
+    private var listToBar: NSLayoutConstraint!
 
     /// Text channel IDs in display order, for keyboard navigation.
     var channelIDs: [Snowflake] {
@@ -72,29 +74,37 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         voiceBar.onDeafen = { [weak self] in self?.voice.toggleDeafen() }
         voiceBar.onLeave = { [weak self] in self?.voice.leave() }
 
-        // A hidden voice bar takes no space.
-        let stack = NSStackView(views: [scroll, voiceBar])
-        stack.orientation = .vertical
-        stack.spacing = 0
-        stack.alignment = .width
-
         let container = NSVisualEffectView()
         container.material = .sidebar
         container.blendingMode = .behindWindow
-        [titleLabel, stack].forEach {
+        [titleLabel, scroll, voiceBar].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview($0)
         }
+        // The bar is always laid out at full width along the bottom; while it's hidden the list simply runs over
+        // its space. (A stack view here left the bar half-width until the window was resized.)
+        listToBottom = scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        listToBar = scroll.bottomAnchor.constraint(equalTo: voiceBar.topAnchor)
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
             titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
             titleLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            stack.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            scroll.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
+            scroll.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            voiceBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            voiceBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            voiceBar.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            listToBottom,
         ])
         view = container
+    }
+
+    /// Keeps the column exactly the list's width, whatever AppKit decided during layout.
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard let column = table.tableColumns.first, let clip = table.enclosingScrollView?.contentView else { return }
+        if abs(column.width - clip.bounds.width) > 0.5 { column.width = clip.bounds.width }
     }
 
     func show(_ place: Place) {
@@ -179,7 +189,7 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
 
     private func refreshVoiceBar() {
         guard voice.isInCall, let channelID = voice.channelID else {
-            voiceBar.isHidden = true
+            showVoiceBar(false)
             return
         }
         let channel = store.channel(channelID)
@@ -187,7 +197,14 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         voiceBar.update(status: voice.status, place: [channel?.displayName, guild?.name].compactMap { $0 }.joined(separator: " · "),
                         muted: voice.muted || voice.deafened, deafened: voice.deafened,
                         serverMuted: voice.serverMuted, serverDeafened: voice.serverDeafened)
-        voiceBar.isHidden = false
+        showVoiceBar(true)
+    }
+
+    private func showVoiceBar(_ show: Bool) {
+        guard voiceBar.isHidden == show else { return }
+        voiceBar.isHidden = !show
+        listToBottom.isActive = !show
+        listToBar.isActive = show
     }
 
     private func knownName(of state: VoiceState, in guildID: Snowflake) -> String? {
@@ -205,7 +222,9 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
             if case .voiceChannel(let c) = item { inCall = c.id == voice.channelID }
             cell.configure(item, store: store, inCall: inCall)
         case .member(let state, let guildID):
-            cell.configureMember(name: name(of: state, in: guildID), speaking: voice.speaking.contains(state.userId),
+            let user = state.member?.user ?? store.memberUser(state.userId, in: guildID)
+                ?? User(id: state.userId, username: "")
+            cell.configureMember(name: name(of: state, in: guildID), user: user, speaking: voice.speaking.contains(state.userId),
                                  muted: state.selfMute || state.mute, deafened: state.selfDeaf || state.deaf)
         }
     }
@@ -222,6 +241,12 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         let cell = tableView.makeView(withIdentifier: ChannelCell.identifier, owner: nil) as? ChannelCell ?? ChannelCell()
         configure(cell, rows[row])
         return cell
+    }
+
+    /// Members get a little more room for their profile pictures.
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        if case .member = rows[row] { return 28 }
+        return 24
     }
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
@@ -243,71 +268,127 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
 
 private final class ChannelCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("ChannelCell")
+    static let avatarSize: CGFloat = 20
 
+    /// What sits in front of the name.
+    private enum Leading { case none, icon, avatar }
+
+    private let icon = NSImageView()
+    private let avatar = RemoteImageView()
     private let label = NSTextField(labelWithString: "")
     private let badge = NSTextField(labelWithString: "")
-    private var leading: NSLayoutConstraint!
+    private let status = NSImageView()
+    private var labelAtStart: NSLayoutConstraint!
+    private var labelAfterIcon: NSLayoutConstraint!
+    private var labelAfterAvatar: NSLayoutConstraint!
 
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
         label.lineBreakMode = .byTruncatingTail
         badge.alignment = .right
-        [label, badge].forEach {
+        badge.font = .boldSystemFont(ofSize: 10)
+        badge.textColor = .systemRed
+        icon.symbolConfiguration = .init(pointSize: 12, weight: .medium)
+        status.symbolConfiguration = .init(pointSize: 10, weight: .medium)
+        status.contentTintColor = .tertiaryLabelColor
+        avatar.cornerRadius = Self.avatarSize / 2
+        avatar.layer?.borderColor = NSColor.systemGreen.cgColor
+        [icon, avatar, label, badge, status].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             addSubview($0)
         }
         badge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        status.setContentCompressionResistancePriority(.required, for: .horizontal)
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        leading = label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4)
+        labelAtStart = label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4)
+        labelAfterIcon = label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6)
+        labelAfterAvatar = label.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: 7)
         NSLayoutConstraint.activate([
-            leading,
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 16),
+            // Members sit under their channel's name, lined up with it.
+            avatar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 26),
+            avatar.centerYAnchor.constraint(equalTo: centerYAnchor),
+            avatar.widthAnchor.constraint(equalToConstant: Self.avatarSize),
+            avatar.heightAnchor.constraint(equalToConstant: Self.avatarSize),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             badge.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 4),
             badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             badge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            status.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 4),
+            status.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            status.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
+    private func use(_ leading: Leading) {
+        icon.isHidden = leading != .icon
+        avatar.isHidden = leading != .avatar
+        labelAtStart.isActive = leading == .none
+        labelAfterIcon.isActive = leading == .icon
+        labelAfterAvatar.isActive = leading == .avatar
+        if leading != .avatar { avatar.setImage(nil, pointSize: .zero) }
+    }
+
     func configure(_ item: ChannelListItem, store: Store, inCall: Bool) {
-        leading.constant = 4
-        badge.font = .boldSystemFont(ofSize: 10)
-        badge.textColor = .systemRed
+        status.isHidden = true
+        avatar.layer?.borderWidth = 0
         switch item {
         case .category(let c):
+            use(.none)
             label.stringValue = c.displayName.uppercased()
             label.font = .systemFont(ofSize: 11, weight: .semibold)
             label.textColor = .secondaryLabelColor
             badge.stringValue = ""
         case .channel(let c):
             let unread = store.isUnread(c.id)
-            label.stringValue = c.isPrivate ? c.displayName : "# " + c.displayName
+            if c.isPrivate {
+                use(.none)
+            } else {
+                use(.icon)
+                icon.image = NSImage(systemSymbolName: c.kind == .announcement ? "megaphone" : "number",
+                                     accessibilityDescription: "Text channel")
+                icon.contentTintColor = unread ? .labelColor : .secondaryLabelColor
+            }
+            label.stringValue = c.displayName
             label.font = unread ? Theme.boldFont : Theme.bodyFont
             label.textColor = unread ? .labelColor : .secondaryLabelColor
             let mentions = store.mentionCount(c.id)
             badge.stringValue = mentions > 0 ? String(mentions) : ""
         case .voiceChannel(let c):
-            label.stringValue = "🔊 " + c.displayName
+            use(.icon)
+            icon.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: "Voice channel")
+            icon.contentTintColor = inCall ? .systemGreen : .secondaryLabelColor
+            label.stringValue = c.displayName
             label.font = inCall ? Theme.boldFont : Theme.bodyFont
             label.textColor = inCall ? .labelColor : .secondaryLabelColor
             badge.stringValue = ""
         }
     }
 
-    func configureMember(name: String, speaking: Bool, muted: Bool, deafened: Bool) {
-        leading.constant = 26
+    /// Someone in a voice channel: picture (ringed in green while they talk), name, and mute/deafen.
+    func configureMember(name: String, user: User, speaking: Bool, muted: Bool, deafened: Bool) {
+        use(.avatar)
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        avatar.setImage(MediaRequest.avatarURL(for: user, pixels: Int(Self.avatarSize * scale)),
+                        pointSize: NSSize(width: Self.avatarSize, height: Self.avatarSize))
+        avatar.layer?.borderWidth = speaking ? 2 : 0
         label.stringValue = name
-        label.font = Theme.smallFont
-        label.textColor = speaking ? .systemGreen : .secondaryLabelColor
-        badge.font = .systemFont(ofSize: 10)
-        badge.textColor = .tertiaryLabelColor
-        badge.stringValue = deafened ? "deafened" : muted ? "muted" : ""
+        label.font = Theme.bodyFont
+        label.textColor = speaking ? .labelColor : .secondaryLabelColor
+        badge.stringValue = ""
+        status.isHidden = !(muted || deafened)
+        status.image = NSImage(systemSymbolName: deafened ? "speaker.slash.fill" : "mic.slash.fill",
+                               accessibilityDescription: deafened ? "Deafened" : "Muted")
     }
 }
 
-/// The call we're in: where, whether it's connected and end-to-end encrypted, and mute, deafen and leave.
+/// The call we're in, docked at the bottom of the channel list: where, whether it's connected and end-to-end
+/// encrypted, and mute, deafen and leave. Same margins and type as the rest of the sidebar.
 private final class VoiceBar: NSView {
     var onMute: (() -> Void)?
     var onDeafen: (() -> Void)?
@@ -315,16 +396,18 @@ private final class VoiceBar: NSView {
 
     private let statusLabel = NSTextField(labelWithString: "")
     private let placeLabel = NSTextField(labelWithString: "")
-    private let muteButton = VoiceBar.button("mic.fill", "Mute")
-    private let deafenButton = VoiceBar.button("headphones", "Deafen")
-    private let leaveButton = VoiceBar.button("phone.down.fill", "Leave")
+    private let muteButton = VoiceBar.button("Mute")
+    private let deafenButton = VoiceBar.button("Deafen")
+    private let leaveButton = VoiceBar.button("Disconnect")
 
     init() {
         super.init(frame: .zero)
-        statusLabel.font = .boldSystemFont(ofSize: 11)
+        statusLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
         placeLabel.font = Theme.smallFont
-        placeLabel.textColor = .secondaryLabelColor
         placeLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.lineBreakMode = .byTruncatingTail
+        [statusLabel, placeLabel].forEach { $0.setContentCompressionResistancePriority(.defaultLow, for: .horizontal) }
+        leaveButton.image = Self.symbol("phone.down.fill", "Disconnect")
         leaveButton.contentTintColor = .systemRed
         muteButton.target = self
         muteButton.action = #selector(mute)
@@ -333,30 +416,38 @@ private final class VoiceBar: NSView {
         leaveButton.target = self
         leaveButton.action = #selector(leave)
 
-        let labels = NSStackView(views: [statusLabel, placeLabel])
-        labels.orientation = .vertical
-        labels.alignment = .leading
-        labels.spacing = 1
-        labels.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let row = NSStackView(views: [labels, muteButton, deafenButton, leaveButton])
-        row.orientation = .horizontal
-        row.spacing = 2
-        row.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 8)
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
         let divider = NSBox()
         divider.boxType = .separator
-        divider.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(divider)
+        let views: [NSView] = [divider, statusLabel, placeLabel, muteButton, deafenButton, leaveButton]
+        views.forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            addSubview($0)
+        }
         NSLayoutConstraint.activate([
             divider.topAnchor.constraint(equalTo: topAnchor),
-            divider.leadingAnchor.constraint(equalTo: leadingAnchor),
-            divider.trailingAnchor.constraint(equalTo: trailingAnchor),
-            row.topAnchor.constraint(equalTo: divider.bottomAnchor),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor),
+            divider.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            divider.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+
+            statusLabel.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 10),
+            statusLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: muteButton.leadingAnchor, constant: -8),
+            placeLabel.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 2),
+            placeLabel.leadingAnchor.constraint(equalTo: statusLabel.leadingAnchor),
+            placeLabel.trailingAnchor.constraint(lessThanOrEqualTo: muteButton.leadingAnchor, constant: -8),
+            // The same 12 pt bottom margin as the message box next to it.
+            placeLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+
+            leaveButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            deafenButton.trailingAnchor.constraint(equalTo: leaveButton.leadingAnchor, constant: -4),
+            muteButton.trailingAnchor.constraint(equalTo: deafenButton.leadingAnchor, constant: -4),
         ])
+        for button in [muteButton, deafenButton, leaveButton] {
+            NSLayoutConstraint.activate([
+                button.centerYAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 1),
+                button.widthAnchor.constraint(equalToConstant: 28),
+                button.heightAnchor.constraint(equalToConstant: 28),
+            ])
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -369,11 +460,11 @@ private final class VoiceBar: NSView {
             statusLabel.textColor = .secondaryLabelColor
             statusLabel.toolTip = nil
         case .connected(let encrypted):
-            statusLabel.stringValue = encrypted ? "Voice connected 🔒" : "Voice connected"
+            statusLabel.stringValue = encrypted ? "Voice Connected · End-to-End Encrypted" : "Voice Connected"
             statusLabel.textColor = .systemGreen
             statusLabel.toolTip = encrypted
-                ? "End-to-end encrypted: only the people in this call can hear it."
-                : "Setting up end-to-end encryption…"
+                ? "Only the people in this call can hear it."
+                : "Setting up end-to-end encryption. Nothing you say is sent until it's ready."
         }
         if serverMuted || serverDeafened {
             placeLabel.stringValue = serverDeafened ? "Deafened by a moderator" : "Muted by a moderator"
@@ -384,12 +475,11 @@ private final class VoiceBar: NSView {
         }
         let micOff = muted || serverMuted || serverDeafened
         let soundOff = deafened || serverDeafened
-        muteButton.image = NSImage(systemSymbolName: micOff ? "mic.slash.fill" : "mic.fill", accessibilityDescription: muted ? "Unmute" : "Mute")
-        muteButton.contentTintColor = micOff ? .systemRed : nil
+        muteButton.image = Self.symbol(micOff ? "mic.slash.fill" : "mic.fill", muted ? "Unmute" : "Mute")
+        muteButton.contentTintColor = micOff ? .systemRed : .secondaryLabelColor
         muteButton.toolTip = muted ? "Unmute" : "Mute"
-        deafenButton.image = NSImage(systemSymbolName: soundOff ? "speaker.slash.fill" : "headphones",
-                                     accessibilityDescription: deafened ? "Undeafen" : "Deafen")
-        deafenButton.contentTintColor = soundOff ? .systemRed : nil
+        deafenButton.image = Self.symbol(soundOff ? "speaker.slash.fill" : "headphones", deafened ? "Undeafen" : "Deafen")
+        deafenButton.contentTintColor = soundOff ? .systemRed : .secondaryLabelColor
         deafenButton.toolTip = deafened ? "Undeafen" : "Deafen"
     }
 
@@ -397,13 +487,18 @@ private final class VoiceBar: NSView {
     @objc private func deafen() { onDeafen?() }
     @objc private func leave() { onLeave?() }
 
-    private static func button(_ symbol: String, _ label: String) -> NSButton {
-        let button = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: label) ?? NSImage(),
-                              target: nil, action: nil)
-        button.bezelStyle = .inline
-        button.isBordered = false
+    private static func symbol(_ name: String, _ label: String) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: label)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+    }
+
+    /// Borderless until hovered, like toolbar accessory buttons elsewhere in macOS.
+    private static func button(_ label: String) -> NSButton {
+        let button = NSButton(title: "", target: nil, action: nil)
+        button.bezelStyle = .recessed
+        button.showsBorderOnlyWhileMouseInside = true
+        button.imagePosition = .imageOnly
         button.toolTip = label
-        button.setContentHuggingPriority(.required, for: .horizontal)
         return button
     }
 }
