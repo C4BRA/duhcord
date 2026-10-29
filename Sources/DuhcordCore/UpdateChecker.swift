@@ -9,6 +9,7 @@ public final class UpdateChecker {
         case checking
         case upToDate
         case available(UpdateManifest)
+        case stale(UpdateManifest)
         case downloading(UpdateManifest)
         /// Downloaded and verified, ready to hand to the installer.
         case ready(UpdateManifest, archive: URL)
@@ -47,7 +48,7 @@ public final class UpdateChecker {
                 do {
                     try UpdateVerifier.checkApplicable(parsed, installedVersion: currentVersion)
                 } catch UpdateError.notNewer {
-                    state = .upToDate
+                    state = UpdateVerifier.isStale(parsed, now: Date()) ? .stale(parsed) : .upToDate
                     return
                 }
                 manifestData = manifest

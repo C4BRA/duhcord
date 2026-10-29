@@ -67,6 +67,11 @@ final class UpdateController {
         case .failed(let message) where userInitiated:
             alert("Couldn't update", message)
             userInitiated = false
+        case .stale where userInitiated:
+            alert("Couldn't confirm Duhcord is up to date",
+                  "The latest release information from GitHub has expired, so Duhcord can't tell whether a newer version exists. Try again later, or check the releases page.")
+            userInitiated = false
+            return
         case .ready(let manifest, let archive):
             install(manifest, archive: archive)
         default:
@@ -97,6 +102,10 @@ final class UpdateController {
             window.showBanner("Downloading Duhcord \(manifest.version)…")
         case .ready(let manifest, _):
             window.showBanner("Installing Duhcord \(manifest.version)…")
+        case .stale:
+            window.showBanner("Couldn't confirm Duhcord is up to date.", tone: .info, action: "Check Again") { [weak self] in
+                self?.checkNow()
+            }
         default:
             window.showBanner(nil)
         }

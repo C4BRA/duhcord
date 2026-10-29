@@ -107,7 +107,10 @@ final class Installer: NSObject, DuhcordUpdaterProtocol {
         }
 
         let sandbox = "com.apple.security.app-sandbox", network = "com.apple.security.network.client"
-        try checkLimits(staticCode, entitlements: [sandbox, network], name: "the app")
+        try checkLimits(staticCode, oneOfEntitlements: [
+            [sandbox, network],
+            [sandbox, network, "com.apple.security.files.user-selected.read-write"],
+        ], name: "the app")
         // The helpers inside keep their own limits: this one with none at all, the voice helper sandboxed with
         // only the network and the microphone.
         let services = url.appendingPathComponent("Contents/XPCServices")
@@ -127,8 +130,12 @@ final class Installer: NSObject, DuhcordUpdaterProtocol {
         try checkLimits(staticCode, entitlements: expected, name: name)
     }
 
-    /// The hardened runtime is on and the entitlements are exactly `expected`, all switched on.
+    /// The hardened runtime is on and the entitlements are exactly one allowed set, all switched on.
     private func checkLimits(_ code: SecStaticCode, entitlements expected: Set<String>, name: String) throws {
+        try checkLimits(code, oneOfEntitlements: [expected], name: name)
+    }
+
+    private func checkLimits(_ code: SecStaticCode, oneOfEntitlements allowed: [Set<String>], name: String) throws {
         var info: CFDictionary?
         let infoFlags = SecCSFlags(rawValue: UInt32(kSecCSSigningInformation) | UInt32(kSecCSRequirementInformation))
         guard SecCodeCopySigningInformation(code, infoFlags, &info) == errSecSuccess,
@@ -139,7 +146,7 @@ final class Installer: NSObject, DuhcordUpdaterProtocol {
             throw UpdateError.invalidApp("hardened runtime is off for \(name)")
         }
         let entitlements = details[kSecCodeInfoEntitlementsDict as String] as? [String: Any] ?? [:]
-        guard Set(entitlements.keys) == expected, entitlements.values.allSatisfy({ ($0 as? Bool) == true }) else {
+        guard allowed.contains(Set(entitlements.keys)), entitlements.values.allSatisfy({ ($0 as? Bool) == true }) else {
             throw UpdateError.invalidApp("the permissions of \(name) differ from Duhcord's")
         }
     }

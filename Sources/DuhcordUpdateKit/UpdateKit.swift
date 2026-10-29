@@ -40,14 +40,17 @@ public struct UpdateManifest: Codable, Equatable {
     public let url: String
     public let sha256: String
     public let size: Int
+    public let expires: Int?
     public let minimumSystemVersion: String?
     public let notes: String?
 
-    public init(version: String, url: String, sha256: String, size: Int, minimumSystemVersion: String? = nil, notes: String? = nil) {
+    public init(version: String, url: String, sha256: String, size: Int, minimumSystemVersion: String? = nil,
+                notes: String? = nil, expires: Int? = nil) {
         self.version = version
         self.url = url
         self.sha256 = sha256
         self.size = size
+        self.expires = expires
         self.minimumSystemVersion = minimumSystemVersion
         self.notes = notes
     }
@@ -120,6 +123,12 @@ public enum UpdateVerifier {
             let system = Version(parts: [systemVersion.majorVersion, systemVersion.minorVersion, systemVersion.patchVersion])
             guard system >= required else { throw UpdateError.systemTooOld(minimum) }
         }
+    }
+
+    /// An absent expiry is stale so older manifests cannot indefinitely claim that no update exists.
+    public static func isStale(_ manifest: UpdateManifest, now: Date) -> Bool {
+        guard let expires = manifest.expires else { return true }
+        return Date(timeIntervalSince1970: TimeInterval(expires)) < now
     }
 
     /// Copies up to `limit` bytes from `source` to `destination` (if given) and returns the SHA-256 and byte count.

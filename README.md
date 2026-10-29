@@ -59,7 +59,7 @@ DMs between Duhcord users can be end-to-end encrypted, so Discord only ever stor
 - **Images and videos.** Images and videos sent in Private (see [Sending images and videos](#features)) are encrypted too. A private video waits for a click, then downloads, decrypts and plays from memory (up to 50 MB each); its first frame stays afterwards. Each one is re-encoded and sized so four fit Discord's 10 MB upload limit, then encrypted with a key of its own (ChaCha20-Poly1305), padded so its size says little (Padmé), and uploaded as a file called `encrypted.bin`; its key travels inside the private message. Discord only stores noise. Duhcord downloads it from Discord's file CDN, decrypts it, and shows it inline; click it for a full-size window, where ⌘C copies it. Images are kept in memory only, and their windows close when Duhcord locks or the account logs out. **Remove Image…** on your own private message seals its text again without that image's key and deletes the encrypted file.
   - These are the one kind of picture Duhcord decodes without Discord re-encoding it first, so it's limited to images sent from keys you trust (an accepted key, or one of your approved Macs), to JPEG and PNG, and to the same size limits as other images. Images from a key you haven't accepted aren't downloaded.
   - There's no attach button or Save: Duhcord's sandbox doesn't let it open or write files. Dropped and pasted images don't need that permission. Copied images go on the clipboard, which Universal Clipboard can share with your other Apple devices.
-- **Limits.** One-to-one DMs only; text, still images and videos, no other files (animated GIFs are sent as their first frame). Discord still sees who you talk to and when. Private messaging needs macOS 14 or later, and private messages can't be read on Discord's own apps, including yours.
+- **Limits.** One-to-one DMs only; text, still images and videos, no other files (animated GIFs are sent as their first frame). Discord still sees who you talk to and when. Private messaging needs macOS 14 or later, and private messages can't be read on Discord's own apps, including yours. There is no forward secrecy: a later compromise of a Mac's key can decrypt its stored message history. Authenticated HPKE has key-compromise impersonation: someone with your private key could forge messages to you that appear to come from your contacts.
 
 ## How it stays light
 
@@ -107,6 +107,8 @@ Each attempt uses a new encryption key that exists only in memory. Discord sends
 ## Updates
 
 Duhcord checks GitHub for a new release shortly after launch and then once a day; turn this off under **Settings → Updates**. When one is available, an **Update** button appears in the toolbar. Nothing installs until you confirm, and Duhcord then relaunches.
+
+`update.json` carries an expiry that the refresh workflow renews monthly. If it expires, Duhcord says it couldn't confirm it's up to date; it still offers a newer signed version.
 
 It can only update itself from `/Applications` or `~/Applications`. Anywhere else, a bar under the toolbar asks you to move it.
 
