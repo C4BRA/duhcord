@@ -1,8 +1,9 @@
 import AppKit
 import DuhcordCore
+import UniformTypeIdentifiers
 
 /// The right column: channel title, message history and the input box.
-final class MessagesViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class MessagesViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
     private struct Row {
         let message: Message
         /// Same author shortly after the previous message, so the name/time line is skipped.
@@ -20,6 +21,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private let scrollView = VerticalScrollView()
     private let table = NSTableView()
     private let input = ComposerView()
+    private let attachButton = NSButton(title: "", target: nil, action: nil)
     private let typingTabs = TypingTabsView()
     private var typingTimer: Timer?
 
@@ -57,14 +59,13 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     /// Images can be attached in any channel; in Private, once the other person's key is here (they're encrypted).
-    private var canAttachImages: Bool {
+    var canAttachImages: Bool {
         guard let channelID, store.channel(channelID) != nil, !isUploading else { return false }
         if isPrivate, case .ready = privateChat?.status(for: channelID) { return true }
         return !isPrivate
     }
 
-    // Images attached to the next message (dropped or pasted), shown in a row above the message box.
-    // There's no Open panel: reading files you pick needs an entitlement Duhcord doesn't have.
+    // Images and videos attached to the next message, shown in a row above the message box.
     private let tray = NSStackView()
     private var trayHeight: NSLayoutConstraint!
     private var trayGap: NSLayoutConstraint!
@@ -181,6 +182,14 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             (self?.canAttachImages ?? false) && ImagePrep.canRead(pasteboard)
         }
         root.onDropImages = { [weak self] pasteboard in self?.attach(ImagePrep.sources(from: pasteboard)) }
+        attachButton.bezelStyle = .recessed
+        attachButton.showsBorderOnlyWhileMouseInside = true
+        attachButton.imagePosition = .imageOnly
+        attachButton.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: "Attach Images or Videos")
+        attachButton.setAccessibilityLabel("Attach Images or Videos")
+        attachButton.toolTip = "Attach Images or Videos"
+        attachButton.target = self
+        attachButton.action = #selector(attachFiles(_:))
         tray.orientation = .horizontal
         tray.alignment = .centerY
         tray.spacing = Theme.Spacing.tight
@@ -207,7 +216,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         loadingSpinner.isDisplayedWhenStopped = false
         table.setAccessibilityLabel("Messages")
 
-        [scrollView, typingTabs, input, emptyLabel, loadingSpinner, privateBar, tray].forEach {
+        [scrollView, typingTabs, input, attachButton, emptyLabel, loadingSpinner, privateBar, tray].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
         }
@@ -223,7 +232,11 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             tray.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: Theme.Spacing.group),
             tray.leadingAnchor.constraint(equalTo: input.leadingAnchor),
             tray.trailingAnchor.constraint(lessThanOrEqualTo: input.trailingAnchor),
-            input.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.sidePadding),
+            attachButton.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.sidePadding),
+            attachButton.trailingAnchor.constraint(equalTo: input.leadingAnchor, constant: -Theme.Spacing.tight),
+            attachButton.widthAnchor.constraint(equalToConstant: 30),
+            attachButton.heightAnchor.constraint(equalToConstant: 30),
+            attachButton.bottomAnchor.constraint(equalTo: input.bottomAnchor),
             // The channel's name is in the toolbar; messages start just below it.
             privateBar.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             privateBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -283,6 +296,25 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             input.placeholder = ""
             input.isEnabled = false
         }
+        attachButton.isEnabled = canAttachImages
+    }
+
+    @objc func attachFiles(_ sender: Any?) {
+        guard canAttachImages, let window = view.window else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image, .movie]
+        panel.allowsMultipleSelection = true
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let self, self.canAttachImages else { return }
+            let sources = ImagePrep.sources(from: panel.urls)
+            if sources.isEmpty { NSSound.beep() }
+            self.attach(sources)
+        }
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(attachFiles(_:)) { return canAttachImages }
+        return true
     }
 
     // MARK: - Drafts and attached images

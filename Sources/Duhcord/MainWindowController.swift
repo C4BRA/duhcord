@@ -26,6 +26,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private let searchItem = NSSearchToolbarItem(itemIdentifier: .search)
     private let connectionLock = ConnectionLock()
 
+    var canAttachImages: Bool { messages.canAttachImages }
+
     private var place: Place = .directMessages
     private var lastChannel: [Place: Snowflake] = [:]
 
