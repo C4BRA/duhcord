@@ -38,10 +38,29 @@ public final class RESTClient {
         return try decoder.decode(LossyArray<Message>.self, from: data).elements
     }
 
-    /// The sent message comes back over the gateway, so the response isn't decoded.
-    public func sendMessage(_ content: String, to channelID: Snowflake, nonce: String) async throws {
-        let body: [String: Any] = ["content": content, "nonce": nonce, "tts": false, "flags": 0]
-        _ = try await request("POST", "/channels/\(channelID)/messages", body: body)
+    /// The sent message comes back over the gateway, so the response isn't decoded. `files` are uploaded with it
+    /// as attachments, in order, all named `PrivateMessaging.fileName` (only encrypted images are ever sent).
+    public func sendMessage(_ content: String, to channelID: Snowflake, nonce: String, files: [Data] = []) async throws {
+        var body: [String: Any] = ["content": content, "nonce": nonce, "tts": false, "flags": 0]
+        guard !files.isEmpty else {
+            _ = try await request("POST", "/channels/\(channelID)/messages", body: body)
+            return
+        }
+        body["attachments"] = files.indices.map { ["id": $0, "filename": PrivateMessaging.fileName] as [String: Any] }
+        let multipart = Multipart(json: try JSONSerialization.data(withJSONObject: body),
+                                  files: files.map { (PrivateMessaging.fileName, $0) })
+        _ = try await request("POST", "/channels/\(channelID)/messages", raw: (data: multipart.body, contentType: multipart.contentType))
+    }
+
+    /// Fresh links for attachments whose signed links have expired (Discord's links last about a day).
+    public func refreshAttachmentURLs(_ urls: [String]) async throws -> [String: String] {
+        struct Response: Decodable {
+            struct Pair: Decodable { let original: String; let refreshed: String }
+            let refreshedUrls: [Pair]
+        }
+        let data = try await request("POST", "/attachments/refresh-urls", body: ["attachment_urls": urls])
+        let pairs = try decoder.decode(Response.self, from: data).refreshedUrls
+        return Dictionary(pairs.map { ($0.original, $0.refreshed) }, uniquingKeysWith: { first, _ in first })
     }
 
     /// Marks a channel as read up to `messageID`.
@@ -135,7 +154,7 @@ public final class RESTClient {
     }
 
     private func request(_ method: String, _ path: String, query: [URLQueryItem] = [], body: [String: Any]? = nil,
-                         attempt: Int = 0) async throws -> Data {
+                         raw: (data: Data, contentType: String)? = nil, attempt: Int = 0) async throws -> Data {
         var components = URLComponents(url: ClientIdentity.apiBase.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
         if !query.isEmpty { components.queryItems = query }
 
@@ -148,6 +167,9 @@ public final class RESTClient {
         if let body {
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        } else if let raw {
+            req.httpBody = raw.data
+            req.setValue(raw.contentType, forHTTPHeaderField: "Content-Type")
         }
 
         let (data, response) = try await session.data(for: req)
@@ -165,11 +187,39 @@ public final class RESTClient {
             let wait = (try? decoder.decode(RateLimited.self, from: data).retryAfter) ?? 1
             // Clamped so a bogus value can't overflow the sleep or stall a request for hours.
             try await Task.sleep(nanoseconds: UInt64(min(max(wait, 0.1), 60) * 1_000_000_000))
-            return try await request(method, path, query: query, body: body, attempt: attempt + 1)
+            return try await request(method, path, query: query, body: body, raw: raw, attempt: attempt + 1)
         default:
             let body = try? decoder.decode(ErrorBody.self, from: data)
             if body?.captchaKey != nil { throw RESTError.captchaRequired }
             throw RESTError.http(status: http.statusCode, message: body?.message)
         }
+    }
+}
+
+/// A multipart/form-data body: the message as `payload_json`, then the files as `files[0]`, `files[1]`…
+struct Multipart {
+    let body: Data
+    let contentType: String
+
+    init(json: Data, files: [(name: String, data: Data)], boundary: String = "duhcord-" + UUID().uuidString) {
+        var body = Data()
+        func line(_ text: String) { body.append(Data((text + "\r\n").utf8)) }
+        line("--" + boundary)
+        line("Content-Disposition: form-data; name=\"payload_json\"")
+        line("Content-Type: application/json")
+        line("")
+        body.append(json)
+        line("")
+        for (index, file) in files.enumerated() {
+            line("--" + boundary)
+            line("Content-Disposition: form-data; name=\"files[\(index)]\"; filename=\"\(file.name)\"")
+            line("Content-Type: application/octet-stream")
+            line("")
+            body.append(file.data)
+            line("")
+        }
+        line("--" + boundary + "--")
+        self.body = body
+        contentType = "multipart/form-data; boundary=" + boundary
     }
 }

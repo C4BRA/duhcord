@@ -56,6 +56,26 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         return privateChat.mode(for: channelID) == .private
     }
 
+    /// In Private with the other person's key: images can be attached (they're encrypted too).
+    private var canAttachImages: Bool {
+        guard isPrivate, let channelID, case .ready = privateChat?.status(for: channelID) else { return false }
+        return true
+    }
+
+    // Images attached to the next private message (dropped or pasted), shown in a row above the message box.
+    // There's no Open panel: reading files you pick needs an entitlement Duhcord doesn't have.
+    private let tray = NSStackView()
+    private var trayHeight: NSLayoutConstraint!
+    private var trayGap: NSLayoutConstraint!
+    private var attached: [PrivateImagePrep.Prepared] = []
+    /// Images still being re-encoded, shown as spinners.
+    private var preparing = 0
+    /// Bumped when the row is cleared, so images still being prepared for it are dropped.
+    private var attachGeneration = 0
+    /// A message with images is uploading: the box waits until it's sent.
+    private var isUploading = false
+    private static let trayItemSize: CGFloat = 56
+
     private struct LayoutKey: Hashable {
         let id: Snowflake
         let revision: Int
@@ -117,6 +137,26 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         input.placeholder = "Message"
         input.font = Theme.messageFont
         input.onSend = { [weak self] text in self?.send(text) }
+        input.acceptsImages = { [weak self] in self?.canAttachImages ?? false }
+        input.onImages = { [weak self] pasteboard in
+            guard let self, self.canAttachImages else { return false }
+            let sources = PrivateImagePrep.sources(from: pasteboard)
+            if sources.isEmpty { NSSound.beep() }
+            self.attach(sources)
+            return true
+        }
+        input.canSendEmpty = { [weak self] in !(self?.attached.isEmpty ?? true) }
+
+        // Images dropped anywhere on the messages attach too, not just on the box.
+        root.registerForDraggedTypes([.fileURL, .png, .tiff])
+        root.acceptsImages = { [weak self] pasteboard in
+            (self?.canAttachImages ?? false) && PrivateImagePrep.canRead(pasteboard)
+        }
+        root.onDropImages = { [weak self] pasteboard in self?.attach(PrivateImagePrep.sources(from: pasteboard)) }
+        tray.orientation = .horizontal
+        tray.alignment = .centerY
+        tray.spacing = Theme.Spacing.tight
+        tray.setAccessibilityLabel("Attached images")
         input.onTextChange = { [weak self] text in
             guard let self, Settings.sendTypingIndicator, let channelID = self.channelID,
                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -139,7 +179,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         loadingSpinner.isDisplayedWhenStopped = false
         table.setAccessibilityLabel("Messages")
 
-        [scrollView, typingTabs, input, emptyLabel, loadingSpinner, privateBar].forEach {
+        [scrollView, typingTabs, input, emptyLabel, loadingSpinner, privateBar, tray].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
         }
@@ -148,20 +188,25 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         scrollToTop = scrollView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor)
         scrollToBar = scrollView.topAnchor.constraint(equalTo: privateBar.bottomAnchor)
         scrollToTop.isActive = true
+        trayHeight = tray.heightAnchor.constraint(equalToConstant: 0)
+        trayGap = input.topAnchor.constraint(equalTo: tray.bottomAnchor)
         NSLayoutConstraint.activate([
+            trayHeight, trayGap,
+            tray.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: Theme.Spacing.group),
+            tray.leadingAnchor.constraint(equalTo: input.leadingAnchor),
+            tray.trailingAnchor.constraint(lessThanOrEqualTo: input.trailingAnchor),
+            input.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.sidePadding),
             // The channel's name is in the toolbar; messages start just below it.
             privateBar.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             privateBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             privateBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            input.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: Theme.Spacing.group),
             // The tabs' bottom edge is the message box's top edge, so they rise out from behind it.
             typingTabs.bottomAnchor.constraint(equalTo: input.topAnchor),
             typingTabs.leadingAnchor.constraint(equalTo: input.leadingAnchor, constant: 14),
             typingTabs.heightAnchor.constraint(equalToConstant: TypingTabsView.tabSize.height),
             typingTabs.widthAnchor.constraint(equalToConstant: 7 * (TypingTabsView.tabSize.width + 4)),
-            input.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: Self.sidePadding),
             input.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -Self.sidePadding),
             input.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -Theme.Spacing.group),
             loadingSpinner.centerXAnchor.constraint(equalTo: scrollView.centerXAnchor),
@@ -179,6 +224,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         self.channelID = channelID
         olderPagesForPrivate = 0
         layoutCache = [:]
+        clearAttachments()
 
         refreshInput()
         refreshPrivateBar()
@@ -197,8 +243,9 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             if isPrivate {
                 let ready: Bool
                 if case .ready = privateChat?.status(for: channelID) { ready = true } else { ready = false }
-                input.placeholder = ready ? "Private message to @\(channel.displayName)" : "Waiting for @\(channel.displayName)…"
-                input.isEnabled = ready
+                input.placeholder = ready ? "Private message to @\(channel.displayName) (drop or paste images)"
+                    : "Waiting for @\(channel.displayName)…"
+                input.isEnabled = ready && !isUploading
             } else {
                 var placeholder = channel.isPrivate ? "Message @\(channel.displayName)" : "Message #\(channel.displayName)"
                 if case .ready = privateChat?.status(for: channelID) { placeholder += " (not encrypted)" }
@@ -208,6 +255,161 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         } else {
             input.placeholder = ""
             input.isEnabled = false
+        }
+        refreshAttachControls()
+    }
+
+    // MARK: - Attached images
+
+    /// Attached images belong to Private: leaving it (or losing the other person's key) drops them.
+    private func refreshAttachControls() {
+        if !canAttachImages, !isUploading, !attached.isEmpty || preparing > 0 { clearAttachments() }
+    }
+
+    /// Re-encodes the images in the background, then adds them to the row (up to the most a message can carry).
+    private func attach(_ sources: [(data: Data, name: String)]) {
+        guard canAttachImages, !isUploading, !sources.isEmpty else { return }
+        let room = PrivateMessaging.maxFiles - attached.count - preparing
+        if sources.count > room { NSSound.beep() }
+        let generation = attachGeneration
+        for source in sources.prefix(max(0, room)) {
+            preparing += 1
+            let job = Handoff(value: source)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let prepared = Handoff(value: PrivateImagePrep.prepare(job.value.data, name: job.value.name))
+                DispatchQueue.main.async {
+                    // The channel changed or the row was cleared meanwhile: it's no longer wanted.
+                    guard let self, self.attachGeneration == generation else { return }
+                    self.preparing -= 1
+                    if let image = prepared.value {
+                        self.attached.append(image)
+                    } else {
+                        self.showSendError("Couldn't attach “\(job.value.name)”",
+                                           detail: "It isn't an image Duhcord can read, or it's too large.")
+                    }
+                    self.refreshTray()
+                }
+            }
+        }
+        refreshTray()
+    }
+
+    private func clearAttachments() {
+        attachGeneration += 1
+        attached = []
+        preparing = 0
+        refreshTray()
+    }
+
+    private func refreshTray() {
+        tray.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for (index, image) in attached.enumerated() {
+            tray.addArrangedSubview(trayItem(image, index: index))
+        }
+        for _ in 0..<preparing {
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.startAnimation(nil)
+            spinner.setAccessibilityLabel("Preparing image")
+            tray.addArrangedSubview(spinner)
+        }
+        if isUploading {
+            let label = NSTextField(labelWithString: "Encrypting and sending…")
+            label.textColor = .secondaryLabelColor
+            label.font = Theme.messageSmallFont
+            tray.addArrangedSubview(label)
+        }
+        let visible = !attached.isEmpty || preparing > 0
+        let wasAtBottom = isAtBottom
+        trayHeight.constant = visible ? Self.trayItemSize : 0
+        // Room for the typing tabs between the row and the box.
+        trayGap.constant = visible ? TypingTabsView.tabSize.height + 2 : 0
+        if wasAtBottom {
+            view.layoutSubtreeIfNeeded()
+            scrollToBottom()
+        }
+    }
+
+    private func trayItem(_ image: PrivateImagePrep.Prepared, index: Int) -> NSView {
+        let size = Self.trayItemSize
+        let item = NSView()
+        item.translatesAutoresizingMaskIntoConstraints = false
+        let picture = NSImageView(image: image.thumbnail)
+        picture.imageScaling = .scaleProportionallyUpOrDown
+        picture.wantsLayer = true
+        picture.layer?.cornerRadius = 6
+        picture.layer?.masksToBounds = true
+        picture.setAccessibilityLabel(image.name)
+        picture.toolTip = image.name
+        let remove = NSButton(image: NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Remove \(image.name)")!,
+                              target: self, action: #selector(removeAttachment(_:)))
+        remove.isBordered = false
+        remove.tag = index
+        remove.isEnabled = !isUploading
+        remove.toolTip = "Remove"
+        [picture, remove].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            item.addSubview($0)
+        }
+        NSLayoutConstraint.activate([
+            item.widthAnchor.constraint(equalToConstant: size),
+            item.heightAnchor.constraint(equalToConstant: size),
+            picture.topAnchor.constraint(equalTo: item.topAnchor),
+            picture.bottomAnchor.constraint(equalTo: item.bottomAnchor),
+            picture.leadingAnchor.constraint(equalTo: item.leadingAnchor),
+            picture.trailingAnchor.constraint(equalTo: item.trailingAnchor),
+            remove.topAnchor.constraint(equalTo: item.topAnchor, constant: 2),
+            remove.trailingAnchor.constraint(equalTo: item.trailingAnchor, constant: -2),
+        ])
+        return item
+    }
+
+    @objc private func removeAttachment(_ sender: NSButton) {
+        guard !isUploading, attached.indices.contains(sender.tag) else { return }
+        attached.remove(at: sender.tag)
+        refreshTray()
+    }
+
+    private func showSendError(_ title: String, detail: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        if let window = view.window { alert.beginSheetModal(for: window) }
+    }
+
+    /// Encrypts each image with a key of its own, puts the keys in the private message, and uploads the
+    /// encrypted images as its attachments. The row clears once Discord has the message.
+    private func sendWithImages(_ text: String, in channelID: Snowflake) {
+        guard #available(macOS 14, *), let privateChat else { return }
+        let images = attached
+        let content: String
+        let sealed: [Data]
+        do {
+            let files = try images.map { try PrivateCrypto.sealFile($0.data, width: $0.width, height: $0.height, kind: $0.kind) }
+            sealed = files.map(\.sealed)
+            guard sealed.reduce(0, { $0 + $1.count }) <= PrivateMessaging.maxUploadBytes else {
+                throw PrivateMessagingError.filesTooLarge
+            }
+            content = try privateChat.seal(text, files: files.map(\.file), in: channelID)
+        } catch {
+            showSendError("Private message not sent", detail: error.localizedDescription)
+            return
+        }
+        input.text = ""
+        isUploading = true
+        refreshInput()
+        refreshTray()
+        session.send(content, files: sealed, to: channelID) { [weak self] error in
+            guard let self else { return }
+            self.isUploading = false
+            if error == nil, self.channelID == channelID { self.attached = [] }
+            self.refreshInput()
+            self.refreshTray()
+            guard let error else { return }
+            if self.input.text.isEmpty { self.input.text = text }
+            guard !DiscordSession.isConnectivityError(error) else { return }
+            self.showSendError("Message not sent", detail: error.localizedDescription)
         }
     }
 
@@ -250,7 +452,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             case .encrypted:
                 let text = isPrivate ? privateChat?.plaintext(content: reply.content, id: reply.id, authorID: reply.author.id,
                                                               channelID: message.channelId) : nil
-                shown.referencedMessage?.content = text ?? "🔒 Private message"
+                shown.referencedMessage?.content = text.map { $0.isEmpty ? "🖼 Image" : $0 } ?? "🔒 Private message"
             }
         }
         switch PrivateMessaging.kind(of: message.content) {
@@ -259,6 +461,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         case .handshake:
             shown.content = message.author.id == store.me?.id ? "🔒 *You offered to chat privately.*" : "🔒 *Wants to chat privately.*"
         case .encrypted:
+            // Its attachments are the encrypted images: shown decrypted below the text in Private, never as files.
+            shown.attachments = []
             if isPrivate {
                 shown.content = privateChat?.plaintext(of: message) ?? "🔒 *This private message can't be read with this Mac's key.*"
             } else {
@@ -635,6 +839,11 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private func send(_ text: String) {
         guard let channelID else { return }
         var content = text
+        if isPrivate, !attached.isEmpty {
+            sendWithImages(text, in: channelID)
+            return
+        }
+        guard !text.isEmpty else { return }
         if isPrivate, let privateChat {
             do {
                 content = try privateChat.seal(text, in: channelID)
@@ -672,7 +881,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         let built = MessageLayoutBuilder.build(
             message: shown, grouped: row.grouped, cellWidth: table.bounds.width, sidePadding: Self.sidePadding,
             headerHeight: Self.headerHeight, topPadding: MessageCell.topPadding(grouped: row.grouped),
-            bottomPadding: MessageCell.bottomPadding, resolver: resolver)
+            bottomPadding: MessageCell.bottomPadding, resolver: resolver,
+            privateImages: isPrivate ? privateChat?.images(of: message) ?? [] : [])
         let cached = CachedLayout(layout: built, header: row.grouped ? nil : Theme.header(for: shown))
         layoutCache[key] = cached
         return cached
@@ -751,6 +961,23 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 /// Tells the messages view when a window or divider drag ends.
 private final class LiveResizeView: NSView {
     var onEndLiveResize: (() -> Void)?
+    /// Whether dropped images are wanted, and what to do with them.
+    var acceptsImages: ((NSPasteboard) -> Bool)?
+    var onDropImages: ((NSPasteboard) -> Void)?
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        acceptsImages?(sender.draggingPasteboard) == true ? .copy : []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        acceptsImages?(sender.draggingPasteboard) == true ? .copy : []
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard acceptsImages?(sender.draggingPasteboard) == true else { return false }
+        onDropImages?(sender.draggingPasteboard)
+        return true
+    }
 
     override func viewDidEndLiveResize() {
         super.viewDidEndLiveResize()

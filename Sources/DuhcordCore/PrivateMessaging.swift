@@ -30,6 +30,13 @@ public enum PrivateMessaging {
     public static let maxRecipients = 8
     /// The most a private message may decompress to, so a crafted one can't balloon in memory.
     static let maxPlaintext = 64 * 1024
+    /// Images per private message.
+    public static let maxFiles = 4
+    /// All of a message's encrypted images together: Discord's upload limit without Nitro, less room for the
+    /// rest of the request.
+    public static let maxUploadBytes = 10 * 1024 * 1024 - 64 * 1024
+    /// What an encrypted image is called on Discord. It says nothing about what's inside.
+    public static let fileName = "encrypted.bin"
 
     static let messageType: UInt8 = 0x21
     static let handshakeType: UInt8 = 0x22
@@ -67,6 +74,18 @@ public enum PrivateMessaging {
 
     static func content(for data: Data) -> String {
         notice + "\n" + prefix + DenseText.encode(data)
+    }
+
+    /// The attachment's size for an image of `length` bytes: padded, plus the tag.
+    static func sealedLength(forFileOf length: Int) -> Int { padme(length) + 16 }
+
+    /// Padmé: rounds a length up so only about log log of it shows, at most 12% larger.
+    static func padme(_ length: Int) -> Int {
+        guard length > 1 else { return max(length, 1) }
+        let e = Int.bitWidth - 1 - length.leadingZeroBitCount
+        let s = Int.bitWidth - e.leadingZeroBitCount
+        let mask = (1 << (e - s)) - 1
+        return (length + mask) & ~mask
     }
 
     /// Four bytes identifying a public key in messages.
@@ -118,10 +137,61 @@ public enum PrivateMessaging {
     }
 }
 
+/// An encrypted image that came with a private message: its key and what it is. Listed inside the message, so
+/// only the recipients see it; the encrypted bytes are the message's attachment at the same position.
+public struct PrivateFile: Equatable {
+    public enum Kind: UInt8 {
+        case jpeg = 1, png = 2
+    }
+
+    /// The image's own key (ChaCha20-Poly1305), random and used once.
+    public let key: Data
+    /// The image's size in bytes, before padding.
+    public let length: Int
+    /// The attachment's size: padded, plus the tag. An attachment of any other size isn't this image.
+    public let sealedLength: Int
+    public let width: Int
+    public let height: Int
+    public let kind: Kind
+
+    static let encodedSize = 32 + 4 + 4 + 2 + 2 + 1
+
+    public init(key: Data, length: Int, sealedLength: Int, width: Int, height: Int, kind: Kind) {
+        self.key = key
+        self.length = length
+        self.sealedLength = sealedLength
+        self.width = width
+        self.height = height
+        self.kind = kind
+    }
+
+    func encoded() -> Data {
+        var data = key
+        data.append(contentsOf: [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: UInt32(clamping: length) >> $0) })
+        data.append(contentsOf: [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: UInt32(clamping: sealedLength) >> $0) })
+        data.append(contentsOf: [8, 0].map { UInt8(truncatingIfNeeded: UInt16(clamping: width) >> $0) })
+        data.append(contentsOf: [8, 0].map { UInt8(truncatingIfNeeded: UInt16(clamping: height) >> $0) })
+        data.append(kind.rawValue)
+        return data
+    }
+
+    init?(_ data: Data) {
+        let d = Data(data)
+        guard d.count == Self.encodedSize, let kind = Kind(rawValue: d[44]) else { return nil }
+        func number(_ range: Range<Int>) -> Int { d[range].reduce(0) { $0 << 8 | Int($1) } }
+        self.init(key: Data(d[0..<32]), length: number(32..<36), sealedLength: number(36..<40),
+                  width: number(40..<42), height: number(42..<44), kind: kind)
+        guard width > 0, height > 0, length <= PrivateMessaging.maxUploadBytes,
+              sealedLength == PrivateMessaging.sealedLength(forFileOf: length) else { return nil }
+    }
+}
+
 public enum PrivateMessagingError: Error, LocalizedError, Equatable {
     case tooLong
     case noRecipients
     case tooManyRecipients
+    case tooManyFiles
+    case filesTooLarge
 
     public var errorDescription: String? {
         switch self {
@@ -130,6 +200,8 @@ public enum PrivateMessagingError: Error, LocalizedError, Equatable {
         case .tooManyRecipients:
             return "This message would go to more than \(PrivateMessaging.maxRecipients) keys. Remove a Mac in Settings, "
                 + "or ask the other person to."
+        case .tooManyFiles: return "A private message can carry up to \(PrivateMessaging.maxFiles) images."
+        case .filesTooLarge: return "These images are too large to send together. Send fewer at a time."
         }
     }
 }
@@ -149,6 +221,10 @@ public enum PrivateMessagingError: Error, LocalizedError, Equatable {
 /// - The body is encrypted with the message key. The key is never reused, so the nonce is fixed (zero), and
 ///   everything before the body is authenticated with it, so the recipient list and flags can't be altered.
 /// - Flags bit 0: the text was compressed (raw DEFLATE) before being padded and encrypted.
+/// - Flags bit 1: the message carries images. The text then starts with a list of them, `count (1) | count ×
+///   [key (32) | length (4) | sealed length (4) | width (2) | height (2) | kind (1)]`, and the rest is the text.
+///   Each image is encrypted on its own with its key and uploaded as the message's attachment at the same
+///   position, padded (Padmé) so its size says little about the picture.
 /// - "Sent at" is when the sender sealed it (Unix seconds), authenticated with the rest, so a copy Discord
 ///   reposts later can be recognised by the gap between this and the copy's own time.
 @available(macOS 14, *)
@@ -164,6 +240,8 @@ public enum PrivateCrypto {
         public let sentAt: Date
         /// Unique to the message: a second message with the same salt is a copy of the first.
         public let salt: Data
+        /// Images, in the order of the message's attachments.
+        public var files: [PrivateFile] = []
     }
     private static let exportContext = Data("duhcord-message-key".utf8)
     private static let zeroNonce = try! ChaChaPoly.Nonce(data: Data(count: 12))
@@ -178,8 +256,9 @@ public enum PrivateCrypto {
 
     /// The full message content for `text`: the note line and the sealed data. The sender's own key in
     /// `recipients` is skipped (the sender re-derives the message key instead).
-    public static func seal(_ text: String, channelID: Snowflake, sender: Curve25519.KeyAgreement.PrivateKey,
-                            recipients: [Curve25519.KeyAgreement.PublicKey], now: Date = Date()) throws -> String {
+    public static func seal(_ text: String, files: [PrivateFile] = [], channelID: Snowflake,
+                            sender: Curve25519.KeyAgreement.PrivateKey, recipients: [Curve25519.KeyAgreement.PublicKey],
+                            now: Date = Date()) throws -> String {
         let own = sender.publicKey.rawRepresentation
         var unique: [Data: Curve25519.KeyAgreement.PublicKey] = [:]
         for key in recipients where key.rawRepresentation != own { unique[key.rawRepresentation] = key }
@@ -188,14 +267,21 @@ public enum PrivateCrypto {
         let keys = Array(unique.values)
         guard !keys.isEmpty else { throw PrivateMessagingError.noRecipients }
 
-        let raw = Data(text.utf8)
+        guard files.count <= PrivateMessaging.maxFiles else { throw PrivateMessagingError.tooManyFiles }
+        var raw = Data()
+        if !files.isEmpty {
+            raw.append(UInt8(files.count))
+            for file in files { raw.append(file.encoded()) }
+        }
+        raw.append(Data(text.utf8))
         guard raw.count <= PrivateMessaging.maxPlaintext else { throw PrivateMessagingError.tooLong }
         let compressed = Deflate.compress(raw)
         let salt = SymmetricKey(size: SymmetricKeySize(bitCount: 128)).withUnsafeBytes { Data($0) }
         let key = messageKey(sender, salt: salt, channelID: channelID)
         let keyBytes = key.withUnsafeBytes { Data($0) }
 
-        var header = Data([PrivateMessaging.messageType, compressed == nil ? 0 : 1])
+        let flags: UInt8 = (compressed == nil ? 0 : 1) | (files.isEmpty ? 0 : 2)
+        var header = Data([PrivateMessaging.messageType, flags])
         header.append(PrivateMessaging.keyID(own))
         let seconds = UInt32(clamping: Int(now.timeIntervalSince1970))
         header.append(contentsOf: [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: seconds >> $0) })
@@ -246,9 +332,48 @@ public enum PrivateCrypto {
                                                   tag: data[(data.count - 16)...]),
               let padded = keys.lazy.compactMap({ try? ChaChaPoly.open(box, using: $0, authenticating: data[0..<headerEnd]) }).first,
               let inner = unpad(padded) else { return nil }
-        let bytes = flags & 1 != 0 ? Deflate.decompress(inner, limit: PrivateMessaging.maxPlaintext) : inner
-        guard let text = bytes.flatMap({ String(data: $0, encoding: .utf8) }) else { return nil }
-        return Opened(text: text, sentAt: Date(timeIntervalSince1970: TimeInterval(sentAt)), salt: Data(salt))
+        guard var bytes = flags & 1 != 0 ? Deflate.decompress(inner, limit: PrivateMessaging.maxPlaintext) : Data(inner)
+        else { return nil }
+        var files: [PrivateFile] = []
+        if flags & 2 != 0 {
+            guard let count = bytes.first.map(Int.init), (1...PrivateMessaging.maxFiles).contains(count),
+                  bytes.count >= 1 + count * PrivateFile.encodedSize else { return nil }
+            for i in 0..<count {
+                let start = bytes.startIndex + 1 + i * PrivateFile.encodedSize
+                guard let file = PrivateFile(bytes[start..<(start + PrivateFile.encodedSize)]) else { return nil }
+                files.append(file)
+            }
+            bytes = Data(bytes.dropFirst(1 + count * PrivateFile.encodedSize))
+        }
+        guard let text = String(data: bytes, encoding: .utf8) else { return nil }
+        return Opened(text: text, sentAt: Date(timeIntervalSince1970: TimeInterval(sentAt)), salt: Data(salt), files: files)
+    }
+
+    // MARK: - Images
+
+    private static let fileContext = Data("duhcord-file-v1".utf8)
+
+    /// Encrypts an image with a new key of its own. The returned file goes in the message (`seal(_:files:…)`);
+    /// the data is uploaded as its attachment.
+    public static func sealFile(_ image: Data, width: Int, height: Int, kind: PrivateFile.Kind) throws -> (file: PrivateFile, sealed: Data) {
+        guard image.count <= PrivateMessaging.maxUploadBytes else { throw PrivateMessagingError.filesTooLarge }
+        let key = SymmetricKey(size: .bits256)
+        var padded = image
+        padded.append(Data(count: PrivateMessaging.padme(image.count) - image.count))
+        let box = try ChaChaPoly.seal(padded, using: key, nonce: zeroNonce, authenticating: fileContext)
+        let file = PrivateFile(key: key.withUnsafeBytes { Data($0) }, length: image.count, sealedLength: padded.count + 16,
+                               width: width, height: height, kind: kind)
+        return (file, box.ciphertext + box.tag)
+    }
+
+    /// The image from its attachment's bytes, or nil if they aren't the image this file describes.
+    public static func openFile(_ sealed: Data, file: PrivateFile) -> Data? {
+        guard sealed.count == file.sealedLength, file.key.count == 32,
+              let box = try? ChaChaPoly.SealedBox(nonce: zeroNonce, ciphertext: sealed.prefix(sealed.count - 16),
+                                                  tag: sealed.suffix(16)),
+              let padded = try? ChaChaPoly.open(box, using: SymmetricKey(data: file.key), authenticating: fileContext)
+        else { return nil }
+        return padded.prefix(file.length)
     }
 
     /// Two-byte length, then zero padding to the next block.

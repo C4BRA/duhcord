@@ -29,8 +29,8 @@ final class MediaLoader {
     }()
 
     private static let maxBytes = 8 * 1024 * 1024
-    private static let maxSourcePixels = 40_000_000
-    private static let allowedTypes: Set<String> = ["org.webmproject.webp", "public.png", "public.jpeg", "com.compuserve.gif"]
+    static let maxSourcePixels = 40_000_000
+    static let allowedTypes: Set<String> = ["org.webmproject.webp", "public.png", "public.jpeg", "com.compuserve.gif"]
 
     func cachedImage(for url: URL) -> NSImage? { cache.object(forKey: url.absoluteString as NSString) }
 
@@ -86,7 +86,8 @@ final class MediaLoader {
         }
     }
 
-    private static func decode(_ data: Data, maxPixel: Int, pointSize: NSSize) -> NSImage? {
+    /// Decodes straight to `maxPixel` (ImageIO's thumbnail path), after checking the format and pixel count.
+    static func decode(_ data: Data, maxPixel: Int, pointSize: NSSize, allowedTypes: Set<String> = MediaLoader.allowedTypes) -> NSImage? {
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions),
               let type = CGImageSourceGetType(source) as String?, allowedTypes.contains(type),
@@ -110,7 +111,7 @@ final class MediaLoader {
 
 /// Downloads at most `limit` bytes: a response that says it's bigger is refused before any of it arrives,
 /// and one that runs past the limit anyway is cut off, so an oversized image is never buffered whole.
-private final class CappedDownload: NSObject, URLSessionDataDelegate {
+final class CappedDownload: NSObject, URLSessionDataDelegate {
     private let limit: Int
     private var data = Data()
     private var failed = false

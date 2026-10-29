@@ -92,6 +92,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         }
         profiles.isLocked = { [weak self] in self?.isLocked ?? false }
         messages.privateChat = privateChat
+        PrivateImageLoader.shared.refreshURL = { [rest = session.rest] url in
+            try? await rest.refreshAttachmentURLs([url])[url]
+        }
         privateChat.onChange = { [weak self] channelID in
             guard let self else { return }
             if channelID == nil || channelID == self.session.store.focusedChannelID { self.messages.privateChanged() }
@@ -155,6 +158,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         voiceDetails?.close()
         voice.leave()
         connectionLock.hide()
+        // Decrypted private images stay with the account they belong to.
+        PrivateImagePreview.closeAll()
+        PrivateImageLoader.shared.reset()
         close()
     }
 

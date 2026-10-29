@@ -24,6 +24,8 @@ struct MessageLayout {
             case loopingVideo([URL])
             /// A real video: plays with sound, only after a click.
             case video([URL])
+            /// An encrypted image in a private message, decrypted here (`request` only names it).
+            case privateImage(PrivateImage)
         }
 
         let frame: NSRect
@@ -59,7 +61,8 @@ enum MessageLayoutBuilder {
     private static let pad: CGFloat = 10
 
     static func build(message: Message, grouped: Bool, cellWidth: CGFloat, sidePadding: CGFloat, headerHeight: CGFloat,
-                      topPadding: CGFloat, bottomPadding: CGFloat, resolver: Markdown.Resolver) -> MessageLayout {
+                      topPadding: CGFloat, bottomPadding: CGFloat, resolver: Markdown.Resolver,
+                      privateImages: [PrivateImage] = []) -> MessageLayout {
         let mode = Settings.mediaPreviews
         let showMedia = mode != .off
         // Everything sits right of a column for profile pictures, so follow-ups line up under the name.
@@ -80,7 +83,7 @@ enum MessageLayoutBuilder {
         let inline = showMedia ? message.attachments.filter { $0.isImage || $0.isPlayableVideo } : []
         let visibleEmbeds = message.embeds.filter { $0.hasText || (showMedia && picture(of: $0) != nil) }
         let bodyText = Theme.body(for: message, resolver: resolver, inlineAttachments: Set(inline.map(\.id)),
-                                  hasVisuals: !inline.isEmpty || !visibleEmbeds.isEmpty)
+                                  hasVisuals: !inline.isEmpty || !visibleEmbeds.isEmpty || !privateImages.isEmpty)
         let bodyHeight = bodyText.length > 0 ? measure(bodyText, width: width) : 0
         layout.body = MessageLayout.Text(frame: NSRect(x: x, y: y, width: width, height: bodyHeight), text: bodyText)
         y += bodyHeight
@@ -102,6 +105,20 @@ enum MessageLayoutBuilder {
                 open: URL(string: attachment.url), gated: mode == .onClick || attachment.isSpoiler,
                 label: attachment.isSpoiler ? "Spoiler · click to show" : (mode == .onClick ? "Click to load" : nil),
                 kind: kind, externalVideo: false))
+            y += size.height
+        }
+
+        // Encrypted images: their size comes inside the message, so space is reserved before they're decrypted.
+        // They're the only way to see the picture, so with previews off they wait for a click instead of hiding.
+        for image in privateImages {
+            let size = fit(image.file.width, image.file.height, max: box)
+            y += 6
+            let available = image.trusted && image.attachment != nil
+            let label = !image.trusted ? "Not shown: sent from a key you haven't accepted"
+                : (mode != .always ? "Click to load" : nil)
+            layout.media.append(MessageLayout.Media(
+                frame: NSRect(origin: NSPoint(x: x, y: y), size: size), request: available ? image.placeholderURL : nil,
+                open: nil, gated: mode != .always, label: label, kind: .privateImage(image), externalVideo: false))
             y += size.height
         }
 
@@ -221,6 +238,8 @@ final class MediaView: NSView, Playable {
     private var item: MessageLayout.Media?
     private var token: MediaLoader.Token?
     private var still: NSImage?
+    /// A private image that couldn't be downloaded or decrypted.
+    private var loadFailed = false
 
     // Playback state; all torn down by stopPlayback().
     private var animator: GIFAnimator?
@@ -258,18 +277,24 @@ final class MediaView: NSView, Playable {
         cancel()
         self.item = item
         still = nil
+        loadFailed = false
         imageView.image = nil
         toolTip = item.open?.host
         if let request = item.request, !item.gated || Self.revealed.contains(request) {
             load(request)
         }
+        if case .privateImage = item.kind { setAccessibilityLabel("Private image") } else { setAccessibilityLabel(nil) }
         refreshOverlays()
         if isAnimatedGIF, PlaybackCoordinator.gifsPlayWhenVisible, !item.gated { startGIF() }
     }
 
     /// Called when the row is reused or scrolled away: stops downloads and playback.
     func cancel() {
-        if let token, let request = item?.request { MediaLoader.shared.cancel(token, for: request) }
+        if let token, case .privateImage(let image)? = item?.kind {
+            PrivateImageLoader.shared.cancel(token, for: image)
+        } else if let token, let request = item?.request {
+            MediaLoader.shared.cancel(token, for: request)
+        }
         token = nil
         stopPlayback()
     }
@@ -278,6 +303,17 @@ final class MediaView: NSView, Playable {
 
     private func load(_ request: URL) {
         let size = bounds.size == .zero ? item?.frame.size ?? .zero : bounds.size
+        if case .privateImage(let image)? = item?.kind {
+            token = PrivateImageLoader.shared.load(image, pointSize: size) { [weak self] loaded in
+                guard let self, self.item?.request == request else { return }
+                self.token = nil
+                self.still = loaded
+                self.imageView.image = loaded
+                self.loadFailed = loaded == nil
+                self.refreshOverlays()
+            }
+            return
+        }
         token = MediaLoader.shared.load(request, pointSize: size) { [weak self] image in
             guard let self, self.item?.request == request else { return }
             self.token = nil
@@ -414,6 +450,8 @@ final class MediaView: NSView, Playable {
             label.stringValue = playable ? "▶" : ""
             label.font = .systemFont(ofSize: 30)
             label.textColor = .white
+        } else if loadFailed {
+            label.stringValue = "Couldn't load this image"
         } else {
             let waiting = item.request != nil && (!item.gated || Self.revealed.contains(item.request!))
             if waiting {
@@ -489,6 +527,8 @@ final class MediaView: NSView, Playable {
             } else {
                 startVideo()
             }
+        } else if case .privateImage(let image) = item.kind, still != nil {
+            PrivateImagePreview.show(image, from: window)
         } else if let open = item.open {
             LinkOpener.open(open, shownText: nil, from: window)
         }

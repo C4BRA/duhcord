@@ -8,6 +8,16 @@ final class ComposerView: NSView, NSTextViewDelegate {
     var onTextChange: ((String) -> Void)?
     /// Called when the height changes, so the parent can keep the message list pinned to the bottom.
     var onHeightChange: (() -> Void)?
+    /// Images pasted or dropped into the box: returns true if they were taken (otherwise it's an ordinary paste).
+    var onImages: ((NSPasteboard) -> Bool)? {
+        didSet { textView.onImages = onImages }
+    }
+    /// Whether pasted and dropped images are wanted now (in Private).
+    var acceptsImages: (() -> Bool)? {
+        didSet { textView.acceptsImages = acceptsImages }
+    }
+    /// Whether Return sends with no text (images are attached).
+    var canSendEmpty: (() -> Bool)?
 
     let textView = PlaceholderTextView()
     private let scrollView = NSScrollView()
@@ -136,7 +146,7 @@ final class ComposerView: NSView, NSTextViewDelegate {
             textView.insertNewlineIgnoringFieldEditor(nil)
         } else {
             let message = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !message.isEmpty { onSend?(message) }
+            if !message.isEmpty || canSendEmpty?() == true { onSend?(message) }
         }
         return true
     }
@@ -163,6 +173,30 @@ final class PlaceholderTextView: NSTextView {
     var placeholder = ""
     /// Called with true when typing starts in this view, false when focus moves elsewhere.
     var onFocusChange: ((Bool) -> Void)?
+    /// See ComposerView.onImages and acceptsImages.
+    var onImages: ((NSPasteboard) -> Bool)?
+    var acceptsImages: (() -> Bool)?
+
+    override func paste(_ sender: Any?) {
+        if acceptsImages?() == true, PrivateImagePrep.canRead(.general), onImages?(.general) == true { return }
+        super.paste(sender)
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if acceptsImages?() == true, PrivateImagePrep.canRead(sender.draggingPasteboard) { return .copy }
+        return super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if acceptsImages?() == true, PrivateImagePrep.canRead(sender.draggingPasteboard) { return .copy }
+        return super.draggingUpdated(sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if acceptsImages?() == true, PrivateImagePrep.canRead(sender.draggingPasteboard),
+           onImages?(sender.draggingPasteboard) == true { return true }
+        return super.performDragOperation(sender)
+    }
 
     override func becomeFirstResponder() -> Bool {
         let became = super.becomeFirstResponder()

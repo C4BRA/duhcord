@@ -60,6 +60,13 @@ public enum MediaRequest {
         return URL(string: "https://cdn.discordapp.com/icons/\(guild.id)/\(hash).webp?size=\(cdnSize(forPixels: pixels))")
     }
 
+    /// An encrypted image in a private message: an attachment on Discord's file CDN, over https. The only CDN
+    /// files Duhcord downloads to decode itself, and only after decrypting them (see PrivateCrypto.openFile).
+    public static func isAllowedAttachmentURL(_ url: URL) -> Bool {
+        url.scheme == "https" && url.host?.lowercased() == "cdn.discordapp.com" && url.path.hasPrefix("/attachments/")
+            && url.user == nil && url.port == nil
+    }
+
     /// Video streams: the image proxies plus Discord's file CDN (some uploads are only served from there),
     /// over https only. Never a third-party host, and never with the token.
     public static func isAllowedVideoURL(_ url: URL) -> Bool {

@@ -1170,6 +1170,91 @@ final class PrivateMessagingTests: XCTestCase {
         }
     }
 
+    func testPadmeHidesExactSizes() {
+        XCTAssertEqual(PrivateMessaging.padme(1), 1)
+        for length in [1000, 4097, 123_456, 2_000_001, 9_999_999] {
+            let padded = PrivateMessaging.padme(length)
+            XCTAssertGreaterThanOrEqual(padded, length)
+            XCTAssertLessThanOrEqual(Double(padded), Double(length) * 1.12 + 1)
+        }
+        // Nearby sizes land on the same padded size.
+        XCTAssertEqual(PrivateMessaging.padme(2_000_001), PrivateMessaging.padme(2_000_100))
+    }
+
+    func testPrivateImageRoundTrip() throws {
+        guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
+        let alice = Curve25519.KeyAgreement.PrivateKey(), bob = Curve25519.KeyAgreement.PrivateKey()
+        let picture = Data((0..<50_000).map { UInt8(truncatingIfNeeded: $0 * 7) })
+        let (file, sealed) = try PrivateCrypto.sealFile(picture, width: 640, height: 480, kind: .jpeg)
+        XCTAssertEqual(sealed.count, file.sealedLength)
+        XCTAssertEqual(file.sealedLength, PrivateMessaging.padme(picture.count) + 16)
+        XCTAssertEqual(PrivateCrypto.openFile(sealed, file: file), picture)
+
+        // The image's key travels inside the message, which only the recipients can open.
+        let content = try PrivateCrypto.seal("look", files: [file], channelID: "5", sender: alice, recipients: [bob.publicKey])
+        guard case .encrypted(let payload) = PrivateMessaging.kind(of: content) else { return XCTFail("not encrypted") }
+        let opened = try XCTUnwrap(PrivateCrypto.open(payload, channelID: "5", recipient: bob, senders: [alice.publicKey]))
+        XCTAssertEqual(opened.text, "look")
+        XCTAssertEqual(opened.files, [file])
+        // The sender reads their own, images included.
+        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "5", recipient: alice, senders: [])?.files, [file])
+
+        // An image alone, with no text.
+        let bare = try PrivateCrypto.seal("", files: [file, file], channelID: "5", sender: alice, recipients: [bob.publicKey])
+        guard case .encrypted(let barePayload) = PrivateMessaging.kind(of: bare) else { return XCTFail("not encrypted") }
+        let bareOpened = try XCTUnwrap(PrivateCrypto.open(barePayload, channelID: "5", recipient: bob, senders: [alice.publicKey]))
+        XCTAssertEqual(bareOpened.text, "")
+        XCTAssertEqual(bareOpened.files.count, 2)
+    }
+
+    func testPrivateImageRejectsTamperingAndSwaps() throws {
+        guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
+        let picture = Data(repeating: 0xAB, count: 10_000)
+        let (file, sealed) = try PrivateCrypto.sealFile(picture, width: 10, height: 10, kind: .png)
+        var flipped = sealed
+        flipped[100] ^= 1
+        XCTAssertNil(PrivateCrypto.openFile(flipped, file: file))
+        XCTAssertNil(PrivateCrypto.openFile(sealed.dropLast(), file: file))
+        // Another image's attachment doesn't open with this image's key.
+        let (_, other) = try PrivateCrypto.sealFile(picture, width: 10, height: 10, kind: .png)
+        XCTAssertNil(PrivateCrypto.openFile(other, file: file))
+        XCTAssertThrowsError(try PrivateCrypto.sealFile(Data(count: PrivateMessaging.maxUploadBytes + 1),
+                                                        width: 1, height: 1, kind: .jpeg))
+    }
+
+    func testPrivateFileListIsChecked() throws {
+        guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
+        let alice = Curve25519.KeyAgreement.PrivateKey(), bob = Curve25519.KeyAgreement.PrivateKey()
+        let (file, _) = try PrivateCrypto.sealFile(Data(count: 1000), width: 1, height: 1, kind: .jpeg)
+        XCTAssertThrowsError(try PrivateCrypto.seal("x", files: Array(repeating: file, count: PrivateMessaging.maxFiles + 1),
+                                                    channelID: "1", sender: alice, recipients: [bob.publicKey])) {
+            XCTAssertEqual($0 as? PrivateMessagingError, .tooManyFiles)
+        }
+        // A listed size that doesn't match its padding, or no pixels, is refused.
+        let lying = PrivateFile(key: file.key, length: 1000, sealedLength: 5000, width: 1, height: 1, kind: .jpeg)
+        XCTAssertNil(PrivateFile(lying.encoded()))
+        let empty = PrivateFile(key: file.key, length: 1000, sealedLength: file.sealedLength, width: 0, height: 1, kind: .jpeg)
+        XCTAssertNil(PrivateFile(empty.encoded()))
+        XCTAssertEqual(PrivateFile(file.encoded()), file)
+    }
+
+    func testAttachmentURLs() {
+        XCTAssertTrue(MediaRequest.isAllowedAttachmentURL(URL(string: "https://cdn.discordapp.com/attachments/1/2/encrypted.bin?ex=1")!))
+        XCTAssertFalse(MediaRequest.isAllowedAttachmentURL(URL(string: "http://cdn.discordapp.com/attachments/1/2/a")!))
+        XCTAssertFalse(MediaRequest.isAllowedAttachmentURL(URL(string: "https://cdn.discordapp.com/avatars/1/2.png")!))
+        XCTAssertFalse(MediaRequest.isAllowedAttachmentURL(URL(string: "https://evil.example/attachments/1/2/a")!))
+        XCTAssertFalse(MediaRequest.isAllowedAttachmentURL(URL(string: "https://cdn.discordapp.com:444/attachments/1/2/a")!))
+    }
+
+    func testMultipartBody() throws {
+        let body = Multipart(json: Data(#"{"content":"x"}"#.utf8), files: [("encrypted.bin", Data([1, 2, 3]))], boundary: "B")
+        XCTAssertEqual(body.contentType, "multipart/form-data; boundary=B")
+        let text = String(decoding: body.body, as: UTF8.self)
+        XCTAssertTrue(text.hasPrefix("--B\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"))
+        XCTAssertTrue(text.contains(#"name="files[0]"; filename="encrypted.bin""#))
+        XCTAssertTrue(text.hasSuffix("--B--\r\n"))
+    }
+
     func testSealAndOpen() throws {
         guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
         let alice = Curve25519.KeyAgreement.PrivateKey(), bob = Curve25519.KeyAgreement.PrivateKey()

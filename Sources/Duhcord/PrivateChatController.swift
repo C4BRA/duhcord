@@ -145,8 +145,16 @@ final class PrivateChatController {
     private var firstWithSalt: [Data: Snowflake] = [:]
     private var loadedFor: Snowflake?
     private var privateKey: Curve25519.KeyAgreement.PrivateKey?
-    /// Decrypted text by message ID (nil: couldn't be read). Cleared when keys change.
-    private var plaintexts: [Snowflake: String?] = [:]
+    /// A private message as opened: its text (with any warning lines), its images, and whether its sender's key
+    /// is trusted (images from a key that isn't aren't decoded).
+    private struct Opened {
+        let text: String
+        let files: [PrivateFile]
+        let trusted: Bool
+    }
+
+    /// Opened private messages by ID (nil: couldn't be read). Cleared when keys change.
+    private var opened: [Snowflake: Opened?] = [:]
     private var seenHandshakes: Set<Snowflake> = []
     /// People who sent a handshake we haven't agreed to yet.
     private(set) var requests: Set<Snowflake> = []
@@ -184,7 +192,7 @@ final class PrivateChatController {
     /// After keys were accepted, rejected or approved: messages are read again with the new set.
     private func keysChanged(in channelID: Snowflake?) {
         saveDirectory()
-        plaintexts = [:]
+        opened = [:]
         firstWithSalt = [:]
         onChange?(channelID)
         NotificationCenter.default.post(name: Self.devicesDidChange, object: self)
@@ -402,7 +410,7 @@ final class PrivateChatController {
 
     /// The message content for `text`, sealed to the other person's accepted keys, to us and our approved Macs.
     /// Keys still waiting to be accepted or approved get nothing.
-    func seal(_ text: String, in channelID: Snowflake) throws -> String {
+    func seal(_ text: String, files: [PrivateFile] = [], in channelID: Snowflake) throws -> String {
         guard #available(macOS 14, *), let peer = peer(in: channelID), let key = loadIfNeeded(create: true) else {
             throw PrivateMessagingError.noRecipients
         }
@@ -410,7 +418,7 @@ final class PrivateChatController {
         guard !theirs.isEmpty else { throw PrivateMessagingError.noRecipients }
         let recipients = (theirs + ownKeys)
             .compactMap { try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: $0) }
-        return try PrivateCrypto.seal(text, channelID: channelID, sender: key, recipients: recipients)
+        return try PrivateCrypto.seal(text, files: files, channelID: channelID, sender: key, recipients: recipients)
     }
 
     /// The text of a private message, or nil if it isn't one or can't be read with our key. A copy that Discord
@@ -422,31 +430,50 @@ final class PrivateChatController {
 
     /// The same for a message known only by its parts (the message a reply quotes).
     func plaintext(content: String, id: Snowflake, authorID: Snowflake, channelID: Snowflake) -> String? {
-        if let cached = plaintexts[id] { return cached }
+        open(content: content, id: id, authorID: authorID, channelID: channelID)?.text
+    }
+
+    /// The images in a private message, matched to its attachments. Empty if it has none or can't be read.
+    func images(of message: Message) -> [PrivateImage] {
+        guard let opened = open(content: message.content, id: message.id, authorID: message.author.id,
+                                channelID: message.channelId) else { return [] }
+        return opened.files.enumerated().map { index, file in
+            // The attachment at the same position, if it's the size this image's attachment must be.
+            let attachment = message.attachments.indices.contains(index) ? message.attachments[index] : nil
+            let matches = attachment.map { $0.size == nil || $0.size == file.sealedLength } ?? false
+            return PrivateImage(messageID: message.id, index: index, file: file,
+                                attachment: matches ? attachment : nil, trusted: opened.trusted)
+        }
+    }
+
+    private func open(content: String, id: Snowflake, authorID: Snowflake, channelID: Snowflake) -> Opened? {
+        if let cached = opened[id] { return cached }
         guard #available(macOS 14, *), case .encrypted(let payload) = PrivateMessaging.kind(of: content),
               let key = loadIfNeeded() else { return nil }
         let fromMe = authorID == store.me?.id
         let trusted = fromMe ? ownKeys : directory.keys(of: authorID, .accepted)
         let waiting = fromMe ? directory.deviceKeys(.pending) : directory.keys(of: authorID, .pending)
-        func open(_ senders: [Data]) -> PrivateCrypto.Opened? {
+        func attempt(_ senders: [Data]) -> PrivateCrypto.Opened? {
             PrivateCrypto.open(payload, channelID: channelID, recipient: key,
                                senders: senders.compactMap { try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: $0) })
         }
         var warnings: [String] = []
-        var opened = open(trusted)
-        if opened == nil, !waiting.isEmpty, let fromWaiting = open(waiting) {
-            opened = fromWaiting
+        var result = attempt(trusted)
+        let isTrusted = result != nil
+        if result == nil, !waiting.isEmpty, let fromWaiting = attempt(waiting) {
+            result = fromWaiting
             warnings.append(fromMe ? "⚠️ *Sent from a Mac you haven't approved in Settings.*"
                                    : "⚠️ *Sent from a new key you haven't accepted. It may not be them.*")
         }
-        var text = opened?.text
-        if let opened {
-            if let warning = replayWarning(opened, id: id) { warnings.append(warning) }
-            if !warnings.isEmpty { text = warnings.joined(separator: "\n") + "\n" + opened.text }
+        var shown: Opened?
+        if let result {
+            if let warning = replayWarning(result, id: id) { warnings.append(warning) }
+            let lines = warnings + (result.text.isEmpty ? [] : [result.text])
+            shown = Opened(text: lines.joined(separator: "\n"), files: result.files, trusted: isTrusted)
         }
-        if plaintexts.count > 2000 { plaintexts = [:] }
-        plaintexts[id] = text
-        return text
+        if opened.count > 2000 { opened = [:] }
+        opened[id] = shown
+        return shown
     }
 
     /// Ten minutes covers clocks that are a little off and messages that took a while to send.
@@ -459,7 +486,7 @@ final class PrivateChatController {
                 return "⚠️ *A copy of an earlier private message. Discord may have resent it.*"
             }
             // This one is older: it's the original, and the one seen first is the copy; redraw that one.
-            plaintexts[first] = nil
+            self.opened[first] = nil
         }
         firstWithSalt[opened.salt] = id
         let posted = Self.date(of: id)
@@ -469,4 +496,20 @@ final class PrivateChatController {
         }
         return nil
     }
+}
+
+/// An encrypted image in a private message, as the message list shows it.
+struct PrivateImage {
+    let messageID: Snowflake
+    /// Its position among the message's images (and attachments).
+    let index: Int
+    let file: PrivateFile
+    /// The attachment carrying it, or nil if the message has none of the right size there.
+    let attachment: Attachment?
+    /// Sent from an accepted key (or one of our approved Macs). Others' images aren't downloaded or decoded.
+    let trusted: Bool
+
+    var cacheKey: String { "\(messageID)/\(index)" }
+    /// Stands for the image where the message list keys things by URL; never fetched.
+    var placeholderURL: URL { URL(string: "duhcord-private://image/\(messageID)/\(index)")! }
 }

@@ -184,7 +184,8 @@ public final class DiscordSession: GatewayClientDelegate {
         Task { try? await rest.sendTyping(channelID: channelID) }
     }
 
-    public func send(_ content: String, to channelID: Snowflake, completion: @escaping (Error?) -> Void) {
+    /// Sends a message, with `files` (encrypted images) as its attachments.
+    public func send(_ content: String, files: [Data] = [], to channelID: Snowflake, completion: @escaping (Error?) -> Void) {
         // Sending ends our typing indicator on Discord's side; the next keystroke starts a fresh one.
         lastTypingSent[channelID] = nil
         // A snowflake-shaped nonce from the current time; clamped so a clock set before 2015 can't trap.
@@ -192,7 +193,7 @@ public final class DiscordSession: GatewayClientDelegate {
         Task { @MainActor in
             do {
                 // The gateway echoes the message back as MESSAGE_CREATE, which adds it to the store.
-                try await rest.sendMessage(content, to: channelID, nonce: nonce)
+                try await rest.sendMessage(content, to: channelID, nonce: nonce, files: files)
                 completion(nil)
             } catch {
                 reportIfUnreachable(error)
