@@ -25,8 +25,8 @@ A small, native Discord client for macOS, written in Swift with AppKit: no Elect
 | ⌘K | Jump to a channel or DM |
 | ⌘F | Search the conversation |
 | ⌥⌘P | Switch a DM between Standard and Private |
-| ⌥↑ / ⌥↓ | Previous / next channel |
-| ⌥⇧↓ | Next unread channel |
+| ⌥⌘↑ / ⌥⌘↓ | Previous / next channel |
+| ⌥⇧⌘↓ | Next unread channel |
 | ⇧⌘M / ⇧⌘D | Mute / deafen in a call |
 | Return | Join the selected voice channel, or open the selected person's profile |
 | ⌃⌘S | Show or hide the sidebar |
