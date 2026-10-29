@@ -336,20 +336,17 @@ public final class Store {
             handleNewMessage(message)
 
         case .messageUpdate(let update):
-            guard var list = messageCache[update.channelId],
-                  let i = list.firstIndex(where: { $0.id == update.id }) else { return }
-            if let content = update.content { list[i].content = content }
-            if let edited = update.editedTimestamp { list[i].editedTimestamp = edited }
-            if let attachments = update.attachments { list[i].attachments = attachments }
-            if let embeds = update.embeds { list[i].embeds = embeds }
-            list[i].revision += 1
-            messageCache[update.channelId] = list
+            guard let i = messageCache[update.channelId]?.firstIndex(where: { $0.id == update.id }) else { return }
+            if let content = update.content { messageCache[update.channelId]?[i].content = content }
+            if let edited = update.editedTimestamp { messageCache[update.channelId]?[i].editedTimestamp = edited }
+            if let attachments = update.attachments { messageCache[update.channelId]?[i].attachments = attachments }
+            if let embeds = update.embeds { messageCache[update.channelId]?[i].embeds = embeds }
+            messageCache[update.channelId]?[i].revision += 1
             onChange?(.messages(channelID: update.channelId))
 
         case .messageDelete(let deleted):
-            guard var list = messageCache[deleted.channelId] else { return }
-            list.removeAll { $0.id == deleted.id }
-            messageCache[deleted.channelId] = list
+            guard messageCache[deleted.channelId] != nil else { return }
+            messageCache[deleted.channelId]?.removeAll { $0.id == deleted.id }
             onChange?(.messages(channelID: deleted.channelId))
 
         case .channelUnreadUpdate(let update):
@@ -390,6 +387,7 @@ public final class Store {
                 if let user = member.user { remember(user) }
             }
             for presence in chunk.presences {
+                guard presences[presence.userID] != presence || presence.status == .offline else { continue }
                 setPresence(presence)
                 onChange?(.presence(userID: presence.userID))
             }
@@ -462,13 +460,12 @@ public final class Store {
             if channel.isPrivate { privateChannelCache = nil }
         }
 
-        if var list = messageCache[id], !list.contains(where: { $0.id == message.id }) {
-            list.append(message)
-            if list.count > maxMessagesPerChannel {
-                list.removeFirst(list.count - maxMessagesPerChannel)
+        if messageCache[id]?.contains(where: { $0.id == message.id }) == false {
+            messageCache[id]?.append(message)
+            if let count = messageCache[id]?.count, count > maxMessagesPerChannel {
+                messageCache[id]?.removeFirst(count - maxMessagesPerChannel)
                 fullyLoaded.remove(id)
             }
-            messageCache[id] = list
             onChange?(.messages(channelID: id))
         }
 

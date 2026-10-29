@@ -1035,6 +1035,19 @@ final class ProfileTests: XCTestCase {
         XCTAssertNil(store.presence(of: "5"))
         XCTAssertEqual(changes, [.presence(userID: "5")])
     }
+
+    func testUnchangedPresenceInChunkDoesNotNotify() throws {
+        let store = Store()
+        store.apply(.presenceUpdate(Presence(userID: "5", status: .online, activities: [])))
+        var changes: [Store.Change] = []
+        store.onChange = { changes.append($0) }
+        let chunk = """
+        {"guild_id": "100", "members": [],
+         "presences": [{"user": {"id": "5"}, "status": "online", "activities": []}]}
+        """
+        store.apply(.guildMembersChunk(try makeDiscordDecoder().decode(GuildMembersChunk.self, from: Data(chunk.utf8))))
+        XCTAssertFalse(changes.contains(.presence(userID: "5")))
+    }
 }
 
 extension StoreTests {

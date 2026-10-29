@@ -63,7 +63,7 @@ enum MessageLayoutBuilder {
     private static let pad: CGFloat = 10
 
     static func build(message: Message, grouped: Bool, cellWidth: CGFloat, sidePadding: CGFloat, headerHeight: CGFloat,
-                      topPadding: CGFloat, bottomPadding: CGFloat, resolver: Markdown.Resolver,
+                      scale: CGFloat, topPadding: CGFloat, bottomPadding: CGFloat, resolver: Markdown.Resolver,
                       privateImages: [PrivateImage] = []) -> MessageLayout {
         let mode = Settings.mediaPreviews
         let showMedia = mode != .off
@@ -75,7 +75,6 @@ enum MessageLayoutBuilder {
         var y = topPadding
 
         if !grouped {
-            let scale = NSScreen.main?.backingScaleFactor ?? 2
             layout.avatar = (NSRect(x: sidePadding, y: y + 2, width: avatarSize, height: avatarSize),
                              MediaRequest.avatarURL(for: message.author, pixels: Int(avatarSize * scale)))
             layout.header = NSRect(x: x, y: y, width: width, height: headerHeight)
@@ -98,12 +97,13 @@ enum MessageLayoutBuilder {
                 // Proxy first; some uploads are only served from Discord's file CDN.
                 kind = .video([attachment.proxyUrl, attachment.url].compactMap { $0.flatMap(URL.init(string:)) })
             } else if attachment.isGIF {
-                kind = .gif(request(attachment.proxyUrl, size: size, format: nil))
+                kind = .gif(request(attachment.proxyUrl, size: size, scale: scale, format: nil))
             } else {
                 kind = .image
             }
             layout.media.append(MessageLayout.Media(
-                frame: NSRect(origin: NSPoint(x: x, y: y), size: size), request: request(attachment.proxyUrl, size: size),
+                frame: NSRect(origin: NSPoint(x: x, y: y), size: size),
+                request: request(attachment.proxyUrl, size: size, scale: scale),
                 open: URL(string: attachment.url), gated: mode == .onClick || attachment.isSpoiler,
                 label: attachment.isSpoiler ? "Spoiler · click to show" : (mode == .onClick ? "Click to load" : nil),
                 kind: kind, externalVideo: false))
@@ -142,7 +142,8 @@ enum MessageLayoutBuilder {
                 let size = fit(picture.width ?? embed.video?.width, picture.height ?? embed.video?.height, max: box)
                 y += 6
                 layout.media.append(MessageLayout.Media(
-                    frame: NSRect(origin: NSPoint(x: x, y: y), size: size), request: request(picture.proxyUrl, size: size),
+                    frame: NSRect(origin: NSPoint(x: x, y: y), size: size),
+                    request: request(picture.proxyUrl, size: size, scale: scale),
                     open: (embed.url ?? picture.url).flatMap(URL.init(string:)), gated: mode == .onClick,
                     label: mode == .onClick ? "Click to load" : nil,
                     kind: stream.map { .loopingVideo([$0]) } ?? .image, externalVideo: embed.isVideo && stream == nil))
@@ -169,7 +170,8 @@ enum MessageLayoutBuilder {
                 let size = fit(small.width, small.height, max: NSSize(width: thumbnailSize, height: thumbnailSize))
                 let frame = NSRect(x: x + boxWidth - pad - size.width, y: boxTop + pad, width: size.width, height: size.height)
                 layout.media.append(MessageLayout.Media(
-                    frame: frame, request: request(small.proxyUrl, size: size), open: (embed.url ?? small.url).flatMap(URL.init(string:)),
+                    frame: frame, request: request(small.proxyUrl, size: size, scale: scale),
+                    open: (embed.url ?? small.url).flatMap(URL.init(string:)),
                     gated: mode == .onClick, label: nil, kind: .image, externalVideo: false))
                 cursor = max(cursor, frame.maxY)
             }
@@ -178,7 +180,8 @@ enum MessageLayoutBuilder {
                 if text.length > 0 { cursor += 8 }
                 let kind: MessageLayout.Media.Kind = stream.map { embed.type == "gifv" ? .loopingVideo([$0]) : .video([$0]) } ?? .image
                 layout.media.append(MessageLayout.Media(
-                    frame: NSRect(origin: NSPoint(x: textX, y: cursor), size: size), request: request(large.proxyUrl, size: size),
+                    frame: NSRect(origin: NSPoint(x: textX, y: cursor), size: size),
+                    request: request(large.proxyUrl, size: size, scale: scale),
                     open: (embed.url ?? large.url).flatMap(URL.init(string:)), gated: mode == .onClick,
                     label: mode == .onClick ? "Click to load" : nil, kind: kind, externalVideo: embed.isVideo && stream == nil))
                 cursor += size.height
@@ -204,9 +207,8 @@ enum MessageLayoutBuilder {
         return NSSize(width: max(1, size.width), height: max(1, size.height))
     }
 
-    private static func request(_ proxy: String?, size: NSSize, format: String? = "webp") -> URL? {
+    private static func request(_ proxy: String?, size: NSSize, scale: CGFloat, format: String? = "webp") -> URL? {
         guard let proxy else { return nil }
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
         return MediaRequest.url(proxy: proxy, pixelWidth: Int((size.width * scale).rounded()),
                                 pixelHeight: Int((size.height * scale).rounded()), format: format)
     }
@@ -325,8 +327,9 @@ final class MediaView: NSView, Playable {
 
     private func load(_ request: URL) {
         let size = bounds.size == .zero ? item?.frame.size ?? .zero : bounds.size
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         if case .privateImage(let image)? = item?.kind {
-            token = PrivateImageLoader.shared.load(image, pointSize: size) { [weak self] loaded in
+            token = PrivateImageLoader.shared.load(image, pointSize: size, scale: scale) { [weak self] loaded in
                 guard let self, self.item?.request == request else { return }
                 self.token = nil
                 self.still = loaded
@@ -336,7 +339,7 @@ final class MediaView: NSView, Playable {
             }
             return
         }
-        token = MediaLoader.shared.load(request, pointSize: size) { [weak self] image in
+        token = MediaLoader.shared.load(request, pointSize: size, scale: scale) { [weak self] image in
             guard let self, self.item?.request == request else { return }
             self.token = nil
             self.still = image
