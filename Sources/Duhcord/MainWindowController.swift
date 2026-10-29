@@ -482,8 +482,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             group.label = "Messages"
             group.autovalidates = false
             group.subitems.forEach { $0.autovalidates = false }
-            group.subitems.last?.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)
-            group.setAccessibilityLabel("Private messaging")
+            group.subitems.last?.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: "Private")
             privateModeItem = group
             refreshPrivateModeItem()
             return group
