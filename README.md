@@ -107,11 +107,13 @@ Each attempt uses a new encryption key that exists only in memory. Discord sends
 
 ### More than one account
 
-**Duhcord → Switch Account → Add Account…** logs in another account by QR code, up to five, as in Discord's own app. Switch between them from the same menu (⌃⌘1 to ⌃⌘5) or in **Settings**. One account is connected at a time: switching ends any call and connects the other account, which takes a moment. Each account's token is its own Keychain item, and **Log Out** (in the menu, or per account in Settings) revokes only that account's token. Discord can tell that accounts used from the same Mac belong together, as it can with its own app.
+**Duhcord → Switch Account → Add Account…** logs in another account by QR code, up to five, as in Discord's own app. Switch between them from the same menu (⌃⌘1 to ⌃⌘5) or in **Settings**. One account is connected at a time: switching ends any call and connects the other account, which takes a moment. Every account's token is kept in the one Keychain item described under [Updates](#updates), and **Log Out** (in the menu, or per account in Settings) revokes only that account's token. Discord can tell that accounts used from the same Mac belong together, as it can with its own app.
 
 ## Updates
 
 Duhcord checks GitHub for a new release shortly after launch and then once a day; turn this off under **Settings → Updates**. When one is available, an **Update** button appears in the toolbar. Nothing installs until you confirm, and Duhcord then relaunches.
+
+Saved logins and private-messaging keys are one Keychain item. After an update macOS asks for your login password once so the new build can read it, then Duhcord re-saves the item and doesn't ask again until the next update. The first launch after a build that kept each login in its own item asks once per item while those are combined. Touch ID can't authorize this prompt: that needs an Apple Developer ID, and Duhcord's updates are signed with its own certificate.
 
 `update.json` carries an expiry that the refresh workflow renews monthly. If it expires, Duhcord says it couldn't confirm it's up to date; it still offers a newer signed version.
 
@@ -149,7 +151,7 @@ Release builds are signed with the self-signed **Duhcord Release Signing** certi
 - **macOS 15 and later:** open it once, then click **Open Anyway** in **System Settings → Privacy & Security**.
 - **macOS 13–14:** right-click the app and choose **Open**.
 
-The certificate keeps updates on the same identity, so the Keychain doesn't ask again. To check that a copy is genuine, its fingerprint must match `signing/certificate.sha256`:
+The certificate keeps updates on the same signing identity, which is what the check below compares. Keychain access follows each build's code hash, so an update still asks once, as described under [Updates](#updates). To check that a copy is genuine, its fingerprint must match `signing/certificate.sha256`:
 
 ```sh
 cd /tmp && codesign -d --extract-certificates /Applications/Duhcord.app && shasum -a 256 codesign0

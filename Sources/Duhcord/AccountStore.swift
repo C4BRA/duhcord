@@ -3,9 +3,9 @@ import DuhcordCore
 
 /// The accounts saved on this Mac, for switching between them (up to five, as in Discord's own app).
 ///
-/// Each account's token is its own login-keychain item, named by the account's ID. The list itself (ID, name,
-/// picture, which one was last used) is one more keychain item, so nothing about the accounts is written
-/// anywhere else. Only one account is connected at a time.
+/// Tokens and the account list (ID, name, picture, which one was last used) live in the one login-keychain
+/// item Keychain keeps, so nothing about the accounts is written anywhere else. Only one account is
+/// connected at a time.
 @MainActor
 enum AccountStore {
     static let maxAccounts = 5
@@ -29,24 +29,45 @@ enum AccountStore {
         var current: Snowflake?
     }
 
-    private static let tokenService = "com.duhcord.token"
-    private static let listService = "com.duhcord.accounts"
-    private static let listAccount = "list"
+    private static let tokenService = Keychain.tokenService
+    private static let listService = Keychain.accountListService
+    private static let listAccount = Keychain.accountListAccount
     /// Where builds before account switching kept their one token.
-    private static let legacyAccount = "default"
+    private static let legacyAccount = Keychain.legacyTokenAccount
 
     /// Read from the keychain once, then kept in memory; menus ask for it every time they're checked.
     private static var cached: Saved?
+    /// The password dialog was cancelled. Stay empty for this launch rather than writing that over the vault.
+    private static var unavailable = false
 
     private static var saved: Saved {
         get {
+            if unavailable { return Saved() }
             if let cached { return cached }
-            let loaded = Keychain.data(service: listService, account: listAccount)
-                .flatMap { try? JSONDecoder().decode(Saved.self, from: $0) } ?? Saved()
-            cached = loaded
-            return loaded
+            switch Keychain.read(service: listService, account: listAccount) {
+            case .value(let data):
+                let loaded = (try? JSONDecoder().decode(Saved.self, from: data)) ?? Saved()
+                cached = loaded
+                // The account on screen first, so cancelling a later prompt still leaves this launch a token.
+                var ids = loaded.accounts.map(\.id)
+                if let current = loaded.current, let index = ids.firstIndex(of: current) {
+                    ids.remove(at: index)
+                    ids.insert(current, at: 0)
+                }
+                Keychain.foldLegacyAccounts(ids)
+                return loaded
+            case .missing:
+                let loaded = Saved()
+                cached = loaded
+                Keychain.foldLegacyAccounts([])
+                return loaded
+            case .denied:
+                unavailable = true
+                return Saved()
+            }
         }
         set {
+            if unavailable { return }
             cached = newValue
             guard let data = try? JSONEncoder().encode(newValue) else { return }
             Keychain.setData(data, service: listService, account: listAccount)

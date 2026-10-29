@@ -133,8 +133,8 @@ final class PrivateChatController {
         var unansweredRequest = false
     }
 
-    private static let keyService = "com.duhcord.private-key"
-    private static let directoryService = "com.duhcord.private-directory"
+    private static let keyService = Keychain.privateKeyService
+    private static let directoryService = Keychain.privateDirectoryService
     /// New keys waiting per person; more are ignored rather than pushing out the ones already there.
     private static let maxPendingKeys = 4
 

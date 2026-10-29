@@ -384,7 +384,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
             AccountStore.remove(id)
         } else if let token = sessionToken, AccountStore.launchToken() == token {
             // A token from an older build that never reached READY.
-            Keychain.delete(service: "com.duhcord.token", account: "default")
+            Keychain.delete(service: Keychain.tokenService, account: Keychain.legacyTokenAccount)
         }
         sessionToken = nil
         sessionAccountID = nil
