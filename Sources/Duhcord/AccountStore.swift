@@ -34,12 +34,19 @@ enum AccountStore {
     /// Where builds before account switching kept their one token.
     private static let legacyAccount = "default"
 
+    /// Read from the keychain once, then kept in memory; menus ask for it every time they're checked.
+    private static var cached: Saved?
+
     private static var saved: Saved {
         get {
-            Keychain.data(service: listService, account: listAccount)
+            if let cached { return cached }
+            let loaded = Keychain.data(service: listService, account: listAccount)
                 .flatMap { try? JSONDecoder().decode(Saved.self, from: $0) } ?? Saved()
+            cached = loaded
+            return loaded
         }
         set {
+            cached = newValue
             guard let data = try? JSONEncoder().encode(newValue) else { return }
             Keychain.setData(data, service: listService, account: listAccount)
         }

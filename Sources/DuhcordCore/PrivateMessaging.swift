@@ -41,10 +41,13 @@ public enum PrivateMessaging {
         case encrypted(payload: Data)
     }
 
-    /// What a message is, from its last line.
+    /// What a message is, from its last line. Cheap for ordinary messages: only the last line is looked at, and
+    /// nothing is decoded unless it starts with the prefix.
     public static func kind(of content: String) -> Kind {
-        guard let last = content.split(separator: "\n", omittingEmptySubsequences: true).last, last.hasPrefix(prefix),
-              let data = DenseText.decode(last.dropFirst(prefix.count)), let type = data.first else { return .plain }
+        let start = content.lastIndex(of: "\n").map { content.index(after: $0) } ?? content.startIndex
+        let last = content[start...]
+        guard last.hasPrefix(prefix), let data = DenseText.decode(last.dropFirst(prefix.count)),
+              let type = data.first else { return .plain }
         switch type {
         case handshakeType where data.count == 34:
             return .handshake(key: Data(data[2..<34]), wantsReply: data[1] & 1 != 0)
@@ -106,8 +109,8 @@ public enum PrivateMessagingError: Error, LocalizedError, Equatable {
 ///
 /// Wire format (then DenseText):
 ///
-///     21 | flags (1) | sender key ID (4) | salt (16) | n (1) | n × [key ID (4) | encapsulated key (32) | wrapped key (32)]
-///        | ChaCha20-Poly1305 ciphertext | tag (16)
+///     21 | flags (1) | sender key ID (4) | sent at (4) | salt (16) | n (1)
+///        | n × [key ID (4) | encapsulated key (32) | wrapped key (32)] | ChaCha20-Poly1305 ciphertext | tag (16)
 ///
 /// - The message key is derived from the sender's own private key and the random salt (HKDF-SHA256), so the
 ///   sender can always re-derive it to read what they sent, and it's different for every message.
@@ -117,11 +120,22 @@ public enum PrivateMessagingError: Error, LocalizedError, Equatable {
 /// - The body is encrypted with the message key. The key is never reused, so the nonce is fixed (zero), and
 ///   everything before the body is authenticated with it, so the recipient list and flags can't be altered.
 /// - Flags bit 0: the text was compressed (raw DEFLATE) before being padded and encrypted.
+/// - "Sent at" is when the sender sealed it (Unix seconds), authenticated with the rest, so a copy Discord
+///   reposts later can be recognised by the gap between this and the copy's own time.
 @available(macOS 14, *)
 public enum PrivateCrypto {
     private static let suite = HPKE.Ciphersuite.Curve25519_SHA256_ChachaPoly
     private static let entrySize = 4 + 32 + 32
-    private static let fixedHeader = 1 + 1 + 4 + 16 + 1
+    private static let fixedHeader = 1 + 1 + 4 + 4 + 16 + 1
+
+    /// An opened private message.
+    public struct Opened: Equatable {
+        public let text: String
+        /// When the sender sealed it.
+        public let sentAt: Date
+        /// Unique to the message: a second message with the same salt is a copy of the first.
+        public let salt: Data
+    }
     private static let exportContext = Data("duhcord-message-key".utf8)
     private static let zeroNonce = try! ChaChaPoly.Nonce(data: Data(count: 12))
 
@@ -136,7 +150,7 @@ public enum PrivateCrypto {
     /// The full message content for `text`: the note line and the sealed data. The sender's own key in
     /// `recipients` is skipped (the sender re-derives the message key instead).
     public static func seal(_ text: String, channelID: Snowflake, sender: Curve25519.KeyAgreement.PrivateKey,
-                            recipients: [Curve25519.KeyAgreement.PublicKey]) throws -> String {
+                            recipients: [Curve25519.KeyAgreement.PublicKey], now: Date = Date()) throws -> String {
         let own = sender.publicKey.rawRepresentation
         var unique: [Data: Curve25519.KeyAgreement.PublicKey] = [:]
         for key in recipients where key.rawRepresentation != own { unique[key.rawRepresentation] = key }
@@ -152,6 +166,8 @@ public enum PrivateCrypto {
 
         var header = Data([PrivateMessaging.messageType, compressed == nil ? 0 : 1])
         header.append(PrivateMessaging.keyID(own))
+        let seconds = UInt32(clamping: Int(now.timeIntervalSince1970))
+        header.append(contentsOf: [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: seconds >> $0) })
         header.append(salt)
         header.append(UInt8(keys.count))
         for recipient in keys {
@@ -170,36 +186,38 @@ public enum PrivateCrypto {
 
     /// The text of a private message, if it was sealed to `recipient` (or by it) by one of `senders` in this channel.
     public static func open(_ payload: Data, channelID: Snowflake, recipient: Curve25519.KeyAgreement.PrivateKey,
-                            senders: [Curve25519.KeyAgreement.PublicKey]) -> String? {
+                            senders: [Curve25519.KeyAgreement.PublicKey]) -> Opened? {
         let data = Data(payload)
         guard data.count > fixedHeader, data[0] == PrivateMessaging.messageType else { return nil }
         let flags = data[1]
         let senderID = data[2..<6]
-        let salt = data[6..<22]
-        let count = Int(data[22])
+        let sentAt = data[6..<10].reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+        let salt = data[10..<26]
+        let count = Int(data[26])
         let headerEnd = fixedHeader + count * entrySize
         guard count <= PrivateMessaging.maxRecipients, data.count >= headerEnd + 16 else { return nil }
 
         let myID = PrivateMessaging.keyID(recipient.publicKey.rawRepresentation)
-        let key: SymmetricKey
-        if senderID == myID {
-            // Our own message: re-derive its key.
-            key = messageKey(recipient, salt: salt, channelID: channelID)
-        } else {
-            guard let sender = senders.first(where: { PrivateMessaging.keyID($0.rawRepresentation) == senderID }),
-                  let start = (0..<count).map({ fixedHeader + $0 * entrySize }).first(where: { data[$0..<($0 + 4)] == myID }),
-                  let hpke = try? HPKE.Recipient(privateKey: recipient, ciphersuite: suite, info: info(channelID: channelID),
-                                                 encapsulatedKey: data[(start + 4)..<(start + 36)], authenticatedBy: sender),
-                  let mask = try? hpke.exportSecret(context: exportContext, outputByteCount: 32).withUnsafeBytes({ Data($0) })
-            else { return nil }
-            key = SymmetricKey(data: Data(zip(data[(start + 36)..<(start + entrySize)], mask).map { $0 ^ $1 }))
+        // Possible message keys: re-derived for our own message, else one per sender key with this ID (an ID
+        // shared by a planted key can't hide the real sender's key).
+        var keys: [SymmetricKey] = []
+        if senderID == myID { keys.append(messageKey(recipient, salt: salt, channelID: channelID)) }
+        if let start = (0..<count).map({ fixedHeader + $0 * entrySize }).first(where: { data[$0..<($0 + 4)] == myID }) {
+            for sender in senders where PrivateMessaging.keyID(sender.rawRepresentation) == senderID {
+                guard let hpke = try? HPKE.Recipient(privateKey: recipient, ciphersuite: suite, info: info(channelID: channelID),
+                                                     encapsulatedKey: data[(start + 4)..<(start + 36)], authenticatedBy: sender),
+                      let mask = try? hpke.exportSecret(context: exportContext, outputByteCount: 32).withUnsafeBytes({ Data($0) })
+                else { continue }
+                keys.append(SymmetricKey(data: Data(zip(data[(start + 36)..<(start + entrySize)], mask).map { $0 ^ $1 })))
+            }
         }
         guard let box = try? ChaChaPoly.SealedBox(nonce: zeroNonce, ciphertext: data[headerEnd..<(data.count - 16)],
                                                   tag: data[(data.count - 16)...]),
-              let padded = try? ChaChaPoly.open(box, using: key, authenticating: data[0..<headerEnd]),
+              let padded = keys.lazy.compactMap({ try? ChaChaPoly.open(box, using: $0, authenticating: data[0..<headerEnd]) }).first,
               let inner = unpad(padded) else { return nil }
-        let text = flags & 1 != 0 ? Deflate.decompress(inner, limit: PrivateMessaging.maxPlaintext) : inner
-        return text.flatMap { String(data: $0, encoding: .utf8) }
+        let bytes = flags & 1 != 0 ? Deflate.decompress(inner, limit: PrivateMessaging.maxPlaintext) : inner
+        guard let text = bytes.flatMap({ String(data: $0, encoding: .utf8) }) else { return nil }
+        return Opened(text: text, sentAt: Date(timeIntervalSince1970: TimeInterval(sentAt)), salt: Data(salt))
     }
 
     /// Two-byte length, then zero padding to the next block.

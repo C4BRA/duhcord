@@ -289,7 +289,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         }
     }
 
-    private var isLocked: Bool { mainWindow?.isLocked ?? false }
+    /// Locked behind the main window's Retry sheet, or the login window's Retry while no main window is open.
+    private var isLocked: Bool { mainWindow?.isLocked ?? loginWindow?.isLocked ?? false }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {

@@ -11,6 +11,9 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
     private var mode: Mode = .idle
     private var retryAction: (() -> Void)?
 
+    /// Showing "can't reach Discord" with only Retry: the app is locked, as it is behind the main window's sheet.
+    var isLocked: Bool { mode == .failed && retryAction != nil }
+
     private let qrView = NSImageView()
     private let status = NSTextField(wrappingLabelWithString: "")
     private let note = NSTextField(wrappingLabelWithString: "")

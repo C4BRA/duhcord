@@ -388,7 +388,8 @@ public struct Embed: Decodable, Hashable {
 public struct ReferencedMessage: Decodable, Hashable {
     public let id: Snowflake
     public let author: User
-    public let content: String
+    /// Replaced for display when it's a private message (see MessagesViewController).
+    public var content: String
 }
 
 public struct Message: Decodable, Equatable {
@@ -403,7 +404,7 @@ public struct Message: Decodable, Equatable {
     public var embeds: [Embed]
     public let mentions: [User]?
     public let mentionEveryone: Bool?
-    public let referencedMessage: ReferencedMessage?
+    public var referencedMessage: ReferencedMessage?
     /// Bumped by the store whenever an edit or a late link preview changes the message, so the UI can key its
     /// layout cache on (id, revision) instead of hashing the content.
     public internal(set) var revision = 0

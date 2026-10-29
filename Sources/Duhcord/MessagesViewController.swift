@@ -177,6 +177,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     func show(channelID: Snowflake?) {
         guard channelID != self.channelID else { return }
         self.channelID = channelID
+        olderPagesForPrivate = 0
         layoutCache = [:]
 
         refreshInput()
@@ -185,6 +186,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         table.reloadData()
         scrollToBottom()
         updateEmptyState()
+        findOlderPrivateMessages()
         input.focus()
     }
 
@@ -198,7 +200,9 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 input.placeholder = ready ? "Private message to @\(channel.displayName)" : "Waiting for @\(channel.displayName)…"
                 input.isEnabled = ready
             } else {
-                input.placeholder = channel.isPrivate ? "Message @\(channel.displayName)" : "Message #\(channel.displayName)"
+                var placeholder = channel.isPrivate ? "Message @\(channel.displayName)" : "Message #\(channel.displayName)"
+                if case .ready = privateChat?.status(for: channelID) { placeholder += " (not encrypted)" }
+                input.placeholder = placeholder
                 input.isEnabled = true
             }
         } else {
@@ -209,13 +213,49 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     // MARK: - Private messaging
 
+    /// Pages of older history fetched to find private messages, since this DM was opened in Private.
+    private var olderPagesForPrivate = 0
+    /// Enough to look through the last 300 messages (six pages) without ever loading a whole history.
+    private static let maxOlderPagesForPrivate = 6
+
+    /// In Private, private messages can be few and far between: when fewer than a screenful are loaded,
+    /// older history is fetched (a page at a time, up to six pages) to find more.
+    private func findOlderPrivateMessages() {
+        guard isPrivate, filterText.isEmpty, rows.count < 20, let channelID, store.messages(in: channelID) != nil,
+              !store.hasReachedStart(of: channelID), !session.isLoading(channelID),
+              olderPagesForPrivate < Self.maxOlderPagesForPrivate else { return }
+        olderPagesForPrivate += 1
+        session.loadOlder(channelID: channelID)
+        updateEmptyState()
+    }
+
+    /// What the Private view says when it has nothing to show.
+    private var privateEmptyText: String? {
+        guard isPrivate, let channelID else { return nil }
+        if session.isLoading(channelID) { return "Looking for earlier private messages…" }
+        if store.hasReachedStart(of: channelID) { return "No Private Messages Yet" }
+        let count = store.messages(in: channelID)?.count ?? 0
+        return "No private messages in the last \(count) messages"
+    }
+
     /// A message as shown: private messages decrypted in the Private view and folded to one line elsewhere,
     /// handshakes as a short note. Everything else unchanged.
     private func displayed(_ message: Message) -> Message {
         var shown = message
+        // A reply quoting a private message shows it like the message itself, not as the encrypted block.
+        if let reply = message.referencedMessage {
+            switch PrivateMessaging.kind(of: reply.content) {
+            case .plain: break
+            case .handshake: shown.referencedMessage?.content = "🔒 Offer to chat privately"
+            case .encrypted:
+                let text = isPrivate ? privateChat?.plaintext(content: reply.content, id: reply.id, authorID: reply.author.id,
+                                                              channelID: message.channelId) : nil
+                shown.referencedMessage?.content = text ?? "🔒 Private message"
+            }
+        }
         switch PrivateMessaging.kind(of: message.content) {
         case .plain:
-            return message
+            return shown
         case .handshake:
             shown.content = message.author.id == store.me?.id ? "🔒 *You offered to chat privately.*" : "🔒 *Wants to chat privately.*"
         case .encrypted:
@@ -230,6 +270,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     /// A key arrived, the mode switched or a request came in: redraw for it.
     func privateChanged() {
+        olderPagesForPrivate = 0
         layoutCache = [:]
         rebuildRows()
         table.reloadData()
@@ -237,6 +278,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         updateEmptyState()
         refreshInput()
         refreshPrivateBar()
+        findOlderPrivateMessages()
     }
 
     private enum BarAction { case none, verify, accept }
@@ -267,6 +309,10 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             }
         } else if privateChat.hasRequest(in: channelID) {
             setPrivateBar("\(name) wants to chat privately.", tone: .info, action: "Chat Privately", then: .accept)
+        } else if case .ready = privateChat.status(for: channelID) {
+            // Private chat is set up but this is Standard: say plainly that these messages aren't encrypted.
+            setPrivateBar("Standard messages to \(name) aren't encrypted.", tone: .warning, action: "Switch to Private",
+                          then: .accept)
         } else {
             setPrivateBar(nil)
         }
@@ -320,6 +366,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         rebuildRows()
         if !applyChanges(from: oldRows) { table.reloadData() }
         updateEmptyState()
+        findOlderPrivateMessages()
 
         if wasAtBottom || oldFirst == nil {
             scrollToBottom()
@@ -425,7 +472,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             if !filterText.isEmpty {
                 emptyLabel.stringValue = "No Matches in Loaded Messages"
             } else {
-                emptyLabel.stringValue = isPrivate ? "No Private Messages Yet" : "No Messages Yet"
+                emptyLabel.stringValue = privateEmptyText ?? "No Messages Yet"
             }
             emptyLabel.isHidden = false
         } else {

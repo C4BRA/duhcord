@@ -38,13 +38,35 @@ final class PrivateChatController {
         var added: Date
     }
 
-    /// What's kept in the keychain besides our private key: everyone's public keys and who we agreed to chat with.
+    /// What's kept in the keychain besides our private key: everyone's public keys, who we agreed to chat with,
+    /// and which DMs are in Private (so a relaunch doesn't quietly switch a DM back to unencrypted messages).
     private struct Directory: Codable {
         var people: [Snowflake: [PeerKey]] = [:]
         /// Our own other Duhcord installs (other Macs), so they can read what we send too.
         var ownDevices: [Data] = []
         var consented: Set<Snowflake> = []
         var keyChanged: Set<Snowflake> = []
+        var privateChannels: Set<Snowflake> = []
+
+        init() {}
+
+        // Fields added later are optional when reading, so an older directory keeps its keys.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            people = try c.decodeIfPresent([Snowflake: [PeerKey]].self, forKey: .people) ?? [:]
+            ownDevices = try c.decodeIfPresent([Data].self, forKey: .ownDevices) ?? []
+            consented = try c.decodeIfPresent(Set<Snowflake>.self, forKey: .consented) ?? []
+            keyChanged = try c.decodeIfPresent(Set<Snowflake>.self, forKey: .keyChanged) ?? []
+            privateChannels = try c.decodeIfPresent(Set<Snowflake>.self, forKey: .privateChannels) ?? []
+        }
+    }
+
+    /// Where the handshake scan of a DM got to, so a new message is read on its own instead of the whole history.
+    private struct ScanState {
+        var oldest: Snowflake
+        var newest: Snowflake
+        var lastOwnHandshake: Snowflake?
+        var unansweredRequest = false
     }
 
     private static let keyService = "com.duhcord.private-key"
@@ -53,8 +75,10 @@ final class PrivateChatController {
 
     private let session: DiscordSession
     private var store: Store { session.store }
-    private var modes: [Snowflake: Mode] = [:]
     private var directory = Directory()
+    private var scans: [Snowflake: ScanState] = [:]
+    /// Which message first carried each private message's salt: a later one with the same salt is a copy.
+    private var firstWithSalt: [Data: Snowflake] = [:]
     private var loadedFor: Snowflake?
     private var privateKey: Curve25519.KeyAgreement.PrivateKey?
     /// Decrypted text by message ID (nil: couldn't be read). Cleared when keys change.
@@ -104,7 +128,8 @@ final class PrivateChatController {
     }
 
     func mode(for channelID: Snowflake) -> Mode {
-        status(for: channelID) == .unavailable ? .standard : modes[channelID] ?? .standard
+        guard status(for: channelID) != .unavailable else { return .standard }
+        return directory.privateChannels.contains(channelID) ? .private : .standard
     }
 
     func status(for channelID: Snowflake) -> Status {
@@ -123,7 +148,12 @@ final class PrivateChatController {
     /// Switches a DM to Private, sending our handshake first if the other person doesn't have our key yet.
     func setMode(_ mode: Mode, for channelID: Snowflake) {
         guard status(for: channelID) != .unavailable else { return }
-        modes[channelID] = mode
+        if mode == .private {
+            directory.privateChannels.insert(channelID)
+        } else {
+            directory.privateChannels.remove(channelID)
+        }
+        saveDirectory()
         if mode == .private { agree(in: channelID) }
         onChange?(channelID)
     }
@@ -167,22 +197,32 @@ final class PrivateChatController {
     // MARK: - Handshakes
 
     /// Reads the handshakes in a DM's loaded messages: learns keys, notes requests, answers where agreed.
+    /// New messages at the bottom are read on their own; the whole history only when older messages were loaded.
     func scan(channelID: Snowflake) {
         guard Self.isSupported, let peer = peer(in: channelID), let messages = store.messages(in: channelID),
-              let me = store.me?.id else { return }
+              let first = messages.first, let last = messages.last, let me = store.me?.id else { return }
         _ = loadIfNeeded()
+        var state: ScanState
+        let fresh: ArraySlice<Message>
+        if let previous = scans[channelID], previous.oldest == first.id {
+            guard previous.newest != last.id else { return }
+            state = previous
+            fresh = messages.drop { $0.id.snowflakeValue <= previous.newest.snowflakeValue }
+        } else {
+            state = ScanState(oldest: first.id, newest: first.id)
+            fresh = messages[...]
+        }
+        state.newest = last.id
         var changed = false
-        var lastOwnHandshake: Snowflake?
-        var unansweredRequest = false
-        for message in messages {
+        for message in fresh {
             guard case .handshake(let key, let wantsReply) = PrivateMessaging.kind(of: message.content) else { continue }
             if message.author.id == me {
-                lastOwnHandshake = message.id
+                state.lastOwnHandshake = message.id
                 // Our handshake came back from Discord: no longer pending.
                 if let sent = pendingHandshakes[channelID], Self.date(of: message.id) >= sent.addingTimeInterval(-30) {
                     pendingHandshakes[channelID] = nil
                 }
-                unansweredRequest = false
+                state.unansweredRequest = false
                 if key != myPublicKey, !directory.ownDevices.contains(key), key.count == 32 {
                     directory.ownDevices.append(key)
                     changed = true
@@ -192,11 +232,12 @@ final class PrivateChatController {
             guard message.author.id == peer.id else { continue }
             if seenHandshakes.insert(message.id).inserted, learn(key, for: peer.id) { changed = true }
             // A request still open: theirs came after our last handshake.
-            if wantsReply, lastOwnHandshake.map({ $0.snowflakeValue < message.id.snowflakeValue }) ?? true {
-                unansweredRequest = true
+            if wantsReply, state.lastOwnHandshake.map({ $0.snowflakeValue < message.id.snowflakeValue }) ?? true {
+                state.unansweredRequest = true
             }
         }
-        if unansweredRequest, pendingHandshakes[channelID] == nil {
+        scans[channelID] = state
+        if state.unansweredRequest, pendingHandshakes[channelID] == nil {
             if directory.consented.contains(peer.id), loadIfNeeded(create: true) != nil {
                 sendHandshake(in: channelID, wantsReply: false)
             } else if requests.insert(peer.id).inserted {
@@ -241,20 +282,53 @@ final class PrivateChatController {
         return try PrivateCrypto.seal(text, channelID: channelID, sender: key, recipients: recipients)
     }
 
-    /// The text of a private message, or nil if it isn't one or can't be read with our key.
+    /// The text of a private message, or nil if it isn't one or can't be read with our key. A copy that Discord
+    /// could have reposted (sealed long before it appeared, or carrying an earlier message's salt) starts with a
+    /// warning line.
     func plaintext(of message: Message) -> String? {
-        if let cached = plaintexts[message.id] { return cached }
-        guard #available(macOS 14, *), case .encrypted(let payload) = PrivateMessaging.kind(of: message.content),
+        plaintext(content: message.content, id: message.id, authorID: message.author.id, channelID: message.channelId)
+    }
+
+    /// The same for a message known only by its parts (the message a reply quotes).
+    func plaintext(content: String, id: Snowflake, authorID: Snowflake, channelID: Snowflake) -> String? {
+        if let cached = plaintexts[id] { return cached }
+        guard #available(macOS 14, *), case .encrypted(let payload) = PrivateMessaging.kind(of: content),
               let key = loadIfNeeded() else { return nil }
         let senderKeys: [Data]
-        if message.author.id == store.me?.id {
+        if authorID == store.me?.id {
             senderKeys = [key.publicKey.rawRepresentation] + directory.ownDevices
         } else {
-            senderKeys = (directory.people[message.author.id] ?? []).map(\.key)
+            senderKeys = (directory.people[authorID] ?? []).map(\.key)
         }
-        let text = PrivateCrypto.open(payload, channelID: message.channelId, recipient: key,
-                                      senders: senderKeys.compactMap { try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: $0) })
-        plaintexts[message.id] = text
+        let opened = PrivateCrypto.open(payload, channelID: channelID, recipient: key,
+                                        senders: senderKeys.compactMap { try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: $0) })
+        var text = opened?.text
+        if let opened {
+            if let warning = replayWarning(opened, id: id) { text = warning + "\n" + opened.text }
+        }
+        if plaintexts.count > 2000 { plaintexts = [:] }
+        plaintexts[id] = text
         return text
+    }
+
+    /// Ten minutes covers clocks that are a little off and messages that took a while to send.
+    private static let replayTolerance: TimeInterval = 10 * 60
+
+    @available(macOS 14, *)
+    private func replayWarning(_ opened: PrivateCrypto.Opened, id: Snowflake) -> String? {
+        if let first = firstWithSalt[opened.salt], first != id {
+            if first.snowflakeValue < id.snowflakeValue {
+                return "⚠️ *A copy of an earlier private message. Discord may have resent it.*"
+            }
+            // This one is older: it's the original, and the one seen first is the copy; redraw that one.
+            plaintexts[first] = nil
+        }
+        firstWithSalt[opened.salt] = id
+        let posted = Self.date(of: id)
+        if abs(posted.timeIntervalSince(opened.sentAt)) > Self.replayTolerance {
+            return "⚠️ *Written \(ProfileText.clockFormatter.string(from: opened.sentAt)), not when it appeared. "
+                + "Discord may have resent it.*"
+        }
+        return nil
     }
 }
