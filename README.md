@@ -69,6 +69,7 @@ DMs between Duhcord users can be end-to-end encrypted, so Discord only ever stor
   - The installer helper has no entitlements at all.
   - CI's `scripts/verify-bundle.sh` fails the build if any of these change, or if a binary isn't arm64-only.
 - **Your token is only in your login Keychain, and only ever sent to Discord.**
+- **Discord's data collection is switched off.** With **Settings → Privacy → Limit what Discord collects** (on by default), Duhcord turns off each account's data and marketing settings once, the same switches Discord's own app offers: using your data for usage statistics and personalisation, screen reader tracking, game and platform account detection, contact and phone number matching, being found by phone or email, and marketing emails. Duhcord itself never sends Discord's analytics or crash reports.
 - **One locked-down connection layer** (`SecureSession`) carries all traffic:
   - It connects only to Discord's hosts (`discord.com`, `*.discord.gg`; images from Discord's proxies and its CDN's profile picture, banner, icon and badge paths; voice from `*.discord.media`).
   - Certificates must chain to Apple's built-in roots, so interception tools that install their own root are refused.
@@ -88,6 +89,10 @@ Duhcord only logs in by QR code; you can never type or paste a password or token
 Each attempt uses a new encryption key that exists only in memory. Discord sends the token encrypted to it, and the key is discarded afterwards. Only scan codes from a Duhcord window you opened yourself.
 
 **Log Out** revokes the token on Discord's side before deleting it from the Keychain. If Discord can't be reached, Duhcord stays locked rather than leaving a working token behind.
+
+### More than one account
+
+**Duhcord → Switch Account → Add Account…** logs in another account by QR code, up to five, as in Discord's own app. Switch between them from the same menu (⌃⌘1 to ⌃⌘5) or in **Settings**. One account is connected at a time: switching ends any call and connects the other account, which takes a moment. Each account's token is its own Keychain item, and **Log Out** (in the menu, or per account in Settings) revokes only that account's token. Discord can tell that accounts used from the same Mac belong together, as it can with its own app.
 
 ## Updates
 

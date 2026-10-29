@@ -4,7 +4,7 @@ import UserNotifications
 
 @main
 final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate, NSMenuItemValidation,
-                         UNUserNotificationCenterDelegate {
+                         UNUserNotificationCenterDelegate, NSMenuDelegate {
     private static var shared: AppDelegate?
 
     static func main() {
@@ -19,6 +19,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
     private var session: DiscordSession?
     private var mainWindow: MainWindowController?
     private var loginWindow: LoginWindowController?
+    /// "Add Account": a second QR login while the current account stays connected.
+    private var addAccountWindow: LoginWindowController?
+    /// The connected session's token and account (the account is nil until Discord's READY for a new login).
+    private var sessionToken: String?
+    private var sessionAccountID: Snowflake?
+    /// Shown once the next account is on screen (why the previous one went away).
+    private var pendingNotice: (title: String, detail: String)?
     private var settingsWindow: SettingsWindowController?
     private var updates: UpdateController?
 
@@ -30,8 +37,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         updates = UpdateController()
         NSApp.mainMenu = buildMenu()
         if canNotify { UNUserNotificationCenter.current().delegate = self }
-        if let token = Keychain.loadToken() {
-            start(token: token)
+        if let token = AccountStore.launchToken() {
+            start(token: token, accountID: AccountStore.currentID)
         } else {
             showLogin()
         }
@@ -50,12 +57,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
 
     /// Opens the QR login window. With `startCode: false` it only shows a spinner (used while a saved session connects).
     private func showLogin(message: String? = nil, startCode: Bool = true) {
-        mainWindow?.voice.leave()
-        mainWindow?.close()
+        mainWindow?.closeAll()
         mainWindow = nil
         let login = loginWindow ?? LoginWindowController { [weak self] token in
-            Keychain.saveToken(token)
-            self?.start(token: token)
+            // Saved under its account once Discord says whose it is (READY).
+            self?.start(token: token, accountID: nil)
         }
         loginWindow = login
         if startCode {
@@ -66,8 +72,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         login.showWindow(nil)
     }
 
-    private func start(token: String) {
+    private func start(token: String, accountID: Snowflake?) {
         session?.disconnect()
+        sessionToken = token
+        sessionAccountID = accountID
         let session = DiscordSession(token: token)
         session.delegate = self
         session.isActive = NSApp.isActive
@@ -78,6 +86,118 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         session.connect()
     }
 
+    // MARK: - Accounts
+
+    /// Disconnects the account on screen (ending any call) and connects another, as Discord's own switcher does.
+    private func switchTo(token: String, accountID: Snowflake?) {
+        settingsWindow?.close()
+        mainWindow?.closeAll()
+        mainWindow = nil
+        NSApp.dockTile.badgeLabel = nil
+        start(token: token, accountID: accountID)
+    }
+
+    @objc func switchAccount(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        switchToAccount(id)
+    }
+
+    private func switchToAccount(_ id: Snowflake) {
+        guard id != sessionAccountID, !isLocked, let token = AccountStore.token(for: id) else { return }
+        switchTo(token: token, accountID: id)
+    }
+
+    /// A QR login for another account. The current account stays connected until the new one is approved.
+    @objc func addAccount(_ sender: Any?) {
+        guard !AccountStore.isFull, !isLocked else { return }
+        if let existing = addAccountWindow {
+            existing.showWindow(nil)
+            return
+        }
+        let window = LoginWindowController(adding: true) { [weak self] token in
+            guard let self else { return }
+            self.addAccountWindow?.close()
+            self.addAccountWindow = nil
+            self.switchTo(token: token, accountID: nil)
+        }
+        addAccountWindow = window
+        window.showWindow(nil)
+    }
+
+    /// The Switch Account menu, built when it opens: each saved account (⌃⌘1–5), then Add Account.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        for (index, account) in AccountStore.accounts.enumerated() {
+            let title = account.displayName == account.username ? account.username : "\(account.displayName) (@\(account.username))"
+            let item = NSMenuItem(title: title, action: #selector(switchAccount(_:)), keyEquivalent: index < 9 ? String(index + 1) : "")
+            item.keyEquivalentModifierMask = [.control, .command]
+            item.representedObject = account.id
+            item.target = self
+            item.state = account.id == sessionAccountID ? .on : .off
+            menu.addItem(item)
+        }
+        if !AccountStore.accounts.isEmpty { menu.addItem(.separator()) }
+        let add = NSMenuItem(title: "Add Account…", action: #selector(addAccount(_:)), keyEquivalent: "")
+        add.target = self
+        menu.addItem(add)
+    }
+
+    /// Logs out an account that isn't the one on screen: revokes its token on Discord's side, then forgets it.
+    private func logOutOtherAccount(_ id: Snowflake) {
+        guard let token = AccountStore.token(for: id) else {
+            AccountStore.remove(id)
+            refreshSettings()
+            return
+        }
+        let name = AccountStore.accounts.first { $0.id == id }?.displayName ?? "this account"
+        Task { @MainActor in
+            do {
+                try await RESTClient(token: token).logout()
+            } catch RESTError.unauthorized {
+                // Already dead on Discord's side; nothing left to revoke.
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Couldn't log out \(name)"
+                alert.informativeText = "Duhcord can't reach Discord, so that session is still active. It stays saved until it can be logged out."
+                alert.runModal()
+                return
+            }
+            AccountStore.remove(id)
+            refreshSettings()
+        }
+    }
+
+    /// After the account on screen is logged out or its session ends: the next saved one, or the QR login.
+    private func continueWithNextAccount(message: String) {
+        if let next = AccountStore.accounts.first, let token = AccountStore.token(for: next.id) {
+            pendingNotice = ("Logged in as \(next.displayName)", message)
+            switchTo(token: token, accountID: next.id)
+        } else {
+            showLogin(message: message)
+        }
+    }
+
+    /// Turns off Discord's data collection settings on the account on screen, once per account, while
+    /// Settings → Privacy → "Limit what Discord collects" is on (the default). Done once rather than at every
+    /// launch, so a choice made later in Discord's own app is left alone.
+    private func limitDataCollectionIfNeeded(force: Bool = false) {
+        guard Settings.limitDiscordData, let session, let id = sessionAccountID,
+              force || AccountStore.accounts.first(where: { $0.id == id })?.dataLimited != true else { return }
+        Task { @MainActor in
+            do {
+                try await session.rest.limitDataCollection()
+                AccountStore.setDataLimited(id, true)
+            } catch {
+                // Tried again at the next connection.
+            }
+        }
+    }
+
+    private func refreshSettings() {
+        guard let settingsWindow, settingsWindow.window?.isVisible == true else { return }
+        settingsWindow.show(accounts: AccountStore.accounts, currentID: sessionAccountID)
+    }
+
     @objc private func checkForUpdates(_ sender: Any?) { updates?.checkNow() }
 
     /// The README on GitHub: what Duhcord does, its shortcuts and how it keeps you safe.
@@ -86,16 +206,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
     }
 
     @objc private func showSettings(_ sender: Any?) {
-        let controller = settingsWindow ?? SettingsWindowController { [weak self] in self?.confirmLogOut(nil) }
+        let controller = settingsWindow ?? SettingsWindowController()
+        controller.onLogOut = { [weak self] id in self?.confirmLogOut(accountID: id) }
+        controller.onSwitch = { [weak self] id in self?.switchToAccount(id) }
+        controller.onAddAccount = { [weak self] in self?.addAccount(nil) }
+        controller.onLimitData = { [weak self] in self?.limitDataCollectionIfNeeded(force: true) }
         settingsWindow = controller
-        controller.show(accountName: session?.store.me?.displayName)
+        controller.show(accounts: AccountStore.accounts, currentID: sessionAccountID)
     }
 
     /// Logging out ends the session for good (logging back in takes a new QR scan), so it's confirmed first.
     @objc private func confirmLogOut(_ sender: Any?) {
+        confirmLogOut(accountID: sessionAccountID)
+    }
+
+    private func confirmLogOut(accountID: Snowflake?) {
+        let isCurrent = accountID == nil || accountID == sessionAccountID
+        let name = AccountStore.accounts.first { $0.id == accountID }?.displayName
         let alert = NSAlert()
-        alert.messageText = "Log out of Duhcord?"
-        alert.informativeText = "Your session ends on Discord's side too. To log back in, you'll scan a new QR code with your phone."
+        alert.messageText = name.map { "Log out of \($0)?" } ?? "Log out of Duhcord?"
+        alert.informativeText = "The session ends on Discord's side too. To log back in, you'll scan a new QR code with your phone."
         let logOutButton = alert.addButton(withTitle: "Log Out")
         logOutButton.hasDestructiveAction = true
         alert.addButton(withTitle: "Cancel")
@@ -103,7 +233,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         logOutButton.keyEquivalent = ""
         alert.buttons[1].keyEquivalent = "\r"
         let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-            if response == .alertFirstButtonReturn { self?.logOut(nil) }
+            guard response == .alertFirstButtonReturn else { return }
+            if isCurrent {
+                self?.logOut(nil)
+            } else if let accountID {
+                self?.logOutOtherAccount(accountID)
+            }
         }
         if let window = mainWindow?.window, window.attachedSheet == nil {
             alert.beginSheetModal(for: window, completionHandler: handle)
@@ -133,10 +268,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
             mainWindow?.voice.leave()
             self.session = nil
             session.disconnect()
-            Keychain.deleteToken()
+            if let id = sessionAccountID ?? session.store.me?.id { AccountStore.remove(id) }
+            sessionToken = nil
+            sessionAccountID = nil
             NSApp.dockTile.badgeLabel = nil
             mainWindow?.unlock()
-            showLogin()
+            continueWithNextAccount(message: "The account you logged out of was removed from this Mac.")
         }
     }
 
@@ -158,6 +295,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         switch menuItem.action {
         case #selector(showSettings(_:)), #selector(confirmLogOut(_:)):
             return session != nil && !isLocked
+        case #selector(switchAccount(_:)):
+            return !isLocked
+        case #selector(addAccount(_:)):
+            return !isLocked && !AccountStore.isFull
         default:
             return true
         }
@@ -168,6 +309,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
     func sessionDidBecomeReady(_ session: DiscordSession) {
         loginWindow?.close()
         loginWindow = nil
+        // Now Discord has said whose token this is: save it under that account and make it the current one.
+        if let me = session.store.me, let token = sessionToken {
+            sessionAccountID = me.id
+            if let replaced = AccountStore.remember(me, token: token) {
+                // The same account logged in again: the old token is no longer needed, so it's revoked.
+                Task { try? await RESTClient(token: replaced).logout() }
+            }
+        }
         if mainWindow == nil {
             let main = MainWindowController(session: session)
             mainWindow = main
@@ -175,21 +324,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
             updates?.window = main
         }
         mainWindow?.reload()
+        limitDataCollectionIfNeeded()
+        if let notice = pendingNotice, let window = mainWindow?.window {
+            pendingNotice = nil
+            let alert = NSAlert()
+            alert.messageText = notice.title
+            alert.informativeText = notice.detail
+            alert.beginSheetModal(for: window)
+        }
     }
 
     func session(_ session: DiscordSession, didChangeState state: GatewayClient.State) {
         switch state {
         case .authenticationFailed:
-            session.disconnect()
-            self.session = nil
-            Keychain.deleteToken()
-            showLogin(message: "Your session ended. Scan a new code to log back in.")
+            endSession(session, message: "A session ended on Discord's side. Scan a new code to log back in to it.")
         case .closed(let code):
             // Discord ended the session for good; reconnecting can't fix it.
-            session.disconnect()
-            self.session = nil
-            Keychain.deleteToken()
-            showLogin(message: "Discord ended the session (code \(code)). Scan a new code to log back in.")
+            endSession(session, message: "Discord ended a session (code \(code)). Scan a new code to log back in to it.")
         case .unreachable:
             lock { [weak session] in session?.retry() }
         case .reconnecting:
@@ -200,6 +351,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         case .connecting, .disconnected:
             break
         }
+    }
+
+    /// The account on screen can't be used any more: forget it and move on to the next one.
+    private func endSession(_ session: DiscordSession, message: String) {
+        session.disconnect()
+        self.session = nil
+        if let id = sessionAccountID {
+            AccountStore.remove(id)
+        } else if let token = sessionToken, AccountStore.launchToken() == token {
+            // A token from an older build that never reached READY.
+            Keychain.delete(service: "com.duhcord.token", account: "default")
+        }
+        sessionToken = nil
+        sessionAccountID = nil
+        continueWithNextAccount(message: message)
     }
 
     func session(_ session: DiscordSession, shouldNotifyAbout message: Message) {
@@ -277,6 +443,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         appMenu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        let accounts = NSMenu(title: "Switch Account")
+        accounts.delegate = self
+        appMenu.addItem(submenu: accounts, title: "Switch Account")
         appMenu.addItem(withTitle: "Log Out…", action: #selector(confirmLogOut(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
         let services = NSMenu(title: "Services")

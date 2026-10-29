@@ -148,6 +148,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     func unlock() { connectionLock.hide() }
 
+    /// This account is going away (switched from, logged out): its call ends and every window it opened closes.
+    func closeAll() {
+        switcher = nil
+        profiles.closeAll()
+        voiceDetails?.close()
+        voice.leave()
+        connectionLock.hide()
+        close()
+    }
+
     /// Keyboard shortcuts are off while locked; voice commands only work in a call, and their titles follow
     /// the current state.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {

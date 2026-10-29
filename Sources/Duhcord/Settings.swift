@@ -59,6 +59,7 @@ enum Settings {
         static let mediaPreviews = "mediaPreviews"
         static let animateGIFs = "animateGIFs"
         static let sendTyping = "sendTypingIndicator"
+        static let limitDiscordData = "limitDiscordData"
     }
 
     static func registerDefaults() {
@@ -71,6 +72,7 @@ enum Settings {
             Key.mediaPreviews: MediaPreviews.always.rawValue,
             Key.animateGIFs: AnimateGIFs.onHover.rawValue,
             Key.sendTyping: true,
+            Key.limitDiscordData: true,
         ])
     }
 
@@ -111,6 +113,12 @@ enum Settings {
     static var sendTypingIndicator: Bool {
         get { defaults.bool(forKey: Key.sendTyping) }
         set { set(newValue, for: Key.sendTyping) }
+    }
+
+    /// Turn off Discord's data collection, tracking and marketing settings on each account (on by default).
+    static var limitDiscordData: Bool {
+        get { defaults.bool(forKey: Key.limitDiscordData) }
+        set { set(newValue, for: Key.limitDiscordData) }
     }
 
     /// Check GitHub for a new release at launch and once a day.

@@ -89,6 +89,31 @@ public final class RESTClient {
         return try decoder.decode(Channel.self, from: data)
     }
 
+    // MARK: - Data Discord collects
+
+    /// Turns off every data-collection and marketing setting Discord offers on the account: the same switches as
+    /// the official app's Settings → Data & Privacy, Privacy & Safety and Notifications → Emails.
+    /// - Consents: "use data to improve Discord" (usage statistics) and "use data to personalise my experience".
+    /// - Account settings: screen-reader tracking, detecting accounts on other platforms (Steam and the like),
+    ///   showing the current game, contact sync, phone-number friend finding, and being found by phone or email.
+    /// - Emails: recommendations and events, tips, and product announcements.
+    public func limitDataCollection() async throws {
+        _ = try await request("POST", "/users/@me/consent", body: ["grant": [String](), "revoke": ["usage_statistics", "personalization"]])
+        _ = try await request("PATCH", "/users/@me/settings", body: [
+            "allow_accessibility_detection": false,
+            "detect_platform_accounts": false,
+            "show_current_game": false,
+            "contact_sync_enabled": false,
+            "native_phone_integration_enabled": false,
+            "friend_discovery_flags": 0,
+        ])
+        _ = try await request("PATCH", "/users/@me/email-settings", body: ["settings": ["categories": [
+            "recommendations_and_events": false,
+            "tips": false,
+            "updates_and_announcements": false,
+        ]]])
+    }
+
     /// Invalidates the token on Discord's side, so a copy of it is useless afterwards.
     public func logout() async throws {
         _ = try await request("POST", "/auth/logout", body: ["provider": NSNull(), "voip_provider": NSNull()])

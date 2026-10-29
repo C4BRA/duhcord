@@ -18,12 +18,15 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
     private let retry = NSButton(title: "New Code", target: nil, action: nil)
 
     private static let qrSize: CGFloat = 220
+    /// Adding another account rather than logging in: the current one stays connected until this succeeds.
+    private let adding: Bool
 
-    init(onToken: @escaping (String) -> Void) {
+    init(adding: Bool = false, onToken: @escaping (String) -> Void) {
         self.onToken = onToken
+        self.adding = adding
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 360, height: 460),
                               styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "Duhcord"
+        window.title = adding ? "Add Account" : "Duhcord"
         super.init(window: window)
         window.delegate = self
         auth.onEvent = { [weak self] event in self?.handle(event) }
@@ -130,7 +133,7 @@ final class LoginWindowController: NSWindowController, NSWindowDelegate {
     private func buildUI() {
         guard let content = window?.contentView else { return }
 
-        let title = NSTextField(labelWithString: "Log in to Duhcord")
+        let title = NSTextField(labelWithString: adding ? "Add a Discord Account" : "Log in to Duhcord")
         title.font = Theme.headingFont
 
         qrView.imageScaling = .scaleNone
