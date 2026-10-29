@@ -194,11 +194,15 @@ final class VideoPrep: @unchecked Sendable {
         let input: AVAssetWriterInput
     }
 
-    private func makeWriter(_ output: MemoryOutput) -> AVAssetWriter {
+    /// `segmentInterval` `.indefinite` writes one fragment at the end, the only way the writer will pass picture
+    /// and sound through together.
+    private func makeWriter(_ output: MemoryOutput,
+                            segmentInterval: CMTime = CMTime(seconds: 4, preferredTimescale: 600)) -> AVAssetWriter {
         let writer = AVAssetWriter(contentType: UTType.mpeg4Movie)
-        writer.outputFileTypeProfile = .mpeg4CMAFCompliant
-        writer.preferredOutputSegmentInterval = CMTime(seconds: 4, preferredTimescale: 600)
-        writer.initialSegmentStartTime = .zero
+        // Not CMAF: it allows only one track, so every video with sound failed.
+        writer.outputFileTypeProfile = .mpeg4AppleHLS
+        writer.preferredOutputSegmentInterval = segmentInterval
+        if segmentInterval.isNumeric { writer.initialSegmentStartTime = .zero }
         writer.shouldOptimizeForNetworkUse = true
         writer.delegate = output
         return writer
@@ -209,7 +213,7 @@ final class VideoPrep: @unchecked Sendable {
                        progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
         let reader = try AVAssetReader(asset: asset)
         let output = MemoryOutput()
-        let writer = makeWriter(output)
+        let writer = makeWriter(output, segmentInterval: .indefinite)
         var pairs: [TrackPair] = []
         for track in [video] + audio.prefix(1) {
             let readerOutput = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
@@ -281,31 +285,37 @@ final class VideoPrep: @unchecked Sendable {
         var pairs = [TrackPair(readerOutput: videoOutput, input: videoInput)]
 
         if !audio.isEmpty {
-            let channels = audioBitrate <= 48_000 ? 1 : 2
-            let audioOutput = AVAssetReaderAudioMixOutput(audioTracks: audio, audioSettings: [
-                AVFormatIDKey: kAudioFormatLinearPCM,
-                AVSampleRateKey: 44_100,
-                AVNumberOfChannelsKey: channels,
-                AVLinearPCMBitDepthKey: 16,
-                AVLinearPCMIsFloatKey: false,
-                AVLinearPCMIsBigEndianKey: false,
-                AVLinearPCMIsNonInterleaved: false,
-            ])
-            audioOutput.alwaysCopiesSampleData = false
-            let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: 44_100,
-                AVNumberOfChannelsKey: channels,
-                AVEncoderBitRateKey: Int(audioBitrate),
-            ])
-            audioInput.expectsMediaDataInRealTime = false
-            if reader.canAdd(audioOutput), writer.canAdd(audioInput) {
-                reader.add(audioOutput)
-                writer.add(audioInput)
-                pairs.append(TrackPair(readerOutput: audioOutput, input: audioInput))
+            let sound = Self.audioPair(audio, bitrate: audioBitrate)
+            if reader.canAdd(sound.readerOutput), writer.canAdd(sound.input) {
+                reader.add(sound.readerOutput)
+                writer.add(sound.input)
+                pairs.append(sound)
             }
         }
         return try await run(reader: reader, writer: writer, output: output, pairs: pairs, duration: duration, progress: progress)
+    }
+
+    /// The sound mixed down and encoded as AAC; mono at the lowest bitrates.
+    private static func audioPair(_ tracks: [AVAssetTrack], bitrate: Double) -> TrackPair {
+        let channels = bitrate <= 48_000 ? 1 : 2
+        let output = AVAssetReaderAudioMixOutput(audioTracks: tracks, audioSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 44_100,
+            AVNumberOfChannelsKey: channels,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ])
+        output.alwaysCopiesSampleData = false
+        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 44_100,
+            AVNumberOfChannelsKey: channels,
+            AVEncoderBitRateKey: Int(bitrate),
+        ])
+        input.expectsMediaDataInRealTime = false
+        return TrackPair(readerOutput: output, input: input)
     }
 
     /// Moves every sample from the reader to the writer, each track on its own queue, then finishes the file.
