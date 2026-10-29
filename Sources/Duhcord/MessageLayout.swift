@@ -4,6 +4,7 @@ import DuhcordCore
 
 /// Where everything in one message row goes. Computed once per message and width, before any image loads:
 /// Discord sends image sizes up front, so space is reserved exactly and the list never jumps.
+@MainActor
 struct MessageLayout {
     struct Box {
         let frame: NSRect
@@ -53,6 +54,7 @@ struct MessageLayout {
     var avatar: (frame: NSRect, url: URL?)?
 }
 
+@MainActor
 enum MessageLayoutBuilder {
     static let imageMax = NSSize(width: 360, height: 270)
     static let thumbnailSize: CGFloat = 72
@@ -223,6 +225,7 @@ enum MessageLayoutBuilder {
 }
 
 /// Hosts an AVPlayerLayer as its backing layer.
+@MainActor
 private final class PlayerView: NSView {
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 
@@ -239,6 +242,7 @@ private final class PlayerView: NSView {
 
 /// One image, GIF or video in a message. Shows a placeholder at the final size until the still arrives,
 /// so nothing moves; GIFs animate on hover (or when visible), videos play on click.
+@MainActor
 final class MediaView: NSView, Playable {
     /// Spoilers and click-to-load images the user already opened this session.
     private static var revealed: Set<URL> = []
@@ -424,7 +428,7 @@ final class MediaView: NSView, Playable {
             generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: .zero)]) { [weak self] _, image, _, _, _ in
                 guard let image else { return }
                 let still = Handoff(value: image)
-                DispatchQueue.main.async {
+                Task { @MainActor [weak self] in
                     guard let self, case .privateVideo(let current)? = self.item?.kind, current.cacheKey == video.cacheKey else { return }
                     self.still = NSImage(cgImage: still.value, size: self.bounds.size)
                     if !self.isPlaying { self.imageView.image = self.still }
@@ -454,13 +458,13 @@ final class MediaView: NSView, Playable {
         } else {
             player = AVPlayer(playerItem: playerItem)
             endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: playerItem, queue: .main) { [weak self] _ in
-                self?.stopPlayback()
+                Task { @MainActor in self?.stopPlayback() }
             }
         }
         player.isMuted = muted
         statusObservation = player.observe(\.currentItem?.status, options: [.new]) { [weak self] player, _ in
             guard player.currentItem?.status == .failed else { return }
-            DispatchQueue.main.async { self?.showFailure() }
+            Task { @MainActor in self?.showFailure() }
         }
 
         let view = PlayerView(frame: bounds)

@@ -4,6 +4,7 @@ import DuhcordUpdateKit
 
 /// Schedules update checks and drives the banner: check → "available" → download → install → relaunch.
 /// Nothing is installed without the user clicking.
+@MainActor
 final class UpdateController {
     private let checker = UpdateChecker(currentVersion: Updates.currentVersion)
     private var timer: Timer?
@@ -43,9 +44,13 @@ final class UpdateController {
             return
         }
         guard timer == nil else { return }
-        let first = Timer(timeInterval: 20, repeats: false) { [weak self] _ in self?.checkInBackground() }
+        let first = Timer(timeInterval: 20, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.checkInBackground() }
+        }
         RunLoop.main.add(first, forMode: .common)
-        let daily = Timer(timeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in self?.checkInBackground() }
+        let daily = Timer(timeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkInBackground() }
+        }
         daily.tolerance = 60 * 60
         RunLoop.main.add(daily, forMode: .common)
         timer = daily

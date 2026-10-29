@@ -2,6 +2,7 @@ import AppKit
 
 /// The message box. Grows with its text up to `maxLines`, then scrolls.
 /// Return sends; Shift-Return or Option-Return inserts a newline.
+@MainActor
 final class ComposerView: NSView, NSTextViewDelegate {
     var onSend: ((String) -> Void)?
     /// Called as the user types, with the current text (used to send typing notices).
@@ -169,6 +170,7 @@ final class ComposerView: NSView, NSTextViewDelegate {
 }
 
 /// NSTextView has no placeholder, so draw one while the text is empty.
+@MainActor
 final class PlaceholderTextView: NSTextView {
     var placeholder = ""
     /// Called with true when typing starts in this view, false when focus moves elsewhere.

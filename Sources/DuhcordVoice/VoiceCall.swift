@@ -6,7 +6,8 @@ import Network
 
 /// One voice call: the voice gateway WebSocket, the UDP audio socket, end-to-end encryption and the audio engine.
 /// Everything runs on `queue`.
-final class VoiceCall {
+// Call state is confined to the serial queue passed at initialization.
+final class VoiceCall: @unchecked Sendable {
     /// Louder than this (RMS, after voice processing) counts as talking; 300 ms of quiet ends it.
     private static let talkThreshold: Float = 0.01
     private static let hangoverFrames = 15

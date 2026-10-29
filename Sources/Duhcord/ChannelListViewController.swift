@@ -3,6 +3,7 @@ import DuhcordCore
 
 /// The middle column: text and voice channels under their categories, or the DM list. Who's in each voice
 /// channel is listed under it, and the voice bar at the bottom shows the call we're in.
+@MainActor
 final class ChannelListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onSelect: ((Snowflake) -> Void)?
     var onJoinVoice: ((Channel) -> Void)?
@@ -391,6 +392,7 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
     }
 }
 
+@MainActor
 private final class ChannelCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("ChannelCell")
     static let avatarSize = Theme.IconSize.listAvatar
@@ -534,6 +536,7 @@ private final class ChannelCell: NSTableCellView {
 /// The call we're in, docked at the bottom of the channel list: where and whether it's connected, mute, deafen
 /// and leave, and room for video, screen sharing and activities (not available yet). "Voice Connected" opens
 /// the connection details. Same margins and type as the rest of the sidebar.
+@MainActor
 private final class VoiceBar: NSView {
     var onMute: (() -> Void)?
     var onDeafen: (() -> Void)?
@@ -682,6 +685,7 @@ private final class VoiceBar: NSView {
 }
 
 /// A table that reports Return, which plain NSTableView ignores.
+@MainActor
 private final class KeyTableView: NSTableView {
     var onReturn: (() -> Void)?
 

@@ -14,7 +14,7 @@ import Security
 ///
 /// All state lives on the private serial `queue`, which is what makes sharing it across threads safe.
 public final class RemoteAuth: @unchecked Sendable {
-    public enum Event: Equatable {
+    public enum Event: Equatable, Sendable {
         /// Show this as a QR code.
         case showCode(URL)
         /// The phone scanned the code and is waiting for the user to approve.

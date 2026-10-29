@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 ///   picture Duhcord decodes that Discord hasn't re-encoded, so it's limited to people you chose to trust, to JPEG
 ///   and PNG (all Duhcord sends), and to the same pixel limit as other images.
 /// - Decrypted bytes and decoded images are kept in memory only, and dropped when the session ends.
+@MainActor
 final class PrivateImageLoader {
     static let shared = PrivateImageLoader()
 
@@ -34,11 +35,12 @@ final class PrivateImageLoader {
     /// The image decoded to fit `pointSize`, on the main thread (nil if it can't be shown). Returns a token for
     /// `cancel`.
     @discardableResult
-    func load(_ image: PrivateImage, pointSize: NSSize, completion: @escaping (NSImage?) -> Void) -> Token? {
+    func load(_ image: PrivateImage, pointSize: NSSize,
+              completion: @escaping @MainActor @Sendable (NSImage?) -> Void) -> Token? {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let maxPixel = Int((max(pointSize.width, pointSize.height) * scale).rounded(.up))
-        let key = "\(image.cacheKey)@\(maxPixel)" as NSString
-        if let cached = images.object(forKey: key) {
+        let key = "\(image.cacheKey)@\(maxPixel)"
+        if let cached = images.object(forKey: key as NSString) {
             completion(cached)
             return nil
         }
@@ -56,7 +58,7 @@ final class PrivateImageLoader {
                 DispatchQueue.main.async {
                     if let image = decoded.value {
                         let pixels = image.representations.first.map { $0.pixelsWide * $0.pixelsHigh } ?? 0
-                        self?.images.setObject(image, forKey: key, cost: pixels * 4)
+                        self?.images.setObject(image, forKey: key as NSString, cost: pixels * 4)
                     }
                     completion(decoded.value)
                 }
@@ -66,7 +68,7 @@ final class PrivateImageLoader {
 
     /// The decrypted image file, on the main thread (nil if it can't be had).
     @discardableResult
-    func data(for image: PrivateImage, completion: @escaping (Data?) -> Void) -> Token? {
+    func data(for image: PrivateImage, completion: @escaping @MainActor @Sendable (Data?) -> Void) -> Token? {
         let key = image.cacheKey
         if let cached = decrypted.object(forKey: key as NSString) {
             completion(cached as Data)
@@ -228,10 +230,12 @@ enum ImagePrep {
         case video(URL, name: String)
     }
 
-    private static let fileOptions: [NSPasteboard.ReadingOptionKey: Any] = [
-        .urlReadingFileURLsOnly: true,
-        .urlReadingContentsConformToTypes: [UTType.image.identifier, UTType.movie.identifier],
-    ]
+    private static var fileOptions: [NSPasteboard.ReadingOptionKey: Any] {
+        [
+            .urlReadingFileURLsOnly: true,
+            .urlReadingContentsConformToTypes: [UTType.image.identifier, UTType.movie.identifier],
+        ]
+    }
 
     /// Images and videos from the pasteboard (pasted or dropped): files, or a picture copied from another app.
     static func sources(from pasteboard: NSPasteboard) -> [Source] {
@@ -266,6 +270,7 @@ enum ImagePrep {
 
 /// A private image at full size, in a window of its own. Copy (⌘C or the right-click menu) puts it on the
 /// clipboard as it was sent; there's no Save, since Duhcord's sandbox doesn't let it write files.
+@MainActor
 final class PrivateImagePreview: NSWindowController, NSWindowDelegate {
     /// Open previews, so each stays alive until it's closed.
     private static var open: [PrivateImagePreview] = []

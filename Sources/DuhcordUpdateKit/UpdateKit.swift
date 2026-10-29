@@ -35,7 +35,7 @@ public enum UpdateKit {
 }
 
 /// Describes one release. Signed as a whole: the signature covers the exact bytes of update.json.
-public struct UpdateManifest: Codable, Equatable {
+public struct UpdateManifest: Codable, Equatable, Sendable {
     public let version: String
     public let url: String
     public let sha256: String

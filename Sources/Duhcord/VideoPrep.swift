@@ -4,6 +4,7 @@ import CoreImage
 import DuhcordCore
 import UniformTypeIdentifiers
 import VideoToolbox
+import os
 
 /// Turns a video the user attached into what's sent, written straight to memory (a fragmented MP4) so it never
 /// touches the disk:
@@ -13,8 +14,9 @@ import VideoToolbox
 ///   that bitrate, capped at 30 fps. A video that already fits is only repackaged, which keeps its quality.
 /// - H.264 outside Private, which every Discord app plays; HEVC in Private (only Duhcord decrypts those, and
 ///   every Mac it runs on plays HEVC), for better quality at the same size.
-final class VideoPrep {
-    struct Options {
+// Active reader and writer references are protected by the cancellation-state lock.
+final class VideoPrep: @unchecked Sendable {
+    struct Options: Sendable {
         /// What the file may come to.
         let limit: Int
         let compress: Bool
@@ -49,29 +51,35 @@ final class VideoPrep {
     /// Leaves room for the container and for the encoder landing a little over its target.
     private static let headroom = 0.92
 
-    private let lock = NSLock()
-    private var isCancelled = false
-    private var reader: AVAssetReader?
-    private var writer: AVAssetWriter?
+    // The lock protects these active references while cancellation may arrive from another thread.
+    private struct ActiveMedia: @unchecked Sendable {
+        let reader: AVAssetReader
+        let writer: AVAssetWriter
+    }
+
+    private struct State: Sendable {
+        var isCancelled = false
+        var activeMedia: ActiveMedia?
+    }
+
+    // AVFoundation cancellation state is read and changed only while holding this lock.
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     /// Stops the work; `prepare` then throws CancellationError.
     func cancel() {
-        lock.lock()
-        isCancelled = true
-        let reader = reader, writer = writer
-        lock.unlock()
-        reader?.cancelReading()
-        writer?.cancelWriting()
+        let activeMedia = state.withLock { state in
+            state.isCancelled = true
+            return state.activeMedia
+        }
+        activeMedia?.reader.cancelReading()
+        activeMedia?.writer.cancelWriting()
     }
 
-    private var cancelled: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return isCancelled
-    }
+    private var cancelled: Bool { state.withLock { $0.isCancelled } }
 
     /// Off the main thread. `progress` (0...1) is called from a background queue.
-    func prepare(_ url: URL, name: String, options: Options, progress: @escaping (Double) -> Void) async throws -> PreparedAttachment {
+    func prepare(_ url: URL, name: String, options: Options,
+                 progress: @escaping @Sendable (Double) -> Void) async throws -> PreparedAttachment {
         let asset = AVURLAsset(url: url)
         let duration = try await asset.load(.duration).seconds
         guard duration.isFinite, duration > 0.1,
@@ -168,22 +176,22 @@ final class VideoPrep {
     // MARK: - Writing
 
     /// A writer that hands its output over in pieces (an MP4 header, then fragments), collected in memory.
-    private final class MemoryOutput: NSObject, AVAssetWriterDelegate {
-        private let lock = NSLock()
-        private var data = Data()
+    // The writer delegate appends and reads segments only while holding the lock.
+    private final class MemoryOutput: NSObject, AVAssetWriterDelegate, @unchecked Sendable {
+        private let data = OSAllocatedUnfairLock(initialState: Data())
 
         func assetWriter(_ writer: AVAssetWriter, didOutputSegmentData segmentData: Data,
                          segmentType: AVAssetSegmentType, segmentReport: AVAssetSegmentReport?) {
-            lock.lock()
-            data.append(segmentData)
-            lock.unlock()
+            data.withLock { $0.append(segmentData) }
         }
 
-        var collected: Data {
-            lock.lock()
-            defer { lock.unlock() }
-            return data
-        }
+        var collected: Data { data.withLock { $0 } }
+    }
+
+    // Each pair is accessed only by its dedicated media-data queue after setup.
+    private struct TrackPair: @unchecked Sendable {
+        let readerOutput: AVAssetReaderOutput
+        let input: AVAssetWriterInput
     }
 
     private func makeWriter(_ output: MemoryOutput) -> AVAssetWriter {
@@ -198,11 +206,11 @@ final class VideoPrep {
 
     /// The same picture and sound in a new file: nothing re-encoded, nothing else copied.
     private func remux(_ asset: AVAsset, video: AVAssetTrack, audio: [AVAssetTrack], transform: CGAffineTransform,
-                       progress: @escaping (Double) -> Void) async throws -> Data {
+                       progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
         let reader = try AVAssetReader(asset: asset)
         let output = MemoryOutput()
         let writer = makeWriter(output)
-        var pairs: [(AVAssetReaderOutput, AVAssetWriterInput)] = []
+        var pairs: [TrackPair] = []
         for track in [video] + audio.prefix(1) {
             let readerOutput = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
             readerOutput.alwaysCopiesSampleData = false
@@ -213,7 +221,7 @@ final class VideoPrep {
             guard reader.canAdd(readerOutput), writer.canAdd(input) else { throw Failure.failed }
             reader.add(readerOutput)
             writer.add(input)
-            pairs.append((readerOutput, input))
+            pairs.append(TrackPair(readerOutput: readerOutput, input: input))
         }
         let duration = try await asset.load(.duration).seconds
         return try await run(reader: reader, writer: writer, output: output, pairs: pairs, duration: duration, progress: progress)
@@ -222,7 +230,7 @@ final class VideoPrep {
     private func encode(_ asset: AVAsset, video: AVAssetTrack, audio: [AVAssetTrack], size: CGSize,
                         transform: CGAffineTransform, fps: Int32,
                         videoBitrate: Double, audioBitrate: Double, hevc: Bool, duration: Double,
-                        progress: @escaping (Double) -> Void) async throws -> Data {
+                        progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
         let reader = try AVAssetReader(asset: asset)
         let output = MemoryOutput()
         let writer = makeWriter(output)
@@ -270,7 +278,7 @@ final class VideoPrep {
         guard reader.canAdd(videoOutput), writer.canAdd(videoInput) else { throw Failure.failed }
         reader.add(videoOutput)
         writer.add(videoInput)
-        var pairs: [(AVAssetReaderOutput, AVAssetWriterInput)] = [(videoOutput, videoInput)]
+        var pairs = [TrackPair(readerOutput: videoOutput, input: videoInput)]
 
         if !audio.isEmpty {
             let channels = audioBitrate <= 48_000 ? 1 : 2
@@ -294,7 +302,7 @@ final class VideoPrep {
             if reader.canAdd(audioOutput), writer.canAdd(audioInput) {
                 reader.add(audioOutput)
                 writer.add(audioInput)
-                pairs.append((audioOutput, audioInput))
+                pairs.append(TrackPair(readerOutput: audioOutput, input: audioInput))
             }
         }
         return try await run(reader: reader, writer: writer, output: output, pairs: pairs, duration: duration, progress: progress)
@@ -302,46 +310,49 @@ final class VideoPrep {
 
     /// Moves every sample from the reader to the writer, each track on its own queue, then finishes the file.
     private func run(reader: AVAssetReader, writer: AVAssetWriter, output: MemoryOutput,
-                     pairs: [(AVAssetReaderOutput, AVAssetWriterInput)], duration: Double,
-                     progress: @escaping (Double) -> Void) async throws -> Data {
-        lock.lock()
-        if isCancelled {
-            lock.unlock()
-            throw CancellationError()
-        }
-        self.reader = reader
-        self.writer = writer
-        lock.unlock()
+                     pairs: [TrackPair], duration: Double,
+                     progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
+        let activeMedia = ActiveMedia(reader: reader, writer: writer)
+        guard state.withLock({ state in
+            guard !state.isCancelled else { return false }
+            state.activeMedia = activeMedia
+            return true
+        }) else { throw CancellationError() }
         defer {
-            lock.lock()
-            self.reader = nil
-            self.writer = nil
-            lock.unlock()
+            state.withLock { $0.activeMedia = nil }
         }
 
         guard reader.startReading(), writer.startWriting() else { throw Failure.failed }
         writer.startSession(atSourceTime: .zero)
         let group = DispatchGroup()
-        for (index, pair) in pairs.enumerated() {
-            let (readerOutput, input) = pair
+        let state = self.state
+        for (index, track) in pairs.enumerated() {
             let queue = DispatchQueue(label: "duhcord.video.\(index)", qos: .userInitiated)
             group.enter()
-            var done = false
-            input.requestMediaDataWhenReady(on: queue) { [weak self] in
-                while input.isReadyForMoreMediaData, !done {
-                    if self?.cancelled ?? true {
-                        done = true
-                    } else if let sample = readerOutput.copyNextSampleBuffer() {
+            let done = OSAllocatedUnfairLock(initialState: false)
+            track.input.requestMediaDataWhenReady(on: queue) { [track, state, done] in
+                while track.input.isReadyForMoreMediaData, !done.withLock({ $0 }) {
+                    let shouldFinish: Bool
+                    if state.withLock({ $0.isCancelled }) {
+                        shouldFinish = true
+                    } else if let sample = track.readerOutput.copyNextSampleBuffer() {
                         if index == 0, duration > 0 {
                             progress(min(1, CMSampleBufferGetPresentationTimeStamp(sample).seconds / duration))
                         }
-                        if !input.append(sample) { done = true }
+                        shouldFinish = !track.input.append(sample)
                     } else {
-                        done = true
+                        shouldFinish = true
                     }
-                    if done {
-                        input.markAsFinished()
-                        group.leave()
+                    if shouldFinish {
+                        let finished = done.withLock { finished in
+                            guard !finished else { return false }
+                            finished = true
+                            return true
+                        }
+                        if finished {
+                            track.input.markAsFinished()
+                            group.leave()
+                        }
                     }
                 }
             }

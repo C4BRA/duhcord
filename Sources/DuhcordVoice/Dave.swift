@@ -1,6 +1,7 @@
 import CDave
 import DuhcordVoiceKit
 import Foundation
+import os
 
 /// End-to-end encryption for a call (Discord's DAVE protocol), on top of libdave.
 ///
@@ -285,12 +286,16 @@ final class Dave {
         return constPointers.withUnsafeMutableBufferPointer { body($0.baseAddress!, ids.count) }
     }
 
-    private static var logSinkInstalled = false
+    private static let logSinkInstalled = OSAllocatedUnfairLock(initialState: false)
 
     /// libdave logs to stdout by default; route warnings and errors to the system log instead.
     private static func installLogSink() {
-        guard !logSinkInstalled else { return }
-        logSinkInstalled = true
+        let shouldInstall = logSinkInstalled.withLock { installed in
+            guard !installed else { return false }
+            installed = true
+            return true
+        }
+        guard shouldInstall else { return }
         daveSetLogSinkCallback { severity, _, _, message in
             guard severity == DAVE_LOGGING_SEVERITY_WARNING || severity == DAVE_LOGGING_SEVERITY_ERROR,
                   let message else { return }

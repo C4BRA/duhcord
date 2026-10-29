@@ -2,6 +2,7 @@ import AppKit
 import DuhcordCore
 
 /// Opens links in the browser after LinkGuard has checked them.
+@MainActor
 enum LinkOpener {
     static func open(_ url: URL, shownText: String?, from window: NSWindow?) {
         switch LinkGuard.check(url, shownText: shownText) {

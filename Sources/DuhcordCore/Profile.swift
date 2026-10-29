@@ -2,8 +2,8 @@ import Foundation
 
 /// Someone's profile, from `GET /users/{id}/profile` (what the official client's profile popout and full
 /// profile load). In a server, the server profile (nickname, bio, banner, pronouns) takes priority, as there.
-public struct UserProfile: Decodable {
-    public struct Metadata: Decodable, Hashable {
+public struct UserProfile: Decodable, Sendable {
+    public struct Metadata: Decodable, Hashable, Sendable {
         public let bio: String?
         public let pronouns: String?
         public let banner: String?
@@ -11,19 +11,19 @@ public struct UserProfile: Decodable {
         public let themeColors: [Int]?
     }
 
-    public struct Badge: Decodable, Hashable {
+    public struct Badge: Decodable, Hashable, Sendable {
         public let id: String
         public let description: String
         public let icon: String
     }
 
-    public struct MutualGuild: Decodable, Hashable {
+    public struct MutualGuild: Decodable, Hashable, Sendable {
         public let id: Snowflake
         public let nick: String?
     }
 
     /// The server member in the server the profile was asked for.
-    public struct GuildMember: Decodable, Hashable {
+    public struct GuildMember: Decodable, Hashable, Sendable {
         public let roles: [Snowflake]
         public let nick: String?
         public let avatar: String?
@@ -81,8 +81,8 @@ public struct UserProfile: Decodable {
 }
 
 /// A tile on someone's profile board (Discord's profile widgets): favourite games, games in rotation and so on.
-public struct ProfileWidget: Decodable, Hashable {
-    public struct Game: Decodable, Hashable {
+public struct ProfileWidget: Decodable, Hashable, Sendable {
+    public struct Game: Decodable, Hashable, Sendable {
         public let gameId: Snowflake
         public let comment: String?
         public let tags: [String]?
@@ -128,15 +128,15 @@ public struct ProfileWidget: Decodable, Hashable {
 }
 
 /// A game or app, for widget and activity names and icons (`GET /applications/public`).
-public struct PartialApplication: Decodable, Hashable {
+public struct PartialApplication: Decodable, Hashable, Sendable {
     public let id: Snowflake
     public let name: String
     public let icon: String?
 }
 
 /// Someone's online status and what they're doing. Kept only for people who aren't offline.
-public struct Presence: Hashable {
-    public enum Status: String {
+public struct Presence: Hashable, Sendable {
+    public enum Status: String, Sendable {
         case online, idle, dnd, offline
     }
 
@@ -158,7 +158,7 @@ public struct Presence: Hashable {
 
 /// The presence payload as Discord sends it (PRESENCE_UPDATE, READY, GUILD_CREATE, member chunks).
 /// Discord warns that any field can be missing or the wrong type, so everything but the user ID is lenient.
-struct RawPresence: Decodable {
+struct RawPresence: Decodable, Sendable {
     let presence: Presence
 
     private enum CodingKeys: String, CodingKey { case user, userId, status, activities }
@@ -175,12 +175,12 @@ struct RawPresence: Decodable {
     }
 }
 
-public struct Activity: Decodable, Hashable {
-    public enum Kind: Int {
+public struct Activity: Decodable, Hashable, Sendable {
+    public enum Kind: Int, Sendable {
         case playing = 0, streaming, listening, watching, custom, competing, hang
     }
 
-    public struct Timestamps: Decodable, Hashable {
+    public struct Timestamps: Decodable, Hashable, Sendable {
         public let start: Double?
         public let end: Double?
 
@@ -197,12 +197,12 @@ public struct Activity: Decodable, Hashable {
         }
     }
 
-    public struct Assets: Decodable, Hashable {
+    public struct Assets: Decodable, Hashable, Sendable {
         public let largeImage: String?
         public let largeText: String?
     }
 
-    public struct Emoji: Decodable, Hashable {
+    public struct Emoji: Decodable, Hashable, Sendable {
         public let name: String
         public let id: Snowflake?
     }

@@ -8,7 +8,7 @@ public enum VoiceKit {
 }
 
 /// Asks the helper to join a call. Built from the main gateway's VOICE_STATE_UPDATE and VOICE_SERVER_UPDATE.
-public struct VoiceJoinRequest: Codable, Equatable {
+public struct VoiceJoinRequest: Codable, Equatable, Sendable {
     public var guildID: String
     public var channelID: String
     public var userID: String
@@ -34,7 +34,7 @@ public struct VoiceJoinRequest: Codable, Equatable {
 }
 
 /// What the helper reports back.
-public enum VoiceEvent: Codable, Equatable {
+public enum VoiceEvent: Codable, Equatable, Sendable {
     case connecting
     /// Audio is flowing. `endToEndEncrypted` is true once the call's DAVE group is set up.
     case connected(endToEndEncrypted: Bool)
@@ -49,7 +49,7 @@ public enum VoiceEvent: Codable, Equatable {
 }
 
 /// What the connection details panel shows. Counts and settings only: no tokens, keys or audio.
-public struct VoiceStats: Codable, Equatable {
+public struct VoiceStats: Codable, Equatable, Sendable {
     /// The voice server, e.g. "c-ord12-816a989c".
     public var server: String
     /// Round trips to the voice server over the last five minutes: seconds ago (newest last) and milliseconds.
@@ -69,7 +69,7 @@ public struct VoiceStats: Codable, Equatable {
     public var microphone: String?
     public var output: String?
 
-    public struct PingSample: Codable, Equatable {
+    public struct PingSample: Codable, Equatable, Sendable {
         public var age: Double
         public var milliseconds: Double
 

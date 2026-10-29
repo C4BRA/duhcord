@@ -2,6 +2,7 @@ import AppKit
 import DuhcordCore
 
 /// ⌘, — one small window with every option.
+@MainActor
 final class SettingsWindowController: NSWindowController {
     /// Log out of the account with this ID (confirmed by the caller).
     var onLogOut: ((Snowflake) -> Void)?
@@ -315,6 +316,7 @@ final class SettingsWindowController: NSWindowController {
 }
 
 /// A button that runs a closure.
+@MainActor
 private final class ClosureButton: NSButton {
     private var handler: (() -> Void)?
 

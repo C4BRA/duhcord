@@ -2,6 +2,7 @@ import AppKit
 import DuhcordCore
 
 /// The parts of a profile shown both on the card and in the full profile.
+@MainActor
 private enum ProfileParts {
     /// Display name, then "username · pronouns", then badges.
     static func identity(user: User, profile: UserProfile?, nameFont: NSFont) -> [NSView] {
@@ -70,6 +71,7 @@ private enum ProfileParts {
 // MARK: - Card
 
 /// The small profile card shown in a popover where someone was clicked.
+@MainActor
 final class ProfileCardViewController: NSViewController, NSTextFieldDelegate {
     private static let width: CGFloat = 300
 
@@ -267,6 +269,7 @@ final class ProfileCardViewController: NSViewController, NSTextFieldDelegate {
 
 /// Someone's full profile in its own window: everything on the card, plus their activity, profile board,
 /// mutual friends and mutual servers in tabs.
+@MainActor
 final class ProfileWindowController: NSWindowController, NSWindowDelegate {
     var onClose: (() -> Void)?
 
@@ -540,6 +543,7 @@ final class ProfileWindowController: NSWindowController, NSWindowDelegate {
 }
 
 /// An activity or a game on someone's board: icon, a bold line, and smaller lines under it.
+@MainActor
 private final class ActivityRow: NSView {
     init(imageURL: URL?, title: String, lines: [String], tooltip: String?) {
         super.init(frame: .zero)
@@ -579,6 +583,7 @@ private final class ActivityRow: NSView {
     required init?(coder: NSCoder) { fatalError("not used") }
 }
 
+@MainActor
 private final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }

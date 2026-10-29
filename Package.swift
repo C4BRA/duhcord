@@ -12,18 +12,22 @@ var products: [Product] = [
     .executable(name: "DuhcordUpdater", targets: ["DuhcordUpdater"]),
 ]
 
+let strictConcurrency: [SwiftSetting] = [.enableUpcomingFeature("StrictConcurrency")]
+
 var targets: [Target] = [
     // Update manifest, signature checks and the installer protocol, shared by the app and the installer.
-    .target(name: "DuhcordUpdateKit"),
+    .target(name: "DuhcordUpdateKit", swiftSettings: strictConcurrency),
     // Networking, models, state and markdown parsing. Foundation only, no AppKit.
-    .target(name: "DuhcordCore", dependencies: ["DuhcordUpdateKit"]),
+    .target(name: "DuhcordCore", dependencies: ["DuhcordUpdateKit"], swiftSettings: strictConcurrency),
     // The voice helper's protocol, packet format and transport encryption, shared by the app and the helper.
-    .target(name: "DuhcordVoiceKit", dependencies: ["DuhcordUpdateKit"]),
+    .target(name: "DuhcordVoiceKit", dependencies: ["DuhcordUpdateKit"], swiftSettings: strictConcurrency),
     // The AppKit user interface.
-    .executableTarget(name: "Duhcord", dependencies: ["DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit"]),
+    .executableTarget(name: "Duhcord", dependencies: ["DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit"],
+                      swiftSettings: strictConcurrency),
     // The installer helper (an XPC service inside the app) that swaps in verified updates.
-    .executableTarget(name: "DuhcordUpdater", dependencies: ["DuhcordUpdateKit"]),
-    .testTarget(name: "DuhcordCoreTests", dependencies: ["DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit"]),
+    .executableTarget(name: "DuhcordUpdater", dependencies: ["DuhcordUpdateKit"], swiftSettings: strictConcurrency),
+    .testTarget(name: "DuhcordCoreTests", dependencies: ["DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit"],
+                swiftSettings: strictConcurrency),
 ]
 
 if hasLibdave {
@@ -36,7 +40,8 @@ if hasLibdave {
             .linkedLibrary("c++"),
         ]),
         // The voice helper: an XPC service that runs calls in its own sandbox, away from the account token.
-        .executableTarget(name: "DuhcordVoice", dependencies: ["CDave", "DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit"]),
+        .executableTarget(name: "DuhcordVoice", dependencies: ["CDave", "DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit"],
+                          swiftSettings: strictConcurrency),
     ]
 }
 

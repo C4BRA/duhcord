@@ -4,6 +4,7 @@ import DuhcordVoiceKit
 /// "Voice Connection": the call's server, ping, packet loss and encryption, opened from "Voice Connected" in the
 /// voice bar. The helper only measures and sends these while this panel is open. Advanced details show
 /// everything else about the connection, and can be copied for troubleshooting.
+@MainActor
 final class VoiceDetailsWindowController: NSWindowController, NSWindowDelegate {
     private static let advancedKey = "voiceDetailsAdvanced"
 
@@ -240,6 +241,7 @@ private extension NSBox {
 }
 
 /// Ping over the last five minutes, newest on the right, with guide lines every 100 ms (at least up to 200).
+@MainActor
 private final class PingGraphView: NSView {
     private static let span: Double = 300
 

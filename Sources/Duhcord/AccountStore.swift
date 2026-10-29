@@ -6,6 +6,7 @@ import DuhcordCore
 /// Each account's token is its own login-keychain item, named by the account's ID. The list itself (ID, name,
 /// picture, which one was last used) is one more keychain item, so nothing about the accounts is written
 /// anywhere else. Only one account is connected at a time.
+@MainActor
 enum AccountStore {
     static let maxAccounts = 5
 

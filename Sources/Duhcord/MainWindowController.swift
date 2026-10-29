@@ -9,6 +9,7 @@ enum Place: Hashable {
 
 /// The three-column window, laid out like Mail: the server sidebar, the channel list, and the messages, under a
 /// unified toolbar that carries the channel's name and topic.
+@MainActor
 final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuItemValidation, NSToolbarDelegate,
                                   NSSearchFieldDelegate {
     let session: DiscordSession
