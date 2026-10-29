@@ -370,7 +370,9 @@ final class MediaView: NSView, Playable {
             let animator = GIFAnimator()
             self.animator = animator
             PlaybackCoordinator.shared.startGIF(self)
-            animator.start(url, frame: { [weak self] frame in
+            let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+            let maxPixel = max(1, Int((max(bounds.width, bounds.height) * scale).rounded(.up)))
+            animator.start(url, maxPixel: maxPixel, frame: { [weak self] frame in
                 guard let self, self.animator === animator else { return }
                 self.imageView.image = NSImage(cgImage: frame, size: self.bounds.size)
             }, failed: { [weak self] in

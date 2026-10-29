@@ -12,6 +12,7 @@ VERSION="${DUHCORD_VERSION:-0.1.0}"
 BUILD="${DUHCORD_BUILD:-1}"
 XPC="$APP/Contents/XPCServices/com.duhcord.app.Updater.xpc"
 VOICE="$APP/Contents/XPCServices/com.duhcord.app.Voice.xpc"
+MEDIA_DECODER="$APP/Contents/XPCServices/com.duhcord.app.MediaDecoder.xpc"
 MIC_REASON="Duhcord uses the microphone only while you're in a voice channel and unmuted."
 
 # Discord's current build number and desktop version, so Duhcord identifies like the official app (see
@@ -37,11 +38,12 @@ swift build "${FLAGS[@]}"
 BIN_DIR="$(swift build "${FLAGS[@]}" --show-bin-path)"
 
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$XPC/Contents/MacOS" "$VOICE/Contents/MacOS" "$APP/Contents/Resources/Licenses"
+mkdir -p "$APP/Contents/MacOS" "$XPC/Contents/MacOS" "$VOICE/Contents/MacOS" "$MEDIA_DECODER/Contents/MacOS" "$APP/Contents/Resources/Licenses"
 cp "$BIN_DIR/Duhcord" "$APP/Contents/MacOS/Duhcord"
 cp "$BIN_DIR/DuhcordUpdater" "$XPC/Contents/MacOS/DuhcordUpdater"
 cp "$BIN_DIR/DuhcordVoice" "$VOICE/Contents/MacOS/DuhcordVoice"
-strip -x "$APP/Contents/MacOS/Duhcord" "$XPC/Contents/MacOS/DuhcordUpdater" "$VOICE/Contents/MacOS/DuhcordVoice"
+cp "$BIN_DIR/DuhcordMediaDecoder" "$MEDIA_DECODER/Contents/MacOS/DuhcordMediaDecoder"
+strip -x "$APP/Contents/MacOS/Duhcord" "$XPC/Contents/MacOS/DuhcordUpdater" "$VOICE/Contents/MacOS/DuhcordVoice" "$MEDIA_DECODER/Contents/MacOS/DuhcordMediaDecoder"
 # Notices for the open-source code linked into the voice helper (libdave, mlspp, BoringSSL, nlohmann/json).
 cp Vendor/libdave/licenses/* "$APP/Contents/Resources/Licenses/"
 
@@ -59,6 +61,27 @@ cat > "$VOICE/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key><string>$BUILD</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSMicrophoneUsageDescription</key><string>$MIC_REASON</string>
+    <key>XPCService</key>
+    <dict>
+        <key>ServiceType</key><string>Application</string>
+    </dict>
+</dict>
+</plist>
+PLIST
+
+# The media decoder: untrusted image bytes are decoded in a separate, sandboxed process.
+cat > "$MEDIA_DECODER/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>DuhcordMediaDecoder</string>
+    <key>CFBundleIdentifier</key><string>com.duhcord.app.MediaDecoder</string>
+    <key>CFBundleExecutable</key><string>DuhcordMediaDecoder</string>
+    <key>CFBundlePackageType</key><string>XPC!</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$BUILD</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>XPCService</key>
     <dict>
         <key>ServiceType</key><string>Application</string>

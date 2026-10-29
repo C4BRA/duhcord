@@ -1,6 +1,5 @@
 #!/bin/bash
-# Fails if the app bundle lost its hardened runtime, sandbox, or gained entitlements
-# beyond Duhcord.entitlements, or if the installer helper inside it isn't locked down the same way.
+# Fails if the app bundle or any helper lost its hardened runtime, sandbox, or gained unexpected entitlements.
 # Run by CI so a security regression can't ship silently.
 set -euo pipefail
 TMPDIR="${TMPDIR:-/tmp}"
@@ -11,13 +10,16 @@ case "$APP" in /*) ;; *) APP="$PWD/$APP" ;; esac
 
 HELPER="$APP/Contents/XPCServices/com.duhcord.app.Updater.xpc"
 VOICE="$APP/Contents/XPCServices/com.duhcord.app.Voice.xpc"
+MEDIA_DECODER="$APP/Contents/XPCServices/com.duhcord.app.MediaDecoder.xpc"
 [ -d "$HELPER" ] || { echo "error: installer helper is missing" >&2; exit 1; }
 [ -d "$VOICE" ] || { echo "error: voice helper is missing" >&2; exit 1; }
+[ -d "$MEDIA_DECODER" ] || { echo "error: media decoder helper is missing" >&2; exit 1; }
 
 codesign --verify --strict --deep "$APP"
 
 # Apple silicon native: every binary must be arm64 and nothing else.
-for bin in "$APP/Contents/MacOS/Duhcord" "$HELPER/Contents/MacOS/DuhcordUpdater" "$VOICE/Contents/MacOS/DuhcordVoice"; do
+for bin in "$APP/Contents/MacOS/Duhcord" "$HELPER/Contents/MacOS/DuhcordUpdater" \
+    "$VOICE/Contents/MacOS/DuhcordVoice" "$MEDIA_DECODER/Contents/MacOS/DuhcordMediaDecoder"; do
     archs="$(lipo -archs "$bin")"
     if [ "$archs" != "arm64" ]; then
         echo "error: $bin is built for '$archs', expected arm64 only" >&2
@@ -25,7 +27,7 @@ for bin in "$APP/Contents/MacOS/Duhcord" "$HELPER/Contents/MacOS/DuhcordUpdater"
     fi
 done
 
-for code in "$APP" "$HELPER" "$VOICE"; do
+for code in "$APP" "$HELPER" "$VOICE" "$MEDIA_DECODER"; do
     info="$(codesign -d --verbose=2 "$code" 2>&1)"
     if ! grep -q "flags=.*runtime" <<<"$info"; then
         echo "error: hardened runtime is not enabled for $code" >&2
@@ -53,6 +55,7 @@ PY
 }
 check_entitlements "$APP" Duhcord.entitlements
 check_entitlements "$VOICE" DuhcordVoice.entitlements
+check_entitlements "$MEDIA_DECODER" DuhcordMediaDecoder.entitlements
 
 # Release builds must be signed by the published certificate, so a build signed by anyone else fails.
 if [ "${DUHCORD_REQUIRE_RELEASE_SIGNATURE:-0}" = 1 ]; then
@@ -60,7 +63,7 @@ if [ "${DUHCORD_REQUIRE_RELEASE_SIGNATURE:-0}" = 1 ]; then
     expected_fp="$(tr -d '[:space:]' < signing/certificate.sha256)"
     certs="$TMPDIR/duhcord-certs"
     rm -rf "$certs" && mkdir -p "$certs"
-    for code in "$APP" "$HELPER" "$VOICE"; do
+    for code in "$APP" "$HELPER" "$VOICE" "$MEDIA_DECODER"; do
         rm -f "$certs"/codesign*
         (cd "$certs" && codesign -d --extract-certificates "$code" 2>/dev/null)
         actual_fp="$(shasum -a 256 "$certs/codesign0" | cut -d' ' -f1)"
@@ -72,4 +75,4 @@ if [ "${DUHCORD_REQUIRE_RELEASE_SIGNATURE:-0}" = 1 ]; then
     echo "OK: signed by the published Duhcord Release Signing certificate"
 fi
 
-echo "OK: $APP and its voice helper are sandboxed, use the hardened runtime, and have only the expected entitlements"
+echo "OK: $APP and its helpers use the hardened runtime and have only the expected entitlements"

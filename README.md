@@ -69,6 +69,7 @@ DMs between Duhcord users can be end-to-end encrypted, so Discord only ever stor
 - It keeps messages for at most 8 channels, 300 each, so memory stays flat. History never loads in the background.
 - Messages are laid out by hand, and only for the rows on screen.
 - Images come from Discord's image proxy at exactly the size drawn and are decoded straight to that size. They load only while on screen and are kept in a small memory cache, never on disk. Link previews come inside messages, so Duhcord never visits linked sites, and activity pictures hosted elsewhere (Spotify, YouTube, Twitch) aren't loaded.
+- Still images and GIF frames are decoded by a sandboxed helper. Video and private-video playback (AVFoundation), and preparing your own attachments, are the only media decoding left in-process.
 - GIFs animate on hover (or while visible, under **Settings → Animate GIFs**), a few at a time, and only while Duhcord is in front. Videos play on click, one at a time, with a few seconds buffered.
 
 ## Security
@@ -76,6 +77,7 @@ DMs between Duhcord users can be end-to-end encrypted, so Discord only ever stor
 - **App Sandbox and hardened runtime, with no exceptions.**
   - The app can only make outgoing network connections (`Duhcord.entitlements`).
   - The voice helper can also use the microphone (`DuhcordVoice.entitlements`).
+  - The media decoder has only the app sandbox (`DuhcordMediaDecoder.entitlements`).
   - The installer helper has no entitlements at all.
   - CI's `scripts/verify-bundle.sh` fails the build if any of these change, or if a binary isn't arm64-only.
 - **Your token is only in your login Keychain, and only ever sent to Discord.**
@@ -116,7 +118,7 @@ How an update is checked:
 - An installer helper (`Sources/DuhcordUpdater`) repeats every check, then swaps the new version in atomically. It also requires the new app to:
   - carry the same signing certificate,
   - keep the sandbox and hardened runtime,
-  - have no permissions beyond Duhcord's (for the app and both helpers).
+  - have no permissions beyond Duhcord's (for the app and its helpers).
 
   It only accepts requests from Duhcord and has no network access.
 
@@ -179,6 +181,8 @@ The release workflow builds and tests without signing credentials. The publish j
 ```
 Sources/Duhcord           AppKit UI
 Sources/DuhcordCore       Gateway, REST, models, permissions, store, markdown, update checks
+Sources/DuhcordMediaKit   Media decoder protocol and bounded ImageIO decoding
+Sources/DuhcordMediaDecoder Media decoder helper (XPC service)
 Sources/DuhcordVoice      Voice helper (XPC service): voice gateway, UDP audio, DAVE, Opus
 Sources/DuhcordVoiceKit   Voice helper protocol, packet format, transport encryption
 Sources/CDave             libdave's C header (the library comes from scripts/build-libdave.sh)

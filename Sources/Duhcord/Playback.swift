@@ -1,7 +1,6 @@
 import AppKit
 import AVFoundation
 import DuhcordCore
-import ImageIO
 import UniformTypeIdentifiers
 
 /// Something that is currently moving: a video or an animating GIF.
@@ -201,7 +200,13 @@ private final class RangeTask: NSObject, URLSessionDataDelegate {
 /// Plays a GIF with ImageIO's animated-image player, which decodes one frame at a time instead of holding
 /// every frame in memory.
 final class GIFAnimator {
-    private var stop = false
+    private var stopped = true
+    private var timer: Timer?
+    private var frames: [CGImage] = []
+    private var delays: [Double] = []
+    private var frameIndex = 0
+    private var frameCallback: ((CGImage) -> Void)?
+    private var failedCallback: (() -> Void)?
 
     /// Downloaded GIFs, so hovering the same one again (or scrolling back) doesn't fetch it again.
     private static let cache: NSCache<NSURL, NSData> = {
@@ -211,9 +216,12 @@ final class GIFAnimator {
     }()
     private static let animatableTypes: Set<String> = ["com.compuserve.gif", "org.webmproject.webp", "public.png"]
 
-    /// Fetches the GIF through the media session (or the cache) and animates it, calling `frame` on the main thread.
-    func start(_ url: URL, frame: @escaping (CGImage) -> Void, failed: @escaping () -> Void) {
-        stop = false
+    /// Fetches the animation through the media session (or the cache) and calls `frame` on the main thread.
+    func start(_ url: URL, maxPixel: Int, frame: @escaping (CGImage) -> Void, failed: @escaping () -> Void) {
+        cancel()
+        stopped = false
+        frameCallback = frame
+        failedCallback = failed
         let owner = WeakReference(self)
         let callbacks = Handoff(value: (frame: frame, failed: failed))
         Task {
@@ -224,7 +232,7 @@ final class GIFAnimator {
                 guard MediaRequest.isAllowedImageURL(url),
                       let result = try? await SecureSession.media.session.data(from: url),
                       (result.1 as? HTTPURLResponse)?.statusCode == 200 else {
-                    await MainActor.run { callbacks.value.failed() }
+                    await MainActor.run { owner.object?.fail() }
                     return
                 }
                 data = result.0
@@ -232,29 +240,52 @@ final class GIFAnimator {
             }
             let bytes = Handoff(value: data)
             await MainActor.run {
-                guard let animator = owner.object, !animator.stop else { return }
-                let data = bytes.value
-                let frame = callbacks.value.frame
-                let failed = callbacks.value.failed
-                // Only hand ImageIO's animator formats it's meant for.
-                guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-                      let type = CGImageSourceGetType(source) as String?, Self.animatableTypes.contains(type) else {
-                    failed()
-                    return
-                }
-                let status = CGAnimateImageDataWithBlock(data as CFData, nil) { [weak animator] _, image, stopPointer in
-                    guard let animator, !animator.stop else {
-                        stopPointer.pointee = true
+                guard let animator = owner.object, !animator.stopped else { return }
+                MediaDecoderClient.shared.decodeFrames(bytes.value, maxPixel: maxPixel,
+                                                       allowedTypes: Array(Self.animatableTypes).sorted()) { frames, delays in
+                    guard let animator = owner.object, !animator.stopped else { return }
+                    guard let frames, !frames.isEmpty, frames.count == delays.count else {
+                        animator.fail()
                         return
                     }
-                    frame(image)
+                    animator.frames = frames
+                    animator.delays = delays
+                    animator.frameIndex = 0
+                    callbacks.value.frame(frames[0])
+                    animator.scheduleNext()
                 }
-                if status != noErr { failed() }
             }
         }
     }
 
-    func cancel() { stop = true }
+    func cancel() {
+        stopped = true
+        timer?.invalidate()
+        timer = nil
+        frames = []
+        delays = []
+        frameCallback = nil
+        failedCallback = nil
+    }
+
+    private func scheduleNext() {
+        guard !stopped, frames.count > 1, frameIndex < delays.count else { return }
+        let timer = Timer(timeInterval: max(0.02, delays[frameIndex]), repeats: false) { [weak self] _ in
+            guard let self, !self.stopped, !self.frames.isEmpty else { return }
+            self.frameIndex = (self.frameIndex + 1) % self.frames.count
+            self.frameCallback?(self.frames[self.frameIndex])
+            self.scheduleNext()
+        }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func fail() {
+        guard !stopped else { return }
+        let failed = failedCallback
+        cancel()
+        failed?()
+    }
 }
 
 /// Serves a decrypted private video to AVFoundation straight from memory, so it never touches the disk.
