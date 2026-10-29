@@ -1,0 +1,52 @@
+name: Refresh update manifest
+
+on:
+  schedule:
+    - cron: '17 6 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: macos-15
+    environment: release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DUHCORD_UPDATE_KEY: ${{ secrets.DUHCORD_UPDATE_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the latest release manifest
+        run: |
+          mkdir -p build
+          tag="$(gh release view --json tagName -q .tagName)"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          gh release download "$tag" --pattern update.json --pattern update.json.sig --dir build
+      - name: Verify the existing manifest
+        run: swift scripts/verify-update.swift build/update.json build/update.json.sig
+      - name: Refresh the expiry
+        run: |
+          python3 - build/update.json <<'PY'
+          import json, sys, time
+
+          path = sys.argv[1]
+          with open(path, encoding="utf-8") as source:
+              manifest = json.load(source)
+          manifest["expires"] = int(time.time()) + 60 * 24 * 60 * 60
+          with open(path, "w", encoding="utf-8") as destination:
+              json.dump(manifest, destination, sort_keys=True, ensure_ascii=False)
+          PY
+      - name: Sign and verify the trusted key
+        run: |
+          public_key="$(swift scripts/sign-update.swift build/update.json)"
+          grep -qF "\"$public_key\"" Sources/DuhcordUpdateKit/UpdateKit.swift || {
+            echo "error: the update key's public half ($public_key) isn't in UpdateKit.trustedPublicKeys" >&2
+            exit 1
+          }
+      - name: Upload the refreshed manifest
+        run: gh release upload "$TAG" build/update.json build/update.json.sig --clobber

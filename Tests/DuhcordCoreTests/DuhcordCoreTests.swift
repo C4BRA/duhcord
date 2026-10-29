@@ -402,9 +402,9 @@ final class UpdateVerifierTests: XCTestCase {
     private var keys: [String] { [key.publicKey.rawRepresentation.base64EncodedString()] }
 
     private func manifest(version: String = "1.2.0", url: String = "https://github.com/C4BRA/duhcord/releases/download/v1.2.0/Duhcord.zip",
-                          size: Int = 1000, minimumSystemVersion: String? = "13.0") -> Data {
+                          size: Int = 1000, minimumSystemVersion: String? = "13.0", expires: Int? = nil) -> Data {
         let m = UpdateManifest(version: version, url: url, sha256: String(repeating: "a", count: 64), size: size,
-                               minimumSystemVersion: minimumSystemVersion, notes: "Fixes")
+                               minimumSystemVersion: minimumSystemVersion, notes: "Fixes", expires: expires)
         return try! JSONEncoder().encode(m)
     }
 
@@ -412,10 +412,26 @@ final class UpdateVerifierTests: XCTestCase {
         Data(try! (signer ?? key).signature(for: data).base64EncodedString().utf8)
     }
 
+    private func parsedManifest(expires: Int? = nil) throws -> UpdateManifest {
+        try JSONDecoder().decode(UpdateManifest.self, from: manifest(expires: expires))
+    }
+
     func testValidManifestVerifies() throws {
         let data = manifest()
         let parsed = try UpdateVerifier.verify(manifest: data, signature: sign(data), keys: keys)
         XCTAssertEqual(parsed.version, "1.2.0")
+    }
+
+    func testManifestDecodesWithAndWithoutExpiry() throws {
+        XCTAssertNil(try parsedManifest().expires)
+        XCTAssertEqual(try parsedManifest(expires: 1_900_000_000).expires, 1_900_000_000)
+    }
+
+    func testManifestExpiryStaleness() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertTrue(UpdateVerifier.isStale(try parsedManifest(), now: now))
+        XCTAssertTrue(UpdateVerifier.isStale(try parsedManifest(expires: 1_699_999_999), now: now))
+        XCTAssertFalse(UpdateVerifier.isStale(try parsedManifest(expires: 1_700_000_001), now: now))
     }
 
     func testTamperedManifestIsRejected() {
