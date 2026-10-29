@@ -19,7 +19,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private var switcher: QuickSwitcher?
     private var voiceDetails: VoiceDetailsWindowController?
     private let profiles: ProfileController
-    private let privateChat: PrivateChatController
+    let privateChat: PrivateChatController
     /// Standard / Private, for the DM on screen.
     private var privateModeItem: NSToolbarItemGroup?
     /// The toolbar's search field: finds messages in the conversation on screen (⌘F).
@@ -365,7 +365,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             return
         }
         // The first time with someone, say what will happen: a visible message goes to them.
-        if on, privateChat.status(for: channelID) == .waiting, !privateChat.hasRequest(in: channelID),
+        if on, case .waiting = privateChat.status(for: channelID), !privateChat.hasRequest(in: channelID),
            let window, let name = privateChat.peer(in: channelID)?.displayName {
             let alert = NSAlert()
             alert.messageText = "Chat privately with \(name)?"

@@ -11,6 +11,9 @@ final class SettingsWindowController: NSWindowController {
     var onLimitData: (() -> Void)?
     /// One row per saved account, rebuilt each time the window opens.
     private let accountList = NSStackView()
+    /// This Mac, then the account's other Macs that private messages may go to.
+    private let deviceList = NSStackView()
+    private weak var privateChat: PrivateChatController?
     private let notifications = NSPopUpButton()
     private let sound = NSButton(checkboxWithTitle: "Play a sound", target: nil, action: nil)
     private let dockBadge = NSButton(checkboxWithTitle: "Show mention count on the Dock icon", target: nil, action: nil)
@@ -28,11 +31,15 @@ final class SettingsWindowController: NSWindowController {
         super.init(window: window)
         buildUI()
         window.center()
+        NotificationCenter.default.addObserver(self, selector: #selector(devicesChanged),
+                                               name: PrivateChatController.devicesDidChange, object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    func show(accounts: [AccountStore.Account], currentID: Snowflake?) {
+    func show(accounts: [AccountStore.Account], currentID: Snowflake?, privateChat: PrivateChatController?) {
+        self.privateChat = privateChat
+        rebuildDevices()
         accountList.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for account in accounts {
             let current = account.id == currentID
@@ -49,13 +56,142 @@ final class SettingsWindowController: NSWindowController {
         add.toolTip = add.isEnabled ? nil : "Duhcord keeps up to \(AccountStore.maxAccounts) accounts"
         accountList.addArrangedSubview(add)
         syncFromSettings()
-        // The window fits its contents, which grow with the number of accounts.
-        if let window, let content = window.contentView {
-            content.layoutSubtreeIfNeeded()
-            window.setContentSize(content.fittingSize)
-        }
+        fitWindow()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// The window fits its contents, which grow with the number of accounts and Macs.
+    private func fitWindow() {
+        guard let window, let content = window.contentView else { return }
+        content.layoutSubtreeIfNeeded()
+        window.setContentSize(content.fittingSize)
+    }
+
+    @objc private func devicesChanged() {
+        guard window?.isVisible == true else { return }
+        rebuildDevices()
+        fitWindow()
+    }
+
+    // MARK: - Private messaging Macs
+
+    private func rebuildDevices() {
+        deviceList.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        guard PrivateChatController.isSupported else {
+            deviceList.addArrangedSubview(note("Private messaging needs macOS 14 or later."))
+            return
+        }
+        guard let privateChat else {
+            deviceList.addArrangedSubview(note("Log in to see the Macs your private messages go to."))
+            return
+        }
+        guard let code = privateChat.thisMacCode else {
+            deviceList.addArrangedSubview(note("Private messaging hasn't been used with this account on this Mac yet."))
+            return
+        }
+        let main = NSTextField(labelWithString: "This Mac (main)")
+        main.font = Theme.boldFont
+        deviceList.addArrangedSubview(main)
+        deviceList.addArrangedSubview(keyCode(code))
+
+        let devices = privateChat.devices
+        if devices.isEmpty {
+            deviceList.addArrangedSubview(note("No other Macs. When you use private messaging with this account on another "
+                                               + "Mac, it appears here for you to approve or deny."))
+            return
+        }
+        for device in devices { deviceList.addArrangedSubview(deviceRow(device, privateChat: privateChat)) }
+    }
+
+    private func deviceRow(_ device: PrivateChatController.Device, privateChat: PrivateChatController) -> NSView {
+        let added = DateFormatter.localizedString(from: device.added, dateStyle: .medium, timeStyle: .none)
+        let title: String
+        switch device.trust {
+        case .pending: title = "Other Mac — waiting for approval"
+        case .accepted: title = "Other Mac — approved"
+        case .rejected: title = "Other Mac — denied"
+        }
+        let name = NSTextField(labelWithString: title)
+        name.toolTip = "First seen \(added)"
+        let code = keyCode(device.code)
+        // Waiting and denied Macs are greyed out: they get none of your private messages.
+        if device.trust != .accepted {
+            name.textColor = .secondaryLabelColor
+            code.textColor = .tertiaryLabelColor
+        }
+        let labels = NSStackView(views: [name, code])
+        labels.orientation = .vertical
+        labels.alignment = .leading
+        labels.spacing = 2
+
+        var buttons: [NSView] = []
+        let approve = button("Approve…") { [weak self] in self?.confirmApprove(device, privateChat: privateChat) }
+        approve.isEnabled = privateChat.canApproveAnotherMac
+        approve.toolTip = approve.isEnabled ? nil
+            : "Up to \(PrivateChatController.maxOtherMacs) other Macs can be approved. Remove one first."
+        switch device.trust {
+        case .pending:
+            buttons = [button("Deny…") { [weak self] in self?.confirmDeny(device, privateChat: privateChat) }, approve]
+        case .accepted:
+            buttons = [button("Remove…") { [weak self] in self?.confirmDeny(device, privateChat: privateChat) }]
+        case .rejected:
+            buttons = [approve]
+        }
+        let row = stack([labels] + buttons)
+        row.alignment = .centerY
+        return row
+    }
+
+    private func confirmApprove(_ device: PrivateChatController.Device, privateChat: PrivateChatController) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Approve this Mac?"
+        alert.informativeText = "Only approve a Mac you own. Open Duhcord's Settings on it: the code under “This Mac” must be "
+            + "exactly\n\n\(device.code)\n\nIt will be able to read every private message you send from now on. Discord "
+            + "carries these keys, so a Mac you don't recognise could be Discord trying to read your messages.\n\n"
+            + "Your safety number with everyone changes, so anyone who verified you will need to compare again."
+        alert.addButton(withTitle: "Approve")
+        alert.addButton(withTitle: "Cancel")
+        present(alert) { privateChat.setTrust(.accepted, forDevice: device.key) }
+    }
+
+    private func confirmDeny(_ device: PrivateChatController.Device, privateChat: PrivateChatController) {
+        let approved = device.trust == .accepted
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = approved ? "Remove this Mac?" : "Deny this Mac?"
+        alert.informativeText = (approved ? "It will stop receiving the private messages you send. " : "It won't receive the "
+            + "private messages you send. ") + "If it's really yours, it won't be able to read them, and what you send from "
+            + "it is marked as not approved here. Duhcord remembers this; you can approve it again later in Settings."
+            + (approved ? "\n\nYour safety number with everyone changes, so anyone who verified you will need to compare again." : "")
+        alert.addButton(withTitle: approved ? "Remove" : "Deny").hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        present(alert) { privateChat.setTrust(.rejected, forDevice: device.key) }
+    }
+
+    private func present(_ alert: NSAlert, onConfirm: @escaping () -> Void) {
+        guard let window else { return }
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn { onConfirm() }
+        }
+    }
+
+    private func keyCode(_ code: String) -> NSTextField {
+        let field = NSTextField(labelWithString: code)
+        field.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        field.textColor = .secondaryLabelColor
+        field.isSelectable = true
+        field.setAccessibilityLabel("Key code " + code)
+        return field
+    }
+
+    private func note(_ text: String) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: text)
+        field.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        field.textColor = .secondaryLabelColor
+        field.preferredMaxLayoutWidth = 300
+        return field
     }
 
     private func buildUI() {
@@ -81,6 +217,9 @@ final class SettingsWindowController: NSWindowController {
         accountList.orientation = .vertical
         accountList.alignment = .leading
         accountList.spacing = Theme.Spacing.tight
+        deviceList.orientation = .vertical
+        deviceList.alignment = .leading
+        deviceList.spacing = Theme.Spacing.tight
 
         let grid = NSGridView(views: [
             [label("Accounts:"), accountList],
@@ -92,17 +231,19 @@ final class SettingsWindowController: NSWindowController {
             [label("Animate GIFs:"), animateGIFs],
             [label("Privacy:"), limitData],
             [NSGridCell.emptyContentView, sendTyping],
+            [label("Private messages:"), deviceList],
             [label("Updates:"), checkForUpdates],
         ])
         grid.column(at: 0).xPlacement = .trailing
         grid.rowAlignment = .firstBaseline
         grid.rowSpacing = Theme.Spacing.related
         grid.columnSpacing = Theme.Spacing.related
-        // Groups: account, notifications, appearance and media, privacy and updates.
+        // Groups: account, notifications, appearance and media, privacy, private messaging Macs, updates.
         grid.row(at: 1).topPadding = Theme.Spacing.group
         grid.row(at: 4).topPadding = Theme.Spacing.group
         grid.row(at: 7).topPadding = Theme.Spacing.group
         grid.row(at: 9).topPadding = Theme.Spacing.group
+        grid.row(at: 10).topPadding = Theme.Spacing.group
         grid.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(grid)
         NSLayoutConstraint.activate([

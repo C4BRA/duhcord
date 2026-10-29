@@ -27,7 +27,7 @@ public enum PrivateMessaging {
     /// Plaintext is padded up to a multiple of this, so a message's length says little about its text.
     static let paddingBlock = 128
     /// Recipient devices per message, besides the sender's own.
-    static let maxRecipients = 8
+    public static let maxRecipients = 8
     /// The most a private message may decompress to, so a crafted one can't balloon in memory.
     static let maxPlaintext = 64 * 1024
 
@@ -78,29 +78,59 @@ public enum PrivateMessaging {
     /// calls are end-to-end encrypted, so reading it aloud in a call works). Same digits on both sides
     /// whichever way round the keys are given, in twelve groups of five.
     public static func safetyNumber(_ a: Data, _ b: Data) -> String {
-        let (first, second) = a.lexicographicallyPrecedes(b) ? (a, b) : (b, a)
-        var input = Data("duhcord-safety-number-v1".utf8)
+        safetyNumber([a], [b])
+    }
+
+    /// The same over every key on each side: one person's Macs, and the other's. It only matches when both
+    /// people's Duhcord encrypt to exactly the same keys, so a key slipped in on either side changes it.
+    public static func safetyNumber(_ a: [Data], _ b: [Data]) -> String {
+        func side(_ keys: [Data]) -> Data {
+            var data = Data([UInt8(clamping: Set(keys).count)])
+            for key in Set(keys).sorted(by: { $0.lexicographicallyPrecedes($1) }) { data.append(key) }
+            return data
+        }
+        let (x, y) = (side(a), side(b))
+        let (first, second) = x.lexicographicallyPrecedes(y) ? (x, y) : (y, x)
+        var input = Data("duhcord-safety-number-v2".utf8)
         input.append(first)
         input.append(second)
+        return digits(of: input, groups: 12)
+    }
+
+    /// Thirty digits naming one key, to check that a Mac listed in Settings is really yours: the code under
+    /// "This Mac" on that Mac should be the same.
+    public static func keyCode(_ key: Data) -> String {
+        var input = Data("duhcord-key-code-v1".utf8)
+        input.append(key)
+        return digits(of: input, groups: 6)
+    }
+
+    /// Groups of five digits from a hash of `input` (up to 25 groups).
+    private static func digits(of input: Data, groups: Int) -> String {
         // Two hashes give 128 bytes; each group of five digits comes from five of them.
         var bytes = Data(SHA512.hash(data: input))
         bytes.append(contentsOf: SHA512.hash(data: bytes))
-        return (0..<12).map { group -> String in
+        return (0..<groups).map { group -> String in
             let value = bytes[(group * 5)..<(group * 5 + 5)].reduce(UInt64(0)) { $0 << 8 | UInt64($1) }
             let digits = String(value % 100_000)
             return String(repeating: "0", count: 5 - digits.count) + digits
         }.joined(separator: " ")
     }
 }
+}
 
 public enum PrivateMessagingError: Error, LocalizedError, Equatable {
     case tooLong
     case noRecipients
+    case tooManyRecipients
 
     public var errorDescription: String? {
         switch self {
         case .tooLong: return "This private message is too long to fit in one Discord message, even encrypted and compressed."
         case .noRecipients: return "There's no key to encrypt this message to yet."
+        case .tooManyRecipients:
+            return "This message would go to more than \(PrivateMessaging.maxRecipients) keys. Remove a Mac in Settings, "
+                + "or ask the other person to."
         }
     }
 }
@@ -154,7 +184,9 @@ public enum PrivateCrypto {
         let own = sender.publicKey.rawRepresentation
         var unique: [Data: Curve25519.KeyAgreement.PublicKey] = [:]
         for key in recipients where key.rawRepresentation != own { unique[key.rawRepresentation] = key }
-        let keys = Array(unique.values.prefix(PrivateMessaging.maxRecipients))
+        // Never leave a key out quietly: whoever it belongs to would get messages they can't read.
+        guard unique.count <= PrivateMessaging.maxRecipients else { throw PrivateMessagingError.tooManyRecipients }
+        let keys = Array(unique.values)
         guard !keys.isEmpty else { throw PrivateMessagingError.noRecipients }
 
         let raw = Data(text.utf8)

@@ -195,7 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
 
     private func refreshSettings() {
         guard let settingsWindow, settingsWindow.window?.isVisible == true else { return }
-        settingsWindow.show(accounts: AccountStore.accounts, currentID: sessionAccountID)
+        settingsWindow.show(accounts: AccountStore.accounts, currentID: sessionAccountID, privateChat: mainWindow?.privateChat)
     }
 
     @objc private func checkForUpdates(_ sender: Any?) { updates?.checkNow() }
@@ -205,14 +205,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         NSWorkspace.shared.open(URL(string: "https://github.com/C4BRA/duhcord#readme")!)
     }
 
-    @objc private func showSettings(_ sender: Any?) {
+    @objc func showSettings(_ sender: Any?) {
         let controller = settingsWindow ?? SettingsWindowController()
         controller.onLogOut = { [weak self] id in self?.confirmLogOut(accountID: id) }
         controller.onSwitch = { [weak self] id in self?.switchToAccount(id) }
         controller.onAddAccount = { [weak self] in self?.addAccount(nil) }
         controller.onLimitData = { [weak self] in self?.limitDataCollectionIfNeeded(force: true) }
         settingsWindow = controller
-        controller.show(accounts: AccountStore.accounts, currentID: sessionAccountID)
+        controller.show(accounts: AccountStore.accounts, currentID: sessionAccountID, privateChat: mainWindow?.privateChat)
     }
 
     /// Logging out ends the session for good (logging back in takes a new QR scan), so it's confirmed first.

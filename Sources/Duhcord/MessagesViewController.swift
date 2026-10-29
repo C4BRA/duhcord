@@ -281,7 +281,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         findOlderPrivateMessages()
     }
 
-    private enum BarAction { case none, verify, accept }
+    private enum BarAction { case none, verify, accept, reviewKey, settings }
     private var barAction = BarAction.none
 
     private func refreshPrivateBar() {
@@ -294,12 +294,20 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             switch privateChat.status(for: channelID) {
             case .unavailable:
                 setPrivateBar(nil)
-            case .waiting:
-                setPrivateBar("Waiting for \(name) to set up private chat. They need Duhcord to read private messages.", tone: .info)
-            case .ready(let verified, let keyChanged):
-                if keyChanged {
-                    setPrivateBar("\(name)'s key changed: a new Mac, a reinstall, or someone in the middle. Check before sending.",
-                                  tone: .warning, action: "Verify…", then: .verify)
+            case .waiting(let newKey):
+                if newKey {
+                    setPrivateBar("\(name) has a new key. Accept it before it receives your messages.",
+                                  tone: .warning, action: "Review…", then: .reviewKey)
+                } else {
+                    setPrivateBar("Waiting for \(name) to set up private chat. They need Duhcord to read private messages.", tone: .info)
+                }
+            case .ready(let verified, let newKey):
+                if newKey {
+                    setPrivateBar("\(name) has a new key: a new Mac, a reinstall, or someone in the middle. Verify it before it "
+                                  + "receives your messages.", tone: .warning, action: "Review…", then: .reviewKey)
+                } else if privateChat.devices.contains(where: { $0.trust == .pending }) {
+                    setPrivateBar("Another Mac on your account wants to read your private messages.", tone: .warning,
+                                  action: "Review in Settings…", then: .settings)
                 } else if !verified {
                     setPrivateBar("Private chat with \(name). Compare safety numbers to make sure no one is in the middle.",
                                   tone: .secure, action: "Verify…", then: .verify)
@@ -333,17 +341,80 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             break
         case .accept:
             privateChat.setMode(.private, for: channelID)
+        case .settings:
+            NSApp.sendAction(#selector(AppDelegate.showSettings(_:)), to: nil, from: self)
+        case .reviewKey:
+            reviewNewKey(in: channelID)
         case .verify:
             guard let number = privateChat.safetyNumber(for: channelID), let window = view.window else { return }
             let name = privateChat.peer(in: channelID)?.displayName ?? "them"
             let alert = NSAlert()
             alert.messageText = "Safety number with \(name)"
             alert.informativeText = number + "\n\nCompare this with \(name)'s, in person or in a voice call (Duhcord's calls are end-to-end "
-                + "encrypted). If the numbers match, only the two of you can read your private messages."
+                + "encrypted). It covers every Mac on both sides: if the numbers match, only your Macs and theirs can read your "
+                + "private messages. If either of you adds or removes a Mac, compare again."
             alert.addButton(withTitle: "Mark as Verified")
             alert.addButton(withTitle: "Cancel")
             alert.beginSheetModal(for: window) { response in
                 if response == .alertFirstButtonReturn { privateChat.markVerified(in: channelID) }
+            }
+        }
+    }
+
+    /// The other person has a key besides the accepted ones: compare the safety number it would make, then accept
+    /// or reject it. Either way is confirmed with what it means.
+    private func reviewNewKey(in channelID: Snowflake) {
+        guard let privateChat, let window = view.window,
+              let number = privateChat.safetyNumber(for: channelID, includingNew: true) else { return }
+        let name = privateChat.peer(in: channelID)?.displayName ?? "them"
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "\(name) has a new key"
+        alert.informativeText = "It could be a new Mac of theirs, a reinstall, or someone in the middle. Until you accept it, "
+            + "your private messages go only to the keys you already trust.\n\nWith it, your safety number is:\n\(number)\n\n"
+            + "Compare it with \(name)'s, in person or in a voice call. If it matches, the new key is theirs."
+        alert.addButton(withTitle: "Numbers Match")
+        alert.addButton(withTitle: "Accept Without Comparing…")
+        alert.addButton(withTitle: "Reject Key…")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            switch response {
+            case .alertFirstButtonReturn:
+                privateChat.acceptNewKeys(in: channelID, verified: true)
+            case .alertSecondButtonReturn:
+                self?.confirm("Accept \(name)'s new key without comparing?",
+                              detail: "Your private messages will go to it from now on. If it isn't really theirs, whoever "
+                                + "holds it can read them. You can compare safety numbers later with Verify.",
+                              button: "Accept Key", destructive: false) {
+                    privateChat.acceptNewKeys(in: channelID, verified: false)
+                }
+            case .alertThirdButtonReturn:
+                self?.confirm("Reject \(name)'s new key?",
+                              detail: "It will never receive your private messages, and anything sent from it is hidden. "
+                                + "If it's really a new Mac of theirs, it won't be able to read your messages. This can't be "
+                                + "undone; they'd need to set up private messaging again on that Mac.",
+                              button: "Reject Key", destructive: true) {
+                    privateChat.rejectNewKeys(in: channelID)
+                }
+            default:
+                break
+            }
+        }
+    }
+
+    /// A second sheet confirming a choice made in the first.
+    private func confirm(_ title: String, detail: String, button: String, destructive: Bool, then action: @escaping () -> Void) {
+        // The first sheet is still closing; start the next once it has.
+        DispatchQueue.main.async { [weak self] in
+            guard let window = self?.view.window else { return }
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = title
+            alert.informativeText = detail
+            alert.addButton(withTitle: button).hasDestructiveAction = destructive
+            alert.addButton(withTitle: "Cancel")
+            alert.beginSheetModal(for: window) { response in
+                if response == .alertFirstButtonReturn { action() }
             }
         }
     }

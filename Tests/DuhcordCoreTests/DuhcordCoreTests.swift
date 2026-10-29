@@ -1135,6 +1135,41 @@ final class PrivateMessagingTests: XCTestCase {
         XCTAssertEqual(number.filter(\.isNumber).count, 60)
     }
 
+    func testSafetyNumberCoversEveryKey() {
+        func key() -> Data { Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation }
+        let (mac1, mac2, theirs) = (key(), key(), key())
+        let number = PrivateMessaging.safetyNumber([mac1, mac2], [theirs])
+        // Same for both people, whatever order each lists their own keys in.
+        XCTAssertEqual(number, PrivateMessaging.safetyNumber([theirs], [mac2, mac1]))
+        XCTAssertEqual(number.filter(\.isNumber).count, 60)
+        // A key slipped in on either side changes it.
+        XCTAssertNotEqual(number, PrivateMessaging.safetyNumber([mac1, mac2], [theirs, key()]))
+        XCTAssertNotEqual(number, PrivateMessaging.safetyNumber([mac1, mac2, key()], [theirs]))
+        // Moving a key from one side to the other changes it too.
+        XCTAssertNotEqual(number, PrivateMessaging.safetyNumber([mac1], [mac2, theirs]))
+    }
+
+    func testKeyCode() {
+        let a = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
+        let b = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
+        let code = PrivateMessaging.keyCode(a)
+        XCTAssertEqual(code, PrivateMessaging.keyCode(a))
+        XCTAssertNotEqual(code, PrivateMessaging.keyCode(b))
+        XCTAssertEqual(code.split(separator: " ").count, 6)
+        XCTAssertEqual(code.filter(\.isNumber).count, 30)
+    }
+
+    func testSealRefusesToDropRecipients() throws {
+        guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
+        let alice = Curve25519.KeyAgreement.PrivateKey()
+        let eight = (0..<PrivateMessaging.maxRecipients).map { _ in Curve25519.KeyAgreement.PrivateKey().publicKey }
+        XCTAssertNoThrow(try PrivateCrypto.seal("hi", channelID: "1", sender: alice, recipients: eight + [alice.publicKey]))
+        XCTAssertThrowsError(try PrivateCrypto.seal("hi", channelID: "1", sender: alice,
+                                                    recipients: eight + [Curve25519.KeyAgreement.PrivateKey().publicKey])) {
+            XCTAssertEqual($0 as? PrivateMessagingError, .tooManyRecipients)
+        }
+    }
+
     func testSealAndOpen() throws {
         guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
         let alice = Curve25519.KeyAgreement.PrivateKey(), bob = Curve25519.KeyAgreement.PrivateKey()
