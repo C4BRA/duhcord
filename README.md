@@ -159,8 +159,9 @@ cd /tmp && codesign -d --extract-certificates /Applications/Duhcord.app && shasu
 **Update approval key:**
 1. Run `swift scripts/create-update-key.swift`. It writes `~/Duhcord-signing/update-key.private` and `.public`.
 2. Back up the private key offline. If it's lost, installed copies need one manual reinstall.
-3. Add it as the repository secret `DUHCORD_UPDATE_KEY`.
-4. Add the public key to `trustedPublicKeys` in `Sources/DuhcordUpdateKit/UpdateKit.swift`.
+3. Store `DUHCORD_UPDATE_KEY` as a secret of a GitHub Environment named `release` (Settings → Environments → release). Add required reviewers and limit deployments to tags `v*`.
+4. The release workflow's publish job is the only job that uses it. No third-party source is built in that job.
+5. Add the public key to `trustedPublicKeys` in `Sources/DuhcordUpdateKit/UpdateKit.swift`.
 
 Never commit or share the `.p12`, its `.base64` copy, its password, or `update-key.private`.
 
@@ -171,7 +172,7 @@ git tag -a v1.2.0 -m "What changed in this version"
 git push origin v1.2.0
 ```
 
-The release workflow builds and signs the app, signs `update.json` (with the tag message as release notes) and publishes the GitHub release. It refuses tags that aren't on the default branch, and update keys that installed copies wouldn't trust.
+The release workflow builds and tests without signing credentials. The publish job waits for approval in the `release` environment, then signs the app and `update.json` (with the tag message as release notes) and publishes the GitHub release. It refuses tags that aren't on the default branch, and update keys that installed copies wouldn't trust.
 
 ## Layout
 
