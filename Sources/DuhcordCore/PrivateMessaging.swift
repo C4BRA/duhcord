@@ -117,7 +117,6 @@ public enum PrivateMessaging {
         }.joined(separator: " ")
     }
 }
-}
 
 public enum PrivateMessagingError: Error, LocalizedError, Equatable {
     case tooLong
