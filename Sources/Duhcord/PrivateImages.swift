@@ -48,18 +48,13 @@ final class PrivateImageLoader {
                 completion(nil)
                 return
             }
-            let bytes = Handoff(value: data)
-            // The same two-at-a-time queue as other images, so scrolling past many large photos stays light.
-            MediaLoader.shared.decodeQueue.addOperation {
-                let decoded = Handoff(value: MediaLoader.decode(bytes.value, maxPixel: maxPixel, pointSize: pointSize,
-                                                                allowedTypes: allowed))
-                DispatchQueue.main.async {
-                    if let image = decoded.value {
-                        let pixels = image.representations.first.map { $0.pixelsWide * $0.pixelsHigh } ?? 0
-                        self?.images.setObject(image, forKey: key, cost: pixels * 4)
-                    }
-                    completion(decoded.value)
+            MediaDecoderClient.shared.decode(data, maxPixel: maxPixel, allowedTypes: Array(allowed),
+                                             maxSourcePixels: MediaLoader.maxSourcePixels, pointSize: pointSize) { decoded in
+                if let decoded {
+                    let pixels = decoded.representations.first.map { $0.pixelsWide * $0.pixelsHigh } ?? 0
+                    self?.images.setObject(decoded, forKey: key, cost: pixels * 4)
                 }
+                completion(decoded)
             }
         }
     }
@@ -284,11 +279,14 @@ final class PrivateImagePreview: NSWindowController, NSWindowDelegate {
             let size = NSSize(width: max(200, fit.width), height: max(150, fit.height))
             let allowed: Set<String> = [image.file.kind == .png ? UTType.png.identifier : UTType.jpeg.identifier]
             let scale = parent?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-            guard let decoded = MediaLoader.decode(data, maxPixel: Int(max(size.width, size.height) * scale),
-                                                   pointSize: size, allowedTypes: allowed) else { return }
-            let preview = PrivateImagePreview(image: decoded, data: data, kind: image.file.kind, size: size)
-            open.append(preview)
-            preview.showWindow(nil)
+            MediaDecoderClient.shared.decode(data, maxPixel: Int(max(size.width, size.height) * scale),
+                                             allowedTypes: Array(allowed), maxSourcePixels: MediaLoader.maxSourcePixels,
+                                             pointSize: size) { decoded in
+                guard let decoded else { return }
+                let preview = PrivateImagePreview(image: decoded, data: data, kind: image.file.kind, size: size)
+                open.append(preview)
+                preview.showWindow(nil)
+            }
         }
     }
 

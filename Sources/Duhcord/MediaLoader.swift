@@ -1,6 +1,5 @@
 import AppKit
 import DuhcordCore
-import ImageIO
 
 /// Fetches and decodes embed and attachment images, as cheaply as possible:
 /// - Only from Discord's image proxies, at exactly the pixel size that will be drawn (see MediaRequest).
@@ -20,14 +19,6 @@ final class MediaLoader {
     }()
     private var waiters: [URL: [Token: (NSImage?) -> Void]] = [:]
     private var tasks: [URL: Task<Void, Never>] = [:]
-    /// Decoding happens off the main thread, two at a time at most (private images share it).
-    let decodeQueue: OperationQueue = {
-        let queue = OperationQueue()
-        queue.maxConcurrentOperationCount = 2
-        queue.qualityOfService = .utility
-        return queue
-    }()
-
     private static let maxBytes = 8 * 1024 * 1024
     static let maxSourcePixels = 40_000_000
     static let allowedTypes: Set<String> = ["org.webmproject.webp", "public.png", "public.jpeg", "com.compuserve.gif"]
@@ -49,9 +40,8 @@ final class MediaLoader {
 
         let maxPixel = Int((max(pointSize.width, pointSize.height) * scale).rounded(.up))
         let owner = WeakReference(self)
-        let queue = Handoff(value: decodeQueue)
         tasks[url] = Task {
-            let image = Handoff(value: await Self.fetch(url, maxPixel: maxPixel, pointSize: pointSize, queue: queue.value))
+            let image = Handoff(value: await Self.fetch(url, maxPixel: maxPixel, pointSize: pointSize))
             await MainActor.run { owner.object?.finish(url, image: image.value) }
         }
         return token
@@ -75,36 +65,15 @@ final class MediaLoader {
         callbacks.values.forEach { $0(image) }
     }
 
-    private static func fetch(_ url: URL, maxPixel: Int, pointSize: NSSize, queue: OperationQueue?) async -> NSImage? {
+    private static func fetch(_ url: URL, maxPixel: Int, pointSize: NSSize) async -> NSImage? {
         guard MediaRequest.isAllowedImageURL(url), let data = await CappedDownload.data(from: url, limit: maxBytes),
-              !Task.isCancelled, let queue else { return nil }
+              !Task.isCancelled else { return nil }
         return await withCheckedContinuation { continuation in
-            queue.addOperation {
-                continuation.resume(returning: decode(data, maxPixel: maxPixel, pointSize: pointSize))
+            MediaDecoderClient.shared.decode(data, maxPixel: maxPixel, allowedTypes: Array(allowedTypes).sorted(),
+                                             maxSourcePixels: maxSourcePixels, pointSize: pointSize) {
+                continuation.resume(returning: $0)
             }
         }
-    }
-
-    /// Decodes straight to `maxPixel` (ImageIO's thumbnail path), after checking the format and pixel count.
-    static func decode(_ data: Data, maxPixel: Int, pointSize: NSSize, allowedTypes: Set<String> = MediaLoader.allowedTypes) -> NSImage? {
-        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
-        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions),
-              let type = CGImageSourceGetType(source) as String?, allowedTypes.contains(type),
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, sourceOptions) as? [CFString: Any],
-              let width = properties[kCGImagePropertyPixelWidth] as? Int,
-              let height = properties[kCGImagePropertyPixelHeight] as? Int,
-              width > 0, height > 0, width * height <= maxSourcePixels else { return nil }
-        let thumbnailOptions: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixel),
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceShouldCacheImmediately: true,
-        ]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary) else { return nil }
-        // Keep the image's own proportions: the box it was asked for can be a slightly different shape
-        // (a banner that isn't exactly 5:2), and stretching it to the box would distort it.
-        let fit = min(pointSize.width / CGFloat(image.width), pointSize.height / CGFloat(image.height))
-        return NSImage(cgImage: image, size: NSSize(width: CGFloat(image.width) * fit, height: CGFloat(image.height) * fit))
     }
 }
 

@@ -111,13 +111,17 @@ final class Installer: NSObject, DuhcordUpdaterProtocol {
             [sandbox, network],
             [sandbox, network, "com.apple.security.files.user-selected.read-write"],
         ], name: "the app")
-        // The helpers inside keep their own limits: this one with none at all, the voice helper sandboxed with
-        // only the network and the microphone.
+        // The helpers inside keep their own limits: this one with none at all, the voice helper with network and
+        // microphone access, and the optional media decoder with only the app sandbox.
         let services = url.appendingPathComponent("Contents/XPCServices")
         try checkLimits(at: services.appendingPathComponent(UpdateKit.serviceName + ".xpc"), entitlements: [], name: "the installer")
         let voice = services.appendingPathComponent(UpdateKit.voiceServiceName + ".xpc")
         if fileManager.fileExists(atPath: voice.path) {
             try checkLimits(at: voice, entitlements: [sandbox, network, "com.apple.security.device.audio-input"], name: "the voice helper")
+        }
+        let mediaDecoder = services.appendingPathComponent("com.duhcord.app.MediaDecoder.xpc")
+        if fileManager.fileExists(atPath: mediaDecoder.path) {
+            try checkLimits(at: mediaDecoder, entitlements: [sandbox], name: "the media decoder")
         }
         guard Self.version(of: url) == expectedVersion else { throw UpdateError.invalidApp("version doesn't match the manifest") }
     }

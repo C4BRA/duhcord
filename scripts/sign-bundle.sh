@@ -10,6 +10,7 @@ cd "$(dirname "$0")/.."
 APP="${1:?Usage: scripts/sign-bundle.sh <path/to/Duhcord.app>}"
 XPC="$APP/Contents/XPCServices/com.duhcord.app.Updater.xpc"
 VOICE="$APP/Contents/XPCServices/com.duhcord.app.Voice.xpc"
+MEDIA_DECODER="$APP/Contents/XPCServices/com.duhcord.app.MediaDecoder.xpc"
 
 IDENTITY="${DUHCORD_SIGN_IDENTITY:-}"
 if [ -z "$IDENTITY" ]; then
@@ -26,5 +27,7 @@ HELPER_ARGS=(--force --options runtime --sign "${IDENTITY:--}")
 codesign "${HELPER_ARGS[@]}" "$XPC"
 # The voice helper is sandboxed with its own, separate entitlements (network and microphone).
 codesign "${HELPER_ARGS[@]}" --entitlements DuhcordVoice.entitlements "$VOICE"
+# The media decoder runs ImageIO in a separate sandboxed process.
+codesign "${HELPER_ARGS[@]}" --entitlements DuhcordMediaDecoder.entitlements "$MEDIA_DECODER"
 codesign "${SIGN_ARGS[@]}" "$APP"
 [ -n "$IDENTITY" ] && echo "Signed with Duhcord Release Signing ($IDENTITY)" || echo "Signed ad-hoc (no release certificate found)"

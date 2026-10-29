@@ -10,20 +10,25 @@ let hasLibdave = FileManager.default.fileExists(atPath: libdaveDirectory + "/lib
 var products: [Product] = [
     .executable(name: "Duhcord", targets: ["Duhcord"]),
     .executable(name: "DuhcordUpdater", targets: ["DuhcordUpdater"]),
+    .executable(name: "DuhcordMediaDecoder", targets: ["DuhcordMediaDecoder"]),
 ]
 
 var targets: [Target] = [
     // Update manifest, signature checks and the installer protocol, shared by the app and the installer.
     .target(name: "DuhcordUpdateKit"),
+    // ImageIO decoding, shared by the app's in-process fallback and its sandboxed media helper.
+    .target(name: "DuhcordMediaKit"),
     // Networking, models, state and markdown parsing. Foundation only, no AppKit.
     .target(name: "DuhcordCore", dependencies: ["DuhcordUpdateKit"]),
     // The voice helper's protocol, packet format and transport encryption, shared by the app and the helper.
     .target(name: "DuhcordVoiceKit", dependencies: ["DuhcordUpdateKit"]),
     // The AppKit user interface.
-    .executableTarget(name: "Duhcord", dependencies: ["DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit"]),
+    .executableTarget(name: "Duhcord", dependencies: ["DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit", "DuhcordMediaKit"]),
     // The installer helper (an XPC service inside the app) that swaps in verified updates.
     .executableTarget(name: "DuhcordUpdater", dependencies: ["DuhcordUpdateKit"]),
-    .testTarget(name: "DuhcordCoreTests", dependencies: ["DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit"]),
+    // Decodes untrusted still and animated images outside the app's process.
+    .executableTarget(name: "DuhcordMediaDecoder", dependencies: ["DuhcordMediaKit", "DuhcordUpdateKit"]),
+    .testTarget(name: "DuhcordCoreTests", dependencies: ["DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit", "DuhcordMediaKit"]),
 ]
 
 if hasLibdave {
