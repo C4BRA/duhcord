@@ -47,10 +47,11 @@ final class MediaDecodingTests: XCTestCase {
         guard let destination = CGImageDestinationCreateWithData(data, type as CFString, frames.count, nil) else {
             throw TestError.couldNotCreateImage
         }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { throw TestError.couldNotCreateImage }
         for frame in frames {
             guard let context = CGContext(data: nil, width: frame.width, height: frame.height, bitsPerComponent: 8,
-                                          bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB),
-                                          bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)) else {
+                                          bytesPerRow: 0, space: colorSpace,
+                                          bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue).rawValue) else {
                 throw TestError.couldNotCreateImage
             }
             context.setFillColor(frame.color)
