@@ -68,11 +68,17 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private let tray = NSStackView()
     private var trayHeight: NSLayoutConstraint!
     private var trayGap: NSLayoutConstraint!
-    private var attached: [ImagePrep.Prepared] = []
-    /// Images still being re-encoded, shown as spinners.
-    private var preparing = 0
-    /// Bumped when the row is cleared, so images still being prepared for it are dropped.
-    private var attachGeneration = 0
+    private var attached: [PreparedAttachment] = []
+    /// Attachments still being prepared, shown as spinners (videos with their progress, and ✕ to stop).
+    private struct Job {
+        var progress: Double?
+        let video: VideoPrep?
+    }
+
+    private var jobs: [UUID: Job] = [:]
+    private var jobOrder: [UUID] = []
+    private var jobIndicators: [UUID: NSProgressIndicator] = [:]
+    private var preparing: Int { jobs.count }
     /// Return was pressed while images were still being prepared: send once they're ready.
     private var sendWhenReady = false
 
@@ -86,7 +92,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     private struct Draft {
         var text = ""
-        var images: [ImagePrep.Prepared] = []
+        var images: [PreparedAttachment] = []
         var isEmpty: Bool { text.isEmpty && images.isEmpty }
     }
 
@@ -301,7 +307,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     /// A message that wasn't sent goes back where it was written: into the box if that's still showing, otherwise
     /// into that conversation's draft (never into whatever box is open now). Returns whether it's in the box.
     @discardableResult
-    private func restoreUnsent(_ text: String, images: [ImagePrep.Prepared], to key: DraftKey) -> Bool {
+    private func restoreUnsent(_ text: String, images: [PreparedAttachment], to key: DraftKey) -> Bool {
         if key == draftKey {
             if input.text.isEmpty { input.text = text }
             if attached.isEmpty { attached = images }
@@ -315,32 +321,47 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         return false
     }
 
-    /// Re-encodes the images in the background, then adds them to the row (up to the most a message can carry).
-    private func attach(_ sources: [(data: Data, name: String)]) {
+    /// Prepares dropped or pasted images and videos in the background, then adds them to the row (up to the most a
+    /// message can carry).
+    private func attach(_ sources: [ImagePrep.Source]) {
         guard canAttachImages, !isUploading, !sources.isEmpty else { return }
         let room = PrivateMessaging.maxFiles - attached.count - preparing
         if sources.count > room { NSSound.beep() }
-        let generation = attachGeneration
         for source in sources.prefix(max(0, room)) {
-            preparing += 1
-            let job = Handoff(value: source)
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let prepared = Handoff(value: ImagePrep.prepare(job.value.data, name: job.value.name))
-                DispatchQueue.main.async {
-                    // The channel changed or the row was cleared meanwhile: it's no longer wanted.
-                    guard let self, self.attachGeneration == generation else { return }
-                    self.preparing -= 1
-                    if let image = prepared.value {
-                        self.attached.append(image)
-                    } else {
-                        self.showSendError("Couldn't attach “\(job.value.name)”",
-                                           detail: "It isn't an image Duhcord can read, or it's too large.")
+            let id = UUID()
+            jobOrder.append(id)
+            switch source {
+            case .image(let data, let name):
+                jobs[id] = Job(progress: nil, video: nil)
+                let bytes = Handoff(value: data)
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    let prepared = Handoff(value: ImagePrep.prepare(bytes.value, name: name))
+                    DispatchQueue.main.async {
+                        self?.finishJob(id, prepared.value, failure: prepared.value == nil
+                            ? "It isn't an image Duhcord can read, or it's too large." : nil, name: name)
                     }
-                    self.refreshTray()
-                    // Return was pressed meanwhile: now everything's ready, send what's in the box.
-                    if self.preparing == 0, self.sendWhenReady {
-                        self.sendWhenReady = false
-                        self.send(self.input.text.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+            case .video(let url, let name):
+                let prep = VideoPrep()
+                jobs[id] = Job(progress: 0, video: prep)
+                // Room left in the message, and in Private, for the padding encryption adds (up to 12%).
+                let used = attached.reduce(0) { $0 + $1.data.count }
+                var limit = store.uploadLimit - used
+                if isPrivate { limit = min(Int(Double(limit) / 1.13), PrivateMessaging.maxFileBytes) }
+                let options = VideoPrep.Options(limit: limit, compress: Settings.compressVideos, forPrivate: isPrivate)
+                let owner = WeakReference(self)
+                Task.detached(priority: .userInitiated) {
+                    do {
+                        let prepared = try await prep.prepare(url, name: name, options: options) { fraction in
+                            DispatchQueue.main.async { owner.object?.updateJob(id, progress: fraction) }
+                        }
+                        let result = Handoff(value: prepared)
+                        await MainActor.run { owner.object?.finishJob(id, result.value, failure: nil, name: name) }
+                    } catch is CancellationError {
+                        await MainActor.run { owner.object?.finishJob(id, nil, failure: nil, name: name) }
+                    } catch {
+                        let message = error.localizedDescription
+                        await MainActor.run { owner.object?.finishJob(id, nil, failure: message, name: name) }
                     }
                 }
             }
@@ -348,10 +369,41 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         refreshTray()
     }
 
+    private func updateJob(_ id: UUID, progress: Double) {
+        guard jobs[id] != nil else { return }
+        jobs[id]?.progress = progress
+        jobIndicators[id]?.doubleValue = progress
+    }
+
+    /// An attachment is ready (or failed, or was stopped). A job no longer listed was cleared meanwhile: dropped.
+    private func finishJob(_ id: UUID, _ prepared: PreparedAttachment?, failure: String?, name: String) {
+        guard jobs.removeValue(forKey: id) != nil else { return }
+        jobOrder.removeAll { $0 == id }
+        if let prepared {
+            attached.append(prepared)
+        } else if let failure {
+            showSendError("Couldn't attach “\(name)”", detail: failure)
+        }
+        refreshTray()
+        // Return was pressed meanwhile: now everything's ready, send what's in the box.
+        if preparing == 0, sendWhenReady {
+            sendWhenReady = false
+            send(input.text.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    @objc private func cancelJob(_ sender: NSButton) {
+        guard let id = sender.identifier.flatMap({ UUID(uuidString: $0.rawValue) }), let job = jobs.removeValue(forKey: id) else { return }
+        job.video?.cancel()
+        jobOrder.removeAll { $0 == id }
+        refreshTray()
+    }
+
     private func clearAttachments() {
-        attachGeneration += 1
+        jobs.values.forEach { $0.video?.cancel() }
+        jobs = [:]
+        jobOrder = []
         attached = []
-        preparing = 0
         sendWhenReady = false
         refreshTray()
     }
@@ -361,16 +413,13 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         for (index, image) in attached.enumerated() {
             tray.addArrangedSubview(trayItem(image, index: index))
         }
-        for _ in 0..<preparing {
-            let spinner = NSProgressIndicator()
-            spinner.style = .spinning
-            spinner.controlSize = .small
-            spinner.startAnimation(nil)
-            spinner.setAccessibilityLabel("Preparing image")
-            tray.addArrangedSubview(spinner)
+        jobIndicators = [:]
+        for id in jobOrder {
+            guard let job = jobs[id] else { continue }
+            tray.addArrangedSubview(jobItem(id, job))
         }
         if isUploading || sendWhenReady {
-            let status = isUploading ? (isPrivate ? "Encrypting and sending…" : "Sending…") : "Sends when the images are ready…"
+            let status = isUploading ? (isPrivate ? "Encrypting and sending…" : "Sending…") : "Sends when everything's ready…"
             let label = NSTextField(labelWithString: status)
             label.textColor = .secondaryLabelColor
             label.font = Theme.messageSmallFont
@@ -387,7 +436,43 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
-    private func trayItem(_ image: ImagePrep.Prepared, index: Int) -> NSView {
+    /// An attachment being prepared: a spinner, or for a video its progress and ✕ to stop.
+    private func jobItem(_ id: UUID, _ job: Job) -> NSView {
+        let indicator = NSProgressIndicator()
+        indicator.controlSize = .small
+        guard let progress = job.progress else {
+            indicator.style = .spinning
+            indicator.startAnimation(nil)
+            indicator.setAccessibilityLabel("Preparing image")
+            return indicator
+        }
+        indicator.style = .bar
+        indicator.isIndeterminate = false
+        indicator.minValue = 0
+        indicator.maxValue = 1
+        indicator.doubleValue = progress
+        indicator.setAccessibilityLabel(Settings.compressVideos ? "Compressing video" : "Preparing video")
+        jobIndicators[id] = indicator
+        let label = NSTextField(labelWithString: Settings.compressVideos ? "Compressing video…" : "Preparing video…")
+        label.font = Theme.messageSmallFont
+        label.textColor = .secondaryLabelColor
+        let stop = NSButton(image: NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Stop")!,
+                            target: self, action: #selector(cancelJob(_:)))
+        stop.isBordered = false
+        stop.identifier = NSUserInterfaceItemIdentifier(id.uuidString)
+        stop.toolTip = "Stop"
+        let column = NSStackView(views: [label, indicator])
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 2
+        indicator.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        let row = NSStackView(views: [column, stop])
+        row.orientation = .horizontal
+        row.spacing = Theme.Spacing.tight
+        return row
+    }
+
+    private func trayItem(_ image: PreparedAttachment, index: Int) -> NSView {
         let size = Self.trayItemSize
         let item = NSView()
         item.translatesAutoresizingMaskIntoConstraints = false
@@ -404,7 +489,23 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         remove.tag = index
         remove.isEnabled = !isUploading
         remove.toolTip = "Remove"
-        [picture, remove].forEach {
+        var views: [NSView] = [picture, remove]
+        var badgeConstraints: [NSLayoutConstraint] = []
+        if image.kind.isVideo {
+            let seconds = Int(image.duration.rounded())
+            let badge = NSTextField(labelWithString: String(format: " ▶ %d:%02d ", seconds / 60, seconds % 60))
+            badge.font = .systemFont(ofSize: 10, weight: .bold)
+            badge.textColor = .white
+            badge.drawsBackground = true
+            badge.backgroundColor = NSColor.black.withAlphaComponent(0.55)
+            badge.setAccessibilityLabel("Video, \(seconds) seconds")
+            views.append(badge)
+            badgeConstraints = [
+                badge.leadingAnchor.constraint(equalTo: item.leadingAnchor, constant: 3),
+                badge.bottomAnchor.constraint(equalTo: item.bottomAnchor, constant: -3),
+            ]
+        }
+        views.forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             item.addSubview($0)
         }
@@ -417,7 +518,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             picture.trailingAnchor.constraint(equalTo: item.trailingAnchor),
             remove.topAnchor.constraint(equalTo: item.topAnchor, constant: 2),
             remove.trailingAnchor.constraint(equalTo: item.trailingAnchor, constant: -2),
-        ])
+        ] + badgeConstraints)
         return item
     }
 
@@ -452,7 +553,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 files = images.map(\.upload)
                 content = text
             }
-            guard files.reduce(0, { $0 + $1.data.count }) <= PrivateMessaging.maxUploadBytes else {
+            guard files.reduce(0, { $0 + $1.data.count }) <= store.uploadLimit else {
                 throw PrivateMessagingError.filesTooLarge
             }
         } catch {
@@ -479,7 +580,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     /// Puts an unsent message back where it was written and says why it wasn't sent.
-    private func reportUnsent(_ text: String, images: [ImagePrep.Prepared], to key: DraftKey, error: Error) {
+    private func reportUnsent(_ text: String, images: [PreparedAttachment], to key: DraftKey, error: Error) {
         let inBox = restoreUnsent(text, images: images, to: key)
         // Connection problems lock the app instead; no separate alert.
         guard !DiscordSession.isConnectivityError(error) else { return }

@@ -22,6 +22,7 @@ final class SettingsWindowController: NSWindowController {
     private let sendTyping = NSButton(checkboxWithTitle: "Show when I'm typing", target: nil, action: nil)
     private let limitData = NSButton(checkboxWithTitle: "Limit what Discord collects", target: nil, action: nil)
     private let animateGIFs = NSPopUpButton()
+    private let compressVideos = NSButton(checkboxWithTitle: "Compress to fit my upload limit", target: nil, action: nil)
     private let checkForUpdates = NSButton(checkboxWithTitle: "Check for updates automatically", target: nil, action: nil)
 
     init() {
@@ -37,8 +38,16 @@ final class SettingsWindowController: NSWindowController {
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    func show(accounts: [AccountStore.Account], currentID: Snowflake?, privateChat: PrivateChatController?) {
+    /// `premiumType`: the logged-in account's Nitro tier, for the upload limit videos are compressed to (nil when
+    /// not logged in).
+    func show(accounts: [AccountStore.Account], currentID: Snowflake?, privateChat: PrivateChatController?,
+              premiumType: Int?? = nil) {
         self.privateChat = privateChat
+        if let premiumType {
+            let limit = min(UploadLimit.discordLimit(premiumType: premiumType), UploadLimit.duhcordCap)
+            compressVideos.title = "Compress to fit my upload limit ("
+                + ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .binary) + ")"
+        }
         rebuildDevices()
         accountList.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for account in accounts {
@@ -209,7 +218,10 @@ final class SettingsWindowController: NSWindowController {
         limitData.toolTip = "Turns off Discord's data use, tracking and marketing settings on your accounts: usage statistics, "
             + "personalisation, screen reader tracking, game and platform account detection, contact and phone number "
             + "matching, and marketing emails. Applied once per account; change them back in Discord's app if you like."
-        [sound, dockBadge, compact, checkForUpdates, sendTyping, limitData].forEach {
+        compressVideos.toolTip = "Videos are re-encoded with the Mac's hardware encoder so they fit Discord's upload limit "
+            + "for your account (10 MB without Nitro). One that already fits is sent at its own quality. Either way, its "
+            + "location and other details are left out."
+        [sound, dockBadge, compact, checkForUpdates, sendTyping, limitData, compressVideos].forEach {
             $0.target = self
             $0.action = #selector(changed)
         }
@@ -229,6 +241,7 @@ final class SettingsWindowController: NSWindowController {
             [label("Layout:"), compact],
             [label("Images:"), mediaPreviews],
             [label("Animate GIFs:"), animateGIFs],
+            [label("Videos:"), compressVideos],
             [label("Privacy:"), limitData],
             [NSGridCell.emptyContentView, sendTyping],
             [label("Private messages:"), deviceList],
@@ -241,9 +254,9 @@ final class SettingsWindowController: NSWindowController {
         // Groups: account, notifications, appearance and media, privacy, private messaging Macs, updates.
         grid.row(at: 1).topPadding = Theme.Spacing.group
         grid.row(at: 4).topPadding = Theme.Spacing.group
-        grid.row(at: 7).topPadding = Theme.Spacing.group
-        grid.row(at: 9).topPadding = Theme.Spacing.group
+        grid.row(at: 8).topPadding = Theme.Spacing.group
         grid.row(at: 10).topPadding = Theme.Spacing.group
+        grid.row(at: 11).topPadding = Theme.Spacing.group
         grid.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(grid)
         NSLayoutConstraint.activate([
@@ -273,6 +286,7 @@ final class SettingsWindowController: NSWindowController {
         sendTyping.state = Settings.sendTypingIndicator ? .on : .off
         limitData.state = Settings.limitDiscordData ? .on : .off
         animateGIFs.selectItem(at: Settings.animateGIFs.rawValue)
+        compressVideos.state = Settings.compressVideos ? .on : .off
         sound.isEnabled = Settings.notifications != .off
     }
 
@@ -288,6 +302,7 @@ final class SettingsWindowController: NSWindowController {
         Settings.limitDiscordData = limitData.state == .on
         if Settings.limitDiscordData, !limitWasOn { onLimitData?() }
         Settings.animateGIFs = Settings.AnimateGIFs(rawValue: animateGIFs.indexOfSelectedItem) ?? .onHover
+        Settings.compressVideos = compressVideos.state == .on
         sound.isEnabled = Settings.notifications != .off
     }
 

@@ -1218,7 +1218,7 @@ final class PrivateMessagingTests: XCTestCase {
         // Another image's attachment doesn't open with this image's key.
         let (_, other) = try PrivateCrypto.sealFile(picture, width: 10, height: 10, kind: .png)
         XCTAssertNil(PrivateCrypto.openFile(other, file: file))
-        XCTAssertThrowsError(try PrivateCrypto.sealFile(Data(count: PrivateMessaging.maxUploadBytes + 1),
+        XCTAssertThrowsError(try PrivateCrypto.sealFile(Data(count: PrivateMessaging.maxFileBytes + 1),
                                                         width: 1, height: 1, kind: .jpeg))
     }
 
@@ -1236,6 +1236,23 @@ final class PrivateMessagingTests: XCTestCase {
         let empty = PrivateFile(key: file.key, length: 1000, sealedLength: file.sealedLength, width: 0, height: 1, kind: .jpeg)
         XCTAssertNil(PrivateFile(empty.encoded()))
         XCTAssertEqual(PrivateFile(file.encoded()), file)
+    }
+
+    func testUploadLimits() {
+        XCTAssertEqual(UploadLimit.discordLimit(premiumType: nil), 10 * 1024 * 1024)
+        XCTAssertEqual(UploadLimit.discordLimit(premiumType: 3), 50 * 1024 * 1024)
+        XCTAssertEqual(UploadLimit.discordLimit(premiumType: 2), 500 * 1024 * 1024)
+        XCTAssertLessThan(UploadLimit.bytes(premiumType: 0), 10 * 1024 * 1024)
+        // Never more than Duhcord holds in memory for one message.
+        XCTAssertLessThanOrEqual(UploadLimit.bytes(premiumType: 2), UploadLimit.duhcordCap)
+    }
+
+    func testVideoFileKind() throws {
+        guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
+        let (file, sealed) = try PrivateCrypto.sealFile(Data(count: 30_000), width: 1280, height: 720, kind: .mp4)
+        XCTAssertTrue(file.kind.isVideo)
+        XCTAssertEqual(PrivateFile(file.encoded()), file)
+        XCTAssertEqual(PrivateCrypto.openFile(sealed, file: file)?.count, 30_000)
     }
 
     func testAttachmentURLs() {

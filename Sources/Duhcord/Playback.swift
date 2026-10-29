@@ -256,3 +256,42 @@ final class GIFAnimator {
 
     func cancel() { stop = true }
 }
+
+/// Serves a decrypted private video to AVFoundation straight from memory, so it never touches the disk.
+final class MemoryAssetLoader: NSObject, AVAssetResourceLoaderDelegate {
+    static let scheme = "duhcord-memory"
+
+    private let data: Data
+    private let queue = DispatchQueue(label: "duhcord.memory-video")
+
+    init(data: Data) {
+        self.data = data
+        super.init()
+    }
+
+    func makeAsset() -> AVURLAsset {
+        let asset = AVURLAsset(url: URL(string: "\(Self.scheme)://video/private.mp4")!)
+        asset.resourceLoader.setDelegate(self, queue: queue)
+        return asset
+    }
+
+    func resourceLoader(_ resourceLoader: AVAssetResourceLoader,
+                        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
+        if let info = loadingRequest.contentInformationRequest {
+            info.contentType = UTType.mpeg4Movie.identifier
+            info.contentLength = Int64(data.count)
+            info.isByteRangeAccessSupported = true
+        }
+        if let request = loadingRequest.dataRequest {
+            let start = Int(request.requestedOffset)
+            let end = request.requestsAllDataToEndOfResource ? data.count : min(data.count, start + request.requestedLength)
+            guard start >= 0, start <= end else {
+                loadingRequest.finishLoading(with: URLError(.badURL))
+                return true
+            }
+            request.respond(with: data.subdata(in: start..<end))
+        }
+        loadingRequest.finishLoading()
+        return true
+    }
+}

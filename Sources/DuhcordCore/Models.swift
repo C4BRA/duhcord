@@ -548,6 +548,8 @@ public struct ReadState: Decodable, Hashable {
 
 public struct ReadyEvent: Decodable {
     public let user: User
+    /// The account's Nitro tier (0: none), which sets how large an upload may be.
+    public let premiumType: Int?
     public let sessionId: String
     public let resumeGatewayUrl: String?
     public let guilds: [Guild]
@@ -563,6 +565,7 @@ public struct ReadyEvent: Decodable {
     }
 
     private struct ReadStateContainer: Decodable { let entries: [ReadState] }
+    private struct PremiumUser: Decodable { let premiumType: Int? }
 
     /// DM channels sometimes list recipients only by ID.
     private struct RawPrivateChannel: Decodable {
@@ -577,6 +580,7 @@ public struct ReadyEvent: Decodable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         user = try c.decode(User.self, forKey: .user)
+        premiumType = (try? c.decode(PremiumUser.self, forKey: .user))?.premiumType
         sessionId = try c.decode(String.self, forKey: .sessionId)
         resumeGatewayUrl = try c.decodeIfPresent(String.self, forKey: .resumeGatewayUrl)
         guilds = (try? c.decodeIfPresent(LossyArray<Guild>.self, forKey: .guilds))?.elements ?? []

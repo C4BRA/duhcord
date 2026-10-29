@@ -129,26 +129,32 @@ final class PrivateImageLoader {
     }
 }
 
+/// An image or video ready to send: re-encoded, with what the message list and the encrypted message need.
+struct PreparedAttachment {
+    let data: Data
+    let width: Int
+    let height: Int
+    let kind: PrivateFile.Kind
+    /// For the row of attachments above the message box.
+    let thumbnail: NSImage
+    let name: String
+    /// Videos: how long, for the row.
+    var duration: Double = 0
+
+    /// The file as uploaded outside Private: a plain name, so the original's doesn't go to Discord either.
+    var upload: UploadFile {
+        switch kind {
+        case .png: return UploadFile(name: "image.png", data: data, contentType: "image/png")
+        case .jpeg: return UploadFile(name: "image.jpg", data: data, contentType: "image/jpeg")
+        case .mp4: return UploadFile(name: "video.mp4", data: data, contentType: "video/mp4")
+        }
+    }
+}
+
 /// Turns a picture the user attached into what's sent (encrypted in Private, as it is otherwise): re-encoded from
 /// its pixels, so nothing else in the file (location, camera, edits, other frames) goes with it, turned upright,
 /// and made small enough that the most images a message can carry fit Discord's upload limit together.
 enum ImagePrep {
-    struct Prepared {
-        let data: Data
-        let width: Int
-        let height: Int
-        let kind: PrivateFile.Kind
-        /// For the row of attached images above the message box.
-        let thumbnail: NSImage
-        let name: String
-
-        /// The file as uploaded outside Private: a plain name, so the original's doesn't go to Discord either.
-        var upload: UploadFile {
-            kind == .png ? UploadFile(name: "image.png", data: data, contentType: "image/png")
-                : UploadFile(name: "image.jpg", data: data, contentType: "image/jpeg")
-        }
-    }
-
     /// Each image's share of the upload limit, leaving room for padding.
     static let budget = PrivateMessaging.maxUploadBytes / PrivateMessaging.maxFiles * 8 / 9
     /// Files bigger than this aren't read at all.
@@ -157,7 +163,7 @@ enum ImagePrep {
     private static let maxDimension = 4096
 
     /// Off the main thread: decoding and re-encoding a large photo takes a moment.
-    static func prepare(_ source: Data, name: String) -> Prepared? {
+    static func prepare(_ source: Data, name: String) -> PreparedAttachment? {
         guard source.count <= maxSourceBytes,
               let image = CGImageSourceCreateWithData(source as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               CGImageSourceGetCount(image) > 0,
@@ -174,7 +180,7 @@ enum ImagePrep {
             let png = hasAlpha && attempt < 2
             if let data = encode(png ? pixels : flattened(pixels), png: png, quality: quality), data.count <= budget,
                let small = thumbnail(image, maxPixel: 128) {
-                return Prepared(data: data, width: pixels.width, height: pixels.height, kind: png ? .png : .jpeg,
+                return PreparedAttachment(data: data, width: pixels.width, height: pixels.height, kind: png ? .png : .jpeg,
                                 thumbnail: NSImage(cgImage: small, size: NSSize(width: small.width, height: small.height)),
                                 name: name)
             }
@@ -216,26 +222,38 @@ enum ImagePrep {
         return data as Data
     }
 
-    /// Image data from the pasteboard (pasted or dropped): files, or a picture copied from another app.
-    static func sources(from pasteboard: NSPasteboard) -> [(data: Data, name: String)] {
-        let options: [NSPasteboard.ReadingOptionKey: Any] = [
-            .urlReadingFileURLsOnly: true,
-            .urlReadingContentsConformToTypes: [UTType.image.identifier],
-        ]
-        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: options) as? [URL], !urls.isEmpty {
-            return urls.compactMap(read)
+    /// Something dropped or pasted to attach: an image's bytes, or a video file (read later, as it's encoded).
+    enum Source {
+        case image(Data, name: String)
+        case video(URL, name: String)
+    }
+
+    private static let fileOptions: [NSPasteboard.ReadingOptionKey: Any] = [
+        .urlReadingFileURLsOnly: true,
+        .urlReadingContentsConformToTypes: [UTType.image.identifier, UTType.movie.identifier],
+    ]
+
+    /// Images and videos from the pasteboard (pasted or dropped): files, or a picture copied from another app.
+    static func sources(from pasteboard: NSPasteboard) -> [Source] {
+        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: fileOptions) as? [URL], !urls.isEmpty {
+            return urls.compactMap { url in
+                if UTType(filenameExtension: url.pathExtension)?.conforms(to: .movie) == true {
+                    return .video(url, name: url.lastPathComponent)
+                }
+                return read(url).map { .image($0.data, name: $0.name) }
+            }
         }
         for type in [NSPasteboard.PasteboardType.png, .tiff] {
-            if let data = pasteboard.data(forType: type) { return [(data, "Pasted image")] }
+            if let data = pasteboard.data(forType: type) { return [.image(data, name: "Pasted image")] }
         }
         return []
     }
 
-    /// Image files, or a copied picture that isn't also text (copied web page text can carry a picture of itself).
+    /// Image or video files, or a copied picture that isn't also text (copied web page text can carry a picture
+    /// of itself).
     static func canRead(_ pasteboard: NSPasteboard) -> Bool {
-        pasteboard.canReadObject(forClasses: [NSURL.self], options: [
-            .urlReadingFileURLsOnly: true, .urlReadingContentsConformToTypes: [UTType.image.identifier],
-        ]) || (pasteboard.availableType(from: [.png, .tiff]) != nil && pasteboard.availableType(from: [.string]) == nil)
+        pasteboard.canReadObject(forClasses: [NSURL.self], options: fileOptions)
+            || (pasteboard.availableType(from: [.png, .tiff]) != nil && pasteboard.availableType(from: [.string]) == nil)
     }
 
     /// A file's contents, if it's small enough to read.

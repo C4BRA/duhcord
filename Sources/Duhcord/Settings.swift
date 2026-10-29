@@ -60,6 +60,7 @@ enum Settings {
         static let animateGIFs = "animateGIFs"
         static let sendTyping = "sendTypingIndicator"
         static let limitDiscordData = "limitDiscordData"
+        static let compressVideos = "compressVideos"
     }
 
     static func registerDefaults() {
@@ -73,6 +74,7 @@ enum Settings {
             Key.animateGIFs: AnimateGIFs.onHover.rawValue,
             Key.sendTyping: true,
             Key.limitDiscordData: true,
+            Key.compressVideos: true,
         ])
     }
 
@@ -119,6 +121,12 @@ enum Settings {
     static var limitDiscordData: Bool {
         get { defaults.bool(forKey: Key.limitDiscordData) }
         set { set(newValue, for: Key.limitDiscordData) }
+    }
+
+    /// Videos are re-encoded to fit the account's upload limit before they're sent.
+    static var compressVideos: Bool {
+        get { defaults.bool(forKey: Key.compressVideos) }
+        set { set(newValue, for: Key.compressVideos) }
     }
 
     /// Check GitHub for a new release at launch and once a day.

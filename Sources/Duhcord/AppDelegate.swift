@@ -195,7 +195,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
 
     private func refreshSettings() {
         guard let settingsWindow, settingsWindow.window?.isVisible == true else { return }
-        settingsWindow.show(accounts: AccountStore.accounts, currentID: sessionAccountID, privateChat: mainWindow?.privateChat)
+        settingsWindow.show(accounts: AccountStore.accounts, currentID: sessionAccountID, privateChat: mainWindow?.privateChat,
+                            premiumType: session.map { .some($0.store.premiumType) })
     }
 
     @objc private func checkForUpdates(_ sender: Any?) { updates?.checkNow() }
@@ -212,7 +213,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         controller.onAddAccount = { [weak self] in self?.addAccount(nil) }
         controller.onLimitData = { [weak self] in self?.limitDataCollectionIfNeeded(force: true) }
         settingsWindow = controller
-        controller.show(accounts: AccountStore.accounts, currentID: sessionAccountID, privateChat: mainWindow?.privateChat)
+        controller.show(accounts: AccountStore.accounts, currentID: sessionAccountID, privateChat: mainWindow?.privateChat,
+                        premiumType: session.map { .some($0.store.premiumType) })
     }
 
     /// Logging out ends the session for good (logging back in takes a new QR scan), so it's confirmed first.

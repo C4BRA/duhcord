@@ -26,6 +26,8 @@ struct MessageLayout {
             case video([URL])
             /// An encrypted image in a private message, decrypted here (`request` only names it).
             case privateImage(PrivateImage)
+            /// An encrypted video in a private message: downloaded and decrypted on click, played from memory.
+            case privateVideo(PrivateImage)
         }
 
         let frame: NSRect
@@ -114,6 +116,16 @@ enum MessageLayoutBuilder {
             let size = fit(image.file.width, image.file.height, max: box)
             y += 6
             let available = image.trusted && image.attachment != nil
+            if image.file.kind.isVideo {
+                // Videos wait for a click: nothing that large downloads on its own.
+                let label = !image.trusted ? "Not shown: sent from a key you haven't accepted"
+                    : (image.attachment == nil ? "Video unavailable" : nil)
+                layout.media.append(MessageLayout.Media(
+                    frame: NSRect(origin: NSPoint(x: x, y: y), size: size), request: nil, open: nil, gated: true,
+                    label: label, kind: .privateVideo(image), externalVideo: false))
+                y += size.height
+                continue
+            }
             let label = !image.trusted ? "Not shown: sent from a key you haven't accepted"
                 : (mode != .always ? "Click to load" : nil)
             layout.media.append(MessageLayout.Media(
@@ -247,6 +259,10 @@ final class MediaView: NSView, Playable {
     private var player: AVPlayer?
     private var looper: AVPlayerLooper?
     private var loader: StreamingLoader?
+    /// A decrypted private video being played from memory.
+    private var memoryLoader: MemoryAssetLoader?
+    /// Waiting for a private video to download and decrypt.
+    private var videoToken: PrivateImageLoader.Token?
     private var statusObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
     private var isPlaying: Bool { animator != nil || player != nil }
@@ -283,13 +299,19 @@ final class MediaView: NSView, Playable {
         if let request = item.request, !item.gated || Self.revealed.contains(request) {
             load(request)
         }
-        if case .privateImage = item.kind { setAccessibilityLabel("Private image") } else { setAccessibilityLabel(nil) }
+        switch item.kind {
+        case .privateImage: setAccessibilityLabel("Private image")
+        case .privateVideo: setAccessibilityLabel("Private video")
+        default: setAccessibilityLabel(nil)
+        }
         refreshOverlays()
         if isAnimatedGIF, PlaybackCoordinator.gifsPlayWhenVisible, !item.gated { startGIF() }
     }
 
     /// Called when the row is reused or scrolled away: stops downloads and playback.
     func cancel() {
+        if let videoToken, case .privateVideo(let video)? = item?.kind { PrivateImageLoader.shared.cancel(videoToken, for: video) }
+        videoToken = nil
         if let token, case .privateImage(let image)? = item?.kind {
             PrivateImageLoader.shared.cancel(token, for: image)
         } else if let token, let request = item?.request {
@@ -333,8 +355,10 @@ final class MediaView: NSView, Playable {
     }
 
     private var isVideo: Bool {
-        if case .video = item?.kind { return true }
-        return false
+        switch item?.kind {
+        case .video, .privateVideo: return true
+        default: return false
+        }
     }
 
     // MARK: - Playback
@@ -363,10 +387,50 @@ final class MediaView: NSView, Playable {
     }
 
     private func startVideo() {
-        guard case .video(let urls) = item?.kind, !isPlaying else { return }
+        guard !isPlaying else { return }
+        if case .privateVideo(let video)? = item?.kind {
+            startPrivateVideo(video)
+            return
+        }
+        guard case .video(let urls) = item?.kind else { return }
         startPlayer(urls, looping: false, muted: false)
         PlaybackCoordinator.shared.startVideo(self)
         refreshOverlays()
+    }
+
+    /// Downloads and decrypts a private video (only from a trusted key), then plays it from memory. Its first
+    /// frame stays as the still afterwards.
+    private func startPrivateVideo(_ video: PrivateImage) {
+        guard video.trusted, video.attachment != nil, videoToken == nil else { return }
+        label.stringValue = "Decrypting…"
+        layoutLabel()
+        videoToken = PrivateImageLoader.shared.data(for: video) { [weak self] data in
+            guard let self, case .privateVideo(let current)? = self.item?.kind, current.cacheKey == video.cacheKey else { return }
+            self.videoToken = nil
+            guard let data else {
+                self.loadFailed = true
+                self.refreshOverlays()
+                return
+            }
+            let loader = MemoryAssetLoader(data: data)
+            let asset = loader.makeAsset()
+            self.startPlayer(asset: asset, retaining: nil, looping: false, muted: false)
+            self.memoryLoader = loader
+            PlaybackCoordinator.shared.startVideo(self)
+            self.refreshOverlays()
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = self.bounds.size.applying(CGAffineTransform(scaleX: 2, y: 2))
+            generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: .zero)]) { [weak self] _, image, _, _, _ in
+                guard let image else { return }
+                let still = Handoff(value: image)
+                DispatchQueue.main.async {
+                    guard let self, case .privateVideo(let current)? = self.item?.kind, current.cacheKey == video.cacheKey else { return }
+                    self.still = NSImage(cgImage: still.value, size: self.bounds.size)
+                    if !self.isPlaying { self.imageView.image = self.still }
+                }
+            }
+        }
     }
 
     private func startPlayer(_ urls: [URL], looping: Bool, muted: Bool) {
@@ -375,6 +439,10 @@ final class MediaView: NSView, Playable {
             showFailure()
             return
         }
+        startPlayer(asset: asset, retaining: loader, looping: looping, muted: muted)
+    }
+
+    private func startPlayer(asset: AVAsset, retaining loader: StreamingLoader?, looping: Bool, muted: Bool) {
         let playerItem = AVPlayerItem(asset: asset)
         // Only a few seconds are buffered ahead, which keeps memory small while playing.
         playerItem.preferredForwardBufferDuration = 5
@@ -412,6 +480,7 @@ final class MediaView: NSView, Playable {
         looper?.disableLooping()
         player?.replaceCurrentItem(with: nil)
         loader?.cancelAll()
+        memoryLoader = nil
         playerView?.removeFromSuperview()
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         statusObservation = nil
@@ -427,7 +496,7 @@ final class MediaView: NSView, Playable {
 
     private func showFailure() {
         stopPlayback()
-        label.stringValue = "Couldn't play this here · ↗ opens it"
+        label.stringValue = item?.open == nil ? "Couldn't play this video" : "Couldn't play this here · ↗ opens it"
         layoutLabel()
     }
 
@@ -467,7 +536,8 @@ final class MediaView: NSView, Playable {
         }
         badge.isHidden = badge.stringValue.isEmpty
         // Videos get an "open in browser" button while playing; everything else opens with a click.
-        openButton.isHidden = !(isVideo && isPlaying)
+        // Private videos have nothing to open: they exist decrypted only here.
+        openButton.isHidden = !(isVideo && isPlaying && item.open != nil)
         needsLayout = true
     }
 

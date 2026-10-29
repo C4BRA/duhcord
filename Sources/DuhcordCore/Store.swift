@@ -24,6 +24,9 @@ public final class Store {
     public var onChange: ((Change) -> Void)?
 
     public private(set) var me: User?
+    /// The account's Nitro tier (0 or nil: none) and what one message's files may add up to (see UploadLimit).
+    public private(set) var premiumType: Int?
+    public private(set) var uploadLimit = UploadLimit.bytes(premiumType: nil)
     public private(set) var guilds: [Snowflake: Guild] = [:]
     public private(set) var guildOrder: [Snowflake] = []
     /// The channel the user is looking at. New messages there don't count as unread.
@@ -278,6 +281,8 @@ public final class Store {
         case .ready(let ready):
             reset()
             me = ready.user
+            premiumType = ready.premiumType
+            uploadLimit = UploadLimit.bytes(premiumType: ready.premiumType)
             for (index, guild) in ready.guilds.enumerated() {
                 let merged = ready.mergedMembers.flatMap { index < $0.count ? $0[index] : nil }
                 addGuild(guild, mergedMembers: merged)

@@ -30,11 +30,13 @@ public enum PrivateMessaging {
     public static let maxRecipients = 8
     /// The most a private message may decompress to, so a crafted one can't balloon in memory.
     static let maxPlaintext = 64 * 1024
-    /// Images per private message.
+    /// Images and videos per message.
     public static let maxFiles = 4
-    /// All of a message's encrypted images together: Discord's upload limit without Nitro, less room for the
-    /// rest of the request.
+    /// Discord's upload limit without Nitro, less room for the rest of the request: what images are sized for, so
+    /// four of them fit whatever the account.
     public static let maxUploadBytes = 10 * 1024 * 1024 - 64 * 1024
+    /// One encrypted file at most. It's decrypted in memory, so it's capped whatever the account could upload.
+    public static let maxFileBytes = 50 * 1024 * 1024
     /// What an encrypted image is called on Discord. It says nothing about what's inside.
     public static let fileName = "encrypted.bin"
 
@@ -141,7 +143,9 @@ public enum PrivateMessaging {
 /// only the recipients see it; the encrypted bytes are the message's attachment at the same position.
 public struct PrivateFile: Equatable {
     public enum Kind: UInt8 {
-        case jpeg = 1, png = 2
+        case jpeg = 1, png = 2, mp4 = 3
+
+        public var isVideo: Bool { self == .mp4 }
     }
 
     /// The image's own key (ChaCha20-Poly1305), random and used once.
@@ -181,7 +185,7 @@ public struct PrivateFile: Equatable {
         func number(_ range: Range<Int>) -> Int { d[range].reduce(0) { $0 << 8 | Int($1) } }
         self.init(key: Data(d[0..<32]), length: number(32..<36), sealedLength: number(36..<40),
                   width: number(40..<42), height: number(42..<44), kind: kind)
-        guard width > 0, height > 0, length <= PrivateMessaging.maxUploadBytes,
+        guard width > 0, height > 0, length <= PrivateMessaging.maxFileBytes,
               sealedLength == PrivateMessaging.sealedLength(forFileOf: length) else { return nil }
     }
 }
@@ -200,8 +204,8 @@ public enum PrivateMessagingError: Error, LocalizedError, Equatable {
         case .tooManyRecipients:
             return "This message would go to more than \(PrivateMessaging.maxRecipients) keys. Remove a Mac in Settings, "
                 + "or ask the other person to."
-        case .tooManyFiles: return "A private message can carry up to \(PrivateMessaging.maxFiles) images."
-        case .filesTooLarge: return "These images are too large to send together. Send fewer at a time."
+        case .tooManyFiles: return "A message can carry up to \(PrivateMessaging.maxFiles) images and videos."
+        case .filesTooLarge: return "These files are too large to send together. Send fewer at a time."
         }
     }
 }
@@ -356,7 +360,7 @@ public enum PrivateCrypto {
     /// Encrypts an image with a new key of its own. The returned file goes in the message (`seal(_:files:…)`);
     /// the data is uploaded as its attachment.
     public static func sealFile(_ image: Data, width: Int, height: Int, kind: PrivateFile.Kind) throws -> (file: PrivateFile, sealed: Data) {
-        guard image.count <= PrivateMessaging.maxUploadBytes else { throw PrivateMessagingError.filesTooLarge }
+        guard image.count <= PrivateMessaging.maxFileBytes else { throw PrivateMessagingError.filesTooLarge }
         let key = SymmetricKey(size: .bits256)
         var padded = image
         padded.append(Data(count: PrivateMessaging.padme(image.count) - image.count))
