@@ -37,7 +37,7 @@ final class MediaLoader {
     /// Calls `completion` on the main thread with the image, or nil if it couldn't be loaded.
     /// Returns a token for `cancel`, or nil when the image was already cached (completion has run).
     @discardableResult
-    func load(_ url: URL, pointSize: NSSize, completion: @escaping (NSImage?) -> Void) -> Token? {
+    func load(_ url: URL, pointSize: NSSize, scale: CGFloat, completion: @escaping (NSImage?) -> Void) -> Token? {
         if let image = cachedImage(for: url) {
             completion(image)
             return nil
@@ -47,7 +47,6 @@ final class MediaLoader {
         waiters[url, default: [:]][token] = completion
         guard isFirst else { return token }
 
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
         let maxPixel = Int((max(pointSize.width, pointSize.height) * scale).rounded(.up))
         let owner = WeakReference(self)
         let queue = Handoff(value: decodeQueue)
@@ -209,7 +208,8 @@ final class RemoteImageView: NSImageView {
             onLoad?(false)
             return
         }
-        token = MediaLoader.shared.load(url, pointSize: pointSize) { [weak self] loaded in
+        token = MediaLoader.shared.load(url, pointSize: pointSize,
+                                        scale: window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2) { [weak self] loaded in
             guard let self, self.url == url else { return }
             self.token = nil
             self.image = loaded

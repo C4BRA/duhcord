@@ -251,10 +251,12 @@ public final class DiscordSession: GatewayClientDelegate {
     }
 
     private func flushAcks() {
-        let acks = pendingAck
+        let acks = pendingAck.map { (channelID: $0.key, messageID: $0.value) }
         pendingAck = [:]
-        for (channelID, messageID) in acks {
-            Task { try? await rest.ack(channelID: channelID, messageID: messageID) }
+        if acks.count > 1 {
+            Task { try? await rest.ackBulk(acks) }
+        } else if let ack = acks.first {
+            Task { try? await rest.ack(channelID: ack.channelID, messageID: ack.messageID) }
         }
     }
 

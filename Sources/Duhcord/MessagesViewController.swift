@@ -9,6 +9,16 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         let grouped: Bool
     }
 
+    private struct RebuildState {
+        let channelID: Snowflake
+        let filterText: String
+        let privateView: Bool
+        let messageCount: Int
+        let firstID: Snowflake?
+        let lastID: Snowflake?
+        let lastConsidered: Message?
+    }
+
     private let session: DiscordSession
     private var store: Store { session.store }
 
@@ -25,12 +35,14 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     private var channelID: Snowflake?
     private var rows: [Row] = []
+    private var rebuildState: RebuildState?
 
     /// Text from the toolbar's search field: only messages containing it are shown (by text or author).
     /// Searches what's loaded, the way Find works in a document; scrolling up loads older messages to search too.
     var filterText = "" {
         didSet {
             guard filterText != oldValue else { return }
+            rebuildState = nil
             rebuildRows()
             table.reloadData()
             if filterText.isEmpty || !rows.isEmpty { scrollToBottom() }
@@ -161,6 +173,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                                                name: NSView.frameDidChangeNotification, object: table)
         NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged),
                                                name: Settings.didChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(backingPropertiesChanged(_:)),
+                                               name: NSWindow.didChangeBackingPropertiesNotification, object: nil)
 
         input.placeholder = "Message"
         input.font = Theme.messageFont
@@ -249,6 +263,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     func show(channelID: Snowflake?) {
         guard channelID != self.channelID else { return }
+        rebuildState = nil
         self.channelID = channelID
         olderPagesForPrivate = 0
         layoutCache = [:]
@@ -653,6 +668,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     /// A key arrived, the mode switched or a request came in: redraw for it.
     func privateChanged() {
+        rebuildState = nil
         swapDraftIfNeeded()
         olderPagesForPrivate = 0
         layoutCache = [:]
@@ -898,13 +914,39 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private func rebuildRows() {
         guard let channelID, let messages = store.messages(in: channelID) else {
             rows = []
+            rebuildState = nil
             return
         }
+        let privateView = isPrivate
+        if filterText.isEmpty,
+           let previous = rebuildState,
+           previous.channelID == channelID, previous.filterText == filterText, previous.privateView == privateView,
+           previous.messageCount > 0, messages.count > previous.messageCount,
+           messages.first?.id == previous.firstID,
+           messages[previous.messageCount - 1].id == previous.lastID {
+            var previousMessage = previous.lastConsidered
+            for message in messages.dropFirst(previous.messageCount) {
+                if privateView {
+                    guard case .encrypted = PrivateMessaging.kind(of: message.content) else { continue }
+                }
+                var grouped = false
+                if let previousMessage, previousMessage.author.id == message.author.id, message.referencedMessage == nil,
+                   let a = previousMessage.date, let b = message.date, b.timeIntervalSince(a) < Self.groupWindow {
+                    grouped = true
+                }
+                rows.append(Row(message: message, grouped: grouped))
+                previousMessage = message
+            }
+            rebuildState = RebuildState(channelID: channelID, filterText: filterText, privateView: privateView,
+                                        messageCount: messages.count, firstID: messages.first?.id, lastID: messages.last?.id,
+                                        lastConsidered: previousMessage)
+            return
+        }
+
         var result: [Row] = []
         result.reserveCapacity(messages.count)
         var previous: Message?
         let query = filterText.trimmingCharacters(in: .whitespaces)
-        let privateView = isPrivate
         for message in messages {
             // The Private view lists only private messages; the standard view shows them folded away.
             if privateView {
@@ -926,6 +968,9 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             previous = message
         }
         rows = result
+        rebuildState = RebuildState(channelID: channelID, filterText: filterText, privateView: privateView,
+                                    messageCount: messages.count, firstID: messages.first?.id, lastID: messages.last?.id,
+                                    lastConsidered: previous)
     }
 
     private func updateEmptyState() {
@@ -970,6 +1015,12 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         guard let channelID, !rows.isEmpty, scrollView.contentView.bounds.minY < 300,
               !session.isLoading(channelID) else { return }
         session.loadOlder(channelID: channelID)
+    }
+
+    @objc private func backingPropertiesChanged(_ notification: Notification) {
+        guard let changedWindow = notification.object as? NSWindow, changedWindow === view.window else { return }
+        layoutCache = [:]
+        table.reloadData()
     }
 
     /// Text size or spacing changed: re-render everything, keeping the scroll position at the bottom if it was.
@@ -1078,7 +1129,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         let resolver = store.resolver(for: message)
         let built = MessageLayoutBuilder.build(
             message: shown, grouped: row.grouped, cellWidth: table.bounds.width, sidePadding: Self.sidePadding,
-            headerHeight: Self.headerHeight, topPadding: MessageCell.topPadding(grouped: row.grouped),
+            headerHeight: Self.headerHeight, scale: view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2,
+            topPadding: MessageCell.topPadding(grouped: row.grouped),
             bottomPadding: MessageCell.bottomPadding, resolver: resolver,
             privateImages: isPrivate ? privateChat?.images(of: message) ?? [] : [])
         let cached = CachedLayout(layout: built, header: row.grouped ? nil : Theme.header(for: shown))

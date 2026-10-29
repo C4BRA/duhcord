@@ -34,8 +34,8 @@ final class PrivateImageLoader {
     /// The image decoded to fit `pointSize`, on the main thread (nil if it can't be shown). Returns a token for
     /// `cancel`.
     @discardableResult
-    func load(_ image: PrivateImage, pointSize: NSSize, completion: @escaping (NSImage?) -> Void) -> Token? {
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
+    func load(_ image: PrivateImage, pointSize: NSSize, scale: CGFloat,
+              completion: @escaping (NSImage?) -> Void) -> Token? {
         let maxPixel = Int((max(pointSize.width, pointSize.height) * scale).rounded(.up))
         let key = "\(image.cacheKey)@\(maxPixel)" as NSString
         if let cached = images.object(forKey: key) {
@@ -283,7 +283,7 @@ final class PrivateImagePreview: NSWindowController, NSWindowDelegate {
                                        maxWidth: Double(box.width), maxHeight: Double(box.height))
             let size = NSSize(width: max(200, fit.width), height: max(150, fit.height))
             let allowed: Set<String> = [image.file.kind == .png ? UTType.png.identifier : UTType.jpeg.identifier]
-            let scale = parent?.backingScaleFactor ?? 2
+            let scale = parent?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
             guard let decoded = MediaLoader.decode(data, maxPixel: Int(max(size.width, size.height) * scale),
                                                    pointSize: size, allowedTypes: allowed) else { return }
             let preview = PrivateImagePreview(image: decoded, data: data, kind: image.file.kind, size: size)
