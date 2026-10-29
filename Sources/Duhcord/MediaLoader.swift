@@ -69,12 +69,13 @@ final class MediaLoader {
     private static func fetch(_ url: URL, maxPixel: Int, pointSize: NSSize) async -> NSImage? {
         guard MediaRequest.isAllowedImageURL(url), let data = await CappedDownload.data(from: url, limit: maxBytes),
               !Task.isCancelled else { return nil }
-        return await withCheckedContinuation { continuation in
+        let decoded: Handoff<NSImage?> = await withCheckedContinuation { continuation in
             MediaDecoderClient.shared.decode(data, maxPixel: maxPixel, allowedTypes: Array(allowedTypes).sorted(),
                                              maxSourcePixels: maxSourcePixels, pointSize: pointSize) {
-                continuation.resume(returning: $0)
+                continuation.resume(returning: Handoff(value: $0))
             }
         }
+        return decoded.value
     }
 }
 
