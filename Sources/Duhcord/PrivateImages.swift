@@ -231,17 +231,21 @@ enum ImagePrep {
     /// Images and videos from the pasteboard (pasted or dropped): files, or a picture copied from another app.
     static func sources(from pasteboard: NSPasteboard) -> [Source] {
         if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: fileOptions) as? [URL], !urls.isEmpty {
-            return urls.compactMap { url in
-                if UTType(filenameExtension: url.pathExtension)?.conforms(to: .movie) == true {
-                    return .video(url, name: url.lastPathComponent)
-                }
-                return read(url).map { .image($0.data, name: $0.name) }
-            }
+            return sources(from: urls)
         }
         for type in [NSPasteboard.PasteboardType.png, .tiff] {
             if let data = pasteboard.data(forType: type) { return [.image(data, name: "Pasted image")] }
         }
         return []
+    }
+
+    static func sources(from urls: [URL]) -> [Source] {
+        urls.compactMap { url in
+            if UTType(filenameExtension: url.pathExtension)?.conforms(to: .movie) == true {
+                return .video(url, name: url.lastPathComponent)
+            }
+            return read(url).map { .image($0.data, name: $0.name) }
+        }
     }
 
     /// Image or video files, or a copied picture that isn't also text (copied web page text can carry a picture
@@ -260,14 +264,18 @@ enum ImagePrep {
 }
 
 /// A private image at full size, in a window of its own. Copy (⌘C or the right-click menu) puts it on the
-/// clipboard as it was sent; there's no Save, since Duhcord's sandbox doesn't let it write files.
-final class PrivateImagePreview: NSWindowController, NSWindowDelegate {
+/// clipboard as it was sent.
+final class PrivateImagePreview: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     /// Open previews, so each stays alive until it's closed.
     private static var open: [PrivateImagePreview] = []
 
     private let imageView = NSImageView()
     private var data: Data?
     private var kind = PrivateFile.Kind.jpeg
+
+    static var canSaveCurrentImage: Bool {
+        (NSApp.keyWindow?.windowController as? PrivateImagePreview)?.data != nil
+    }
 
     static func show(_ image: PrivateImage, from parent: NSWindow?) {
         PrivateImageLoader.shared.data(for: image) { data in
@@ -307,8 +315,11 @@ final class PrivateImagePreview: NSWindowController, NSWindowDelegate {
 
         let copy = NSMenuItem(title: "Copy Image", action: #selector(copyImage), keyEquivalent: "")
         copy.target = self
+        let save = NSMenuItem(title: "Save Image…", action: #selector(saveImage(_:)), keyEquivalent: "")
+        save.target = self
         imageView.menu = NSMenu()
         imageView.menu?.addItem(copy)
+        imageView.menu?.addItem(save)
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -321,6 +332,30 @@ final class PrivateImagePreview: NSWindowController, NSWindowDelegate {
         guard let data else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setData(data, forType: kind == .png ? .png : NSPasteboard.PasteboardType(UTType.jpeg.identifier))
+    }
+
+    @objc func saveImage(_ sender: Any?) {
+        guard data != nil, let window else { return }
+        let panel = NSSavePanel()
+        let isPNG = kind == .png
+        panel.nameFieldStringValue = isPNG ? "image.png" : "image.jpg"
+        panel.allowedContentTypes = [isPNG ? .png : .jpeg]
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let self, let url = panel.url, let data = self.data else { return }
+            do {
+                try data.write(to: url, options: .atomic)
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Couldn't save image"
+                alert.informativeText = error.localizedDescription
+                alert.beginSheetModal(for: window)
+            }
+        }
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(saveImage(_:)) { return data != nil }
+        return true
     }
 
     func windowWillClose(_ notification: Notification) {

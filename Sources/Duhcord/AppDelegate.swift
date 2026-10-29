@@ -310,6 +310,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
             return !isLocked
         case #selector(addAccount(_:)):
             return !isLocked && !AccountStore.isFull
+        case #selector(MessagesViewController.attachFiles(_:)):
+            return mainWindow?.canAttachImages ?? false
+        case #selector(PrivateImagePreview.saveImage(_:)):
+            return PrivateImagePreview.canSaveCurrentImage
         default:
             return true
         }
@@ -479,6 +483,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         main.addItem(submenu: appMenu, title: "Duhcord")
 
         let file = NSMenu(title: "File")
+        let attach = file.addItem(withTitle: "Attach Files…", action: #selector(MessagesViewController.attachFiles(_:)),
+                                  keyEquivalent: "a")
+        attach.keyEquivalentModifierMask = [.command, .shift]
+        file.addItem(withTitle: "Save Image…", action: #selector(PrivateImagePreview.saveImage(_:)), keyEquivalent: "s")
+        file.addItem(.separator())
         file.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         main.addItem(submenu: file, title: "File")
 

@@ -24,6 +24,8 @@ final class SettingsWindowController: NSWindowController {
     private let animateGIFs = NSPopUpButton()
     private let compressVideos = NSButton(checkboxWithTitle: "Compress to fit my upload limit", target: nil, action: nil)
     private let checkForUpdates = NSButton(checkboxWithTitle: "Check for updates automatically", target: nil, action: nil)
+    private let tabs = SettingsTabViewController()
+    private static let lastPaneKey = "Settings.lastPane"
 
     init() {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 440),
@@ -70,9 +72,10 @@ final class SettingsWindowController: NSWindowController {
         window?.makeKeyAndOrderFront(nil)
     }
 
-    /// The window fits its contents, which grow with the number of accounts and Macs.
+    /// The window fits the selected pane, which grows with the number of accounts and Macs.
     private func fitWindow() {
-        guard let window, let content = window.contentView else { return }
+        guard let window, let item = tabs.tabView.selectedTabViewItem, let content = item.viewController?.view else { return }
+        window.title = item.label
         content.layoutSubtreeIfNeeded()
         window.setContentSize(content.fittingSize)
     }
@@ -204,8 +207,6 @@ final class SettingsWindowController: NSWindowController {
     }
 
     private func buildUI() {
-        guard let content = window?.contentView else { return }
-
         notifications.addItems(withTitles: Settings.NotificationLevel.allCases.map(\.title))
         mediaPreviews.addItems(withTitles: Settings.MediaPreviews.allCases.map(\.title))
         mediaPreviews.target = self
@@ -233,8 +234,7 @@ final class SettingsWindowController: NSWindowController {
         deviceList.alignment = .leading
         deviceList.spacing = Theme.Spacing.tight
 
-        let grid = NSGridView(views: [
-            [label("Accounts:"), accountList],
+        let general = grid([
             [label("Notifications:"), notifications],
             [NSGridCell.emptyContentView, sound],
             [NSGridCell.emptyContentView, dockBadge],
@@ -242,21 +242,53 @@ final class SettingsWindowController: NSWindowController {
             [label("Images:"), mediaPreviews],
             [label("Animate GIFs:"), animateGIFs],
             [label("Videos:"), compressVideos],
+        ])
+        general.row(at: 3).topPadding = Theme.Spacing.group
+
+        let accounts = grid([
+            [label("Accounts:"), accountList],
+        ])
+
+        let privacy = grid([
             [label("Privacy:"), limitData],
             [NSGridCell.emptyContentView, sendTyping],
             [label("Private messages:"), deviceList],
+        ])
+        privacy.row(at: 2).topPadding = Theme.Spacing.group
+
+        let updates = grid([
             [label("Updates:"), checkForUpdates],
         ])
+
+        tabs.tabStyle = .toolbar
+        tabs.selectionChanged = { [weak self] item in
+            guard let self, let item else { return }
+            self.window?.title = item.label
+            UserDefaults.standard.set(item.identifier as? String, forKey: Self.lastPaneKey)
+            self.fitWindow()
+        }
+        addPane("General", symbol: "gearshape", grid: general)
+        addPane("Accounts", symbol: "person.2", grid: accounts)
+        addPane("Privacy", symbol: "hand.raised", grid: privacy)
+        addPane("Updates", symbol: "arrow.down.circle", grid: updates)
+        if let remembered = UserDefaults.standard.string(forKey: Self.lastPaneKey),
+           let index = tabs.tabViewItems.firstIndex(where: { $0.identifier as? String == remembered }) {
+            tabs.selectedTabViewItemIndex = index
+        }
+        window?.contentViewController = tabs
+    }
+
+    private func grid(_ rows: [[NSView]]) -> NSGridView {
+        let grid = NSGridView(views: rows)
         grid.column(at: 0).xPlacement = .trailing
         grid.rowAlignment = .firstBaseline
         grid.rowSpacing = Theme.Spacing.related
         grid.columnSpacing = Theme.Spacing.related
-        // Groups: account, notifications, appearance and media, privacy, private messaging Macs, updates.
-        grid.row(at: 1).topPadding = Theme.Spacing.group
-        grid.row(at: 4).topPadding = Theme.Spacing.group
-        grid.row(at: 8).topPadding = Theme.Spacing.group
-        grid.row(at: 10).topPadding = Theme.Spacing.group
-        grid.row(at: 11).topPadding = Theme.Spacing.group
+        return grid
+    }
+
+    private func addPane(_ title: String, symbol: String, grid: NSGridView) {
+        let content = NSView()
         grid.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(grid)
         NSLayoutConstraint.activate([
@@ -265,6 +297,13 @@ final class SettingsWindowController: NSWindowController {
             grid.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -Theme.Spacing.edge),
             grid.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -Theme.Spacing.edge),
         ])
+        let controller = NSViewController()
+        controller.view = content
+        let item = NSTabViewItem(viewController: controller)
+        item.label = title
+        item.identifier = title.lowercased()
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        tabs.addTabViewItem(item)
     }
 
     private func label(_ text: String) -> NSTextField { NSTextField(labelWithString: text) }
@@ -311,6 +350,15 @@ final class SettingsWindowController: NSWindowController {
         button.bezelStyle = .rounded
         button.controlSize = .small
         return button
+    }
+}
+
+private final class SettingsTabViewController: NSTabViewController {
+    var selectionChanged: ((NSTabViewItem?) -> Void)?
+
+    override func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: tabViewItem)
+        selectionChanged?(tabViewItem)
     }
 }
 
