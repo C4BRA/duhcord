@@ -63,8 +63,12 @@ public enum ClientIdentity {
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
             + "discord/\(clientVersion) Chrome/\(chromeVersion) Electron/\(electronVersion) Safari/537.36"
 
+    private struct RequestProperties: @unchecked Sendable {
+        let value: [String: Any]
+    }
+
     /// The "properties" object sent in the gateway identify payload and, base64-encoded, with every request.
-    static let properties: [String: Any] = [
+    private static let requestProperties = RequestProperties(value: [
         "os": "Mac OS X",
         "browser": "Discord Client",
         "release_channel": "stable",
@@ -83,7 +87,9 @@ public enum ClientIdentity {
         "native_build_number": NSNull(),
         "client_event_source": NSNull(),
         "client_heartbeat_session_id": UUID().uuidString.lowercased(),
-    ]
+    ])
+
+    static var properties: [String: Any] { requestProperties.value }
 
     /// The same properties, base64-encoded for the X-Super-Properties REST header.
     static let superPropertiesHeader = ((try? JSONSerialization.data(withJSONObject: properties)) ?? Data()).base64EncodedString()

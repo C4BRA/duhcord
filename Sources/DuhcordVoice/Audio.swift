@@ -164,16 +164,10 @@ final class AudioIO {
             mono.frameLength = buffer.frameLength
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * Opus.sampleRate / converter.inputFormat.sampleRate) + 64
             guard let out = AVAudioPCMBuffer(pcmFormat: Self.mono, frameCapacity: capacity) else { return }
-            var supplied = false
+            let input = ConverterInput(mono)
             var error: NSError?
             converter.convert(to: out, error: &error) { _, status in
-                if supplied {
-                    status.pointee = .noDataNow
-                    return nil
-                }
-                supplied = true
-                status.pointee = .haveData
-                return mono
+                input.next(status)
             }
             guard error == nil, let converted = out.floatChannelData?[0] else { return }
             samples = Array(UnsafeBufferPointer(start: converted, count: Int(out.frameLength)))
@@ -186,6 +180,24 @@ final class AudioIO {
             onFrame?(Array(pending.prefix(Opus.frameSize)))
             pending.removeFirst(Opus.frameSize)
         }
+    }
+}
+
+// The converter consumes this buffer once through its input callback.
+private final class ConverterInput: @unchecked Sendable {
+    private let buffer: AVAudioPCMBuffer
+    private let supplied = OSAllocatedUnfairLock(initialState: false)
+
+    init(_ buffer: AVAudioPCMBuffer) { self.buffer = buffer }
+
+    func next(_ status: UnsafeMutablePointer<AVAudioConverterInputStatus>) -> AVAudioPCMBuffer? {
+        let shouldSupply = supplied.withLock { supplied in
+            guard !supplied else { return false }
+            supplied = true
+            return true
+        }
+        status.pointee = shouldSupply ? .haveData : .noDataNow
+        return shouldSupply ? buffer : nil
     }
 }
 

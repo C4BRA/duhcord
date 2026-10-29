@@ -2,6 +2,7 @@ import AppKit
 
 /// User preferences, stored in UserDefaults. Posts `Settings.didChange` when one actually changes, with the
 /// changed key under `keyInfo` in userInfo.
+@MainActor
 enum Settings {
     static let didChange = Notification.Name("DuhcordSettingsDidChange")
     static let keyInfo = "key"

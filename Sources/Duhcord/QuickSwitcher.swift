@@ -3,6 +3,7 @@ import DuhcordCore
 
 /// ⌘K: type part of a channel, server or person's name and press Return. Styled like Spotlight: a floating,
 /// translucent panel with a large search field and the matches underneath.
+@MainActor
 final class QuickSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSWindowDelegate {
     private struct Entry {
         let channelID: Snowflake
@@ -13,6 +14,7 @@ final class QuickSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     /// A borderless panel still needs to take keyboard focus for the search field.
+    @MainActor
     private final class Panel: NSPanel {
         override var canBecomeKey: Bool { true }
     }
@@ -214,6 +216,7 @@ final class QuickSwitcher: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 }
 
 /// One match: icon, name (bold while unread), and where it is.
+@MainActor
 private final class SwitcherCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("SwitcherCell")
 

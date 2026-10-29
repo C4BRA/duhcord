@@ -141,8 +141,8 @@ public enum PrivateMessaging {
 
 /// An encrypted image that came with a private message: its key and what it is. Listed inside the message, so
 /// only the recipients see it; the encrypted bytes are the message's attachment at the same position.
-public struct PrivateFile: Equatable {
-    public enum Kind: UInt8 {
+public struct PrivateFile: Equatable, Sendable {
+    public enum Kind: UInt8, Sendable {
         case jpeg = 1, png = 2, mp4 = 3
 
         public var isVideo: Bool { self == .mp4 }

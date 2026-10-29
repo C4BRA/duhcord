@@ -6,6 +6,7 @@ import DuhcordCore
 ///
 /// The rules come from Apple's Human Interface Guidelines: system text styles, system colours (so dark mode,
 /// accent colours and Increase Contrast just work), and the macOS spacing rhythm.
+@MainActor
 enum Theme {
     /// The macOS spacing rhythm.
     enum Spacing {
@@ -260,6 +261,7 @@ extension NSFont {
 /// A scroll view for lists, which only ever scroll up and down. Lists fit their width to the view, so there's
 /// nothing to the side; this also stops a sideways swipe on the trackpad from nudging or bouncing the list.
 /// Resize the sidebar or column to see more of a long name.
+@MainActor
 final class VerticalScrollView: NSScrollView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -271,6 +273,7 @@ final class VerticalScrollView: NSScrollView {
     required init?(coder: NSCoder) { fatalError("not used") }
 }
 
+@MainActor
 private final class VerticalClipView: NSClipView {
     override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
         var bounds = super.constrainBoundsRect(proposedBounds)
@@ -280,6 +283,7 @@ private final class VerticalClipView: NSClipView {
 }
 
 /// A menu item that runs a closure, for context menus built on the fly.
+@MainActor
 final class ActionMenuItem: NSMenuItem {
     private let handler: () -> Void
 
@@ -295,6 +299,7 @@ final class ActionMenuItem: NSMenuItem {
     @objc private func run() { handler() }
 }
 
+@MainActor
 enum Pasteboard {
     static func copy(_ text: String) {
         NSPasteboard.general.clearContents()
@@ -303,6 +308,7 @@ enum Pasteboard {
 }
 
 /// Links to Discord's web app, the same ones "Copy Link" gives in the official client.
+@MainActor
 enum DiscordLink {
     static func channel(_ channelID: Snowflake, guildID: Snowflake?) -> String {
         "https://discord.com/channels/\(guildID ?? "@me")/\(channelID)"

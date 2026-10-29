@@ -4,6 +4,7 @@ import DuhcordCore
 import UniformTypeIdentifiers
 
 /// Something that is currently moving: a video or an animating GIF.
+@MainActor
 protocol Playable: AnyObject {
     func stopPlayback()
 }
@@ -11,6 +12,7 @@ protocol Playable: AnyObject {
 /// Keeps motion bounded: one video at a time, a few GIFs at a time, and all GIFs stop when Duhcord isn't
 /// in front. Nothing plays unless a view asks, and views only ask on a click or hover (or when visible,
 /// if the user chose that).
+@MainActor
 final class PlaybackCoordinator {
     static let shared = PlaybackCoordinator()
 
@@ -56,7 +58,8 @@ final class PlaybackCoordinator {
 /// the same rules as everything else: Discord hosts only, Apple root certificates only, no redirects, no token.
 /// AVFoundation asks for byte ranges; each is fetched and handed back as it arrives, so nothing is buffered
 /// beyond what the player requests.
-final class StreamingLoader: NSObject, AVAssetResourceLoaderDelegate {
+// Resource requests and their mutable state are confined to the resource-loader queue.
+final class StreamingLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
     static let scheme = "duhcord-stream"
 
     private let sources: [URL]
@@ -126,7 +129,8 @@ final class StreamingLoader: NSObject, AVAssetResourceLoaderDelegate {
 }
 
 /// Feeds one byte range from the network to AVFoundation as it arrives.
-private final class RangeTask: NSObject, URLSessionDataDelegate {
+// URLSession serializes this task's delegate callbacks.
+private final class RangeTask: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let loadingRequest: AVAssetResourceLoadingRequest
     private let onDone: (_ failed: Bool) -> Void
     private var delivered = false
@@ -199,6 +203,7 @@ private final class RangeTask: NSObject, URLSessionDataDelegate {
 
 /// Plays a GIF with ImageIO's animated-image player, which decodes one frame at a time instead of holding
 /// every frame in memory.
+@MainActor
 final class GIFAnimator {
     private var stopped = true
     private var timer: Timer?
@@ -271,10 +276,12 @@ final class GIFAnimator {
     private func scheduleNext() {
         guard !stopped, frames.count > 1, frameIndex < delays.count else { return }
         let timer = Timer(timeInterval: max(0.02, delays[frameIndex]), repeats: false) { [weak self] _ in
-            guard let self, !self.stopped, !self.frames.isEmpty else { return }
-            self.frameIndex = (self.frameIndex + 1) % self.frames.count
-            self.frameCallback?(self.frames[self.frameIndex])
-            self.scheduleNext()
+            MainActor.assumeIsolated {
+                guard let self, !self.stopped, !self.frames.isEmpty else { return }
+                self.frameIndex = (self.frameIndex + 1) % self.frames.count
+                self.frameCallback?(self.frames[self.frameIndex])
+                self.scheduleNext()
+            }
         }
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)
@@ -289,7 +296,8 @@ final class GIFAnimator {
 }
 
 /// Serves a decrypted private video to AVFoundation straight from memory, so it never touches the disk.
-final class MemoryAssetLoader: NSObject, AVAssetResourceLoaderDelegate {
+// Resource requests are handled on the loader's serial queue.
+final class MemoryAssetLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Sendable {
     static let scheme = "duhcord-memory"
 
     private let data: Data

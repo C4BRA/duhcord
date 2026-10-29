@@ -7,6 +7,7 @@ import DuhcordCore
 /// and mutual servers).
 ///
 /// Profiles are fetched when opened and kept for a couple of minutes, so clicking around doesn't refetch.
+@MainActor
 final class ProfileController {
     enum Tab: Int, CaseIterable {
         case activity, board, mutualFriends, mutualServers
@@ -155,6 +156,7 @@ extension NSColor {
     }
 }
 
+@MainActor
 enum ProfileText {
     static func status(_ status: Presence.Status) -> String {
         switch status {
@@ -205,6 +207,7 @@ enum ProfileText {
 }
 
 /// The banner, picture and status dot at the top of a card or full profile.
+@MainActor
 final class ProfileHeaderView: NSView {
     var onAvatarClick: (() -> Void)?
 
@@ -302,6 +305,7 @@ final class ProfileHeaderView: NSView {
 }
 
 /// A rounded tag: a role (with its colour dot) or a game widget tag.
+@MainActor
 final class PillView: NSView {
     private let label = NSTextField(labelWithString: "")
     private let dot = NSView()
@@ -352,6 +356,7 @@ final class PillView: NSView {
 }
 
 /// Lays pills out in rows, wrapping at its width.
+@MainActor
 final class FlowView: NSView {
     var pills: [PillView] = [] {
         didSet {
@@ -403,6 +408,7 @@ final class FlowView: NSView {
 }
 
 /// A clickable row in a list: picture, title and an optional subtitle (mutual friends and servers).
+@MainActor
 final class ProfileRowButton: NSButton {
     private let picture = RemoteImageView()
     private let titleLabel = NSTextField(labelWithString: "")
@@ -457,11 +463,12 @@ final class ProfileRowButton: NSButton {
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
 }
 
+@MainActor
 extension NSTextField {
     /// A wrapping, selectable label for profile text.
-    static func profileText(_ string: String = "", font: NSFont = Theme.bodyFont, color: NSColor = .labelColor) -> NSTextField {
+    static func profileText(_ string: String = "", font: NSFont? = nil, color: NSColor = .labelColor) -> NSTextField {
         let field = NSTextField(wrappingLabelWithString: string)
-        field.font = font
+        field.font = font ?? Theme.bodyFont
         field.textColor = color
         field.isSelectable = true
         return field

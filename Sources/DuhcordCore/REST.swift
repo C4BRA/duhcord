@@ -19,7 +19,7 @@ public enum RESTError: Error, LocalizedError {
 }
 
 /// The handful of REST endpoints we call. Everything else comes over the gateway.
-public final class RESTClient {
+public actor RESTClient {
     /// nil only for the logged-out client used to finish QR login.
     private let token: String?
     private let session: URLSession
@@ -209,7 +209,7 @@ public final class RESTClient {
 }
 
 /// A file uploaded with a message.
-public struct UploadFile {
+public struct UploadFile: Sendable {
     public let name: String
     public let data: Data
     public let contentType: String

@@ -3,6 +3,7 @@ import CoreImage.CIFilterBuiltins
 import DuhcordCore
 
 /// QR code login. There is deliberately no way to type or paste a token or password.
+@MainActor
 final class LoginWindowController: NSWindowController, NSWindowDelegate {
     private enum Mode { case idle, showingCode, busy, failed }
 

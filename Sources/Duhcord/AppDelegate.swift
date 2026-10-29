@@ -1,10 +1,11 @@
 import AppKit
 import DuhcordCore
-import UserNotifications
+@preconcurrency import UserNotifications
 
 @main
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate, NSMenuItemValidation,
-                         UNUserNotificationCenterDelegate, NSMenuDelegate {
+                         @preconcurrency UNUserNotificationCenterDelegate, NSMenuDelegate {
     private static var shared: AppDelegate?
 
     static func main() {
@@ -424,18 +425,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
     /// Asks for permission the first time there's something to notify about, rather than at launch, so the
     /// question comes with a reason (Apple's guidance). After that macOS remembers the answer.
     private func deliver(_ request: UNNotificationRequest) {
-        let center = UNUserNotificationCenter.current()
         let pending = Handoff(value: request)
-        center.getNotificationSettings { settings in
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
             switch settings.authorizationStatus {
             case .notDetermined:
-                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
-                    if granted { center.add(pending.value) }
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    if granted { UNUserNotificationCenter.current().add(pending.value) }
                 }
             case .denied:
                 break
             default:
-                center.add(pending.value)
+                UNUserNotificationCenter.current().add(pending.value)
             }
         }
     }

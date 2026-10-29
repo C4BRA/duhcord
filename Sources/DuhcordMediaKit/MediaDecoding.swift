@@ -10,9 +10,9 @@ public enum MediaKit {
 
 @objc public protocol DuhcordMediaDecoderProtocol {
     func decode(_ data: Data, maxPixel: Int, allowedTypes: [String], maxSourcePixels: Int,
-                reply: @escaping (Data?, Int, Int, Int) -> Void)
+                reply: @escaping @Sendable (Data?, Int, Int, Int) -> Void)
     func decodeFrames(_ data: Data, maxPixel: Int, allowedTypes: [String], maxFrames: Int, maxTotalBytes: Int,
-                      reply: @escaping ([Data]?, [Double], Int, Int, Int) -> Void)
+                      reply: @escaping @Sendable ([Data]?, [Double], Int, Int, Int) -> Void)
 }
 
 public struct DecodedPixels {
@@ -47,7 +47,7 @@ public struct DecodedFrames {
 
 public enum MediaDecoding {
     private static let maxFrameSourcePixels = 40_000_000
-    private static let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+    private static var sourceOptions: CFDictionary { [kCGImageSourceShouldCache: false] as CFDictionary }
 
     public static func decode(_ data: Data, maxPixel: Int, allowedTypes: [String],
                               maxSourcePixels: Int) -> DecodedPixels? {

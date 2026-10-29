@@ -7,6 +7,7 @@ import DuhcordCore
 /// Every movement is a one-off Core Animation spring or ease drawn by the window server, so the app does no
 /// per-frame work, and nothing moves (or costs anything) between changes. Reduce Motion swaps the movement
 /// for a fade.
+@MainActor
 final class TypingTabsView: NSView {
     static let tabSize = NSSize(width: 30, height: 34)
     private static let spacing: CGFloat = 4
@@ -94,6 +95,7 @@ final class TypingTabsView: NSView {
 }
 
 /// One tab: rounded top corners, a profile picture, and a tooltip with who it is.
+@MainActor
 private final class TypingTab: NSView {
     private let avatar = RemoteImageView()
     private let countLabel = NSTextField(labelWithString: "")
@@ -129,13 +131,20 @@ private final class TypingTab: NSView {
     }
 
     /// One animation to the new position. The window server draws it; there's no per-frame app code.
-    func move(to target: NSRect, alpha: CGFloat, spring: Bool, reduceMotion: Bool, completion: (() -> Void)? = nil) {
+    func move(to target: NSRect, alpha: CGFloat, spring: Bool, reduceMotion: Bool,
+              completion: (@MainActor @Sendable () -> Void)? = nil) {
+        let animationCompletion: (@Sendable () -> Void)?
+        if let completion {
+            animationCompletion = { Task { @MainActor in completion() } }
+        } else {
+            animationCompletion = nil
+        }
         if reduceMotion {
             frame = target
             NSAnimationContext.runAnimationGroup({ context in
                 context.duration = 0.2
                 animator().alphaValue = alpha
-            }, completionHandler: completion)
+            }, completionHandler: animationCompletion)
             return
         }
         guard frame != target || alphaValue != alpha else {
@@ -161,7 +170,7 @@ private final class TypingTab: NSView {
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 animator().frame = target
                 animator().alphaValue = alpha
-            }, completionHandler: completion)
+            }, completionHandler: animationCompletion)
         }
     }
 

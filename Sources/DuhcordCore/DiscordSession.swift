@@ -1,5 +1,6 @@
 import Foundation
 
+@MainActor
 public protocol DiscordSessionDelegate: AnyObject {
     func sessionDidBecomeReady(_ session: DiscordSession)
     func session(_ session: DiscordSession, didChangeState state: GatewayClient.State)
@@ -7,6 +8,7 @@ public protocol DiscordSessionDelegate: AnyObject {
 }
 
 /// Ties the gateway, REST client and store together. Main-thread only.
+@MainActor
 public final class DiscordSession: GatewayClientDelegate {
     public let store = Store()
     public let rest: RESTClient
@@ -136,7 +138,7 @@ public final class DiscordSession: GatewayClientDelegate {
 
     /// True for errors that mean "Discord can't be reached", as opposed to Discord answering with an error.
     /// A connection our certificate checks refused counts too: we couldn't reach the real Discord.
-    public static func isConnectivityError(_ error: Error) -> Bool {
+    nonisolated public static func isConnectivityError(_ error: Error) -> Bool {
         guard let urlError = error as? URLError else { return false }
         switch urlError.code {
         case .notConnectedToInternet, .networkConnectionLost, .timedOut, .cannotFindHost, .cannotConnectToHost,
@@ -235,7 +237,7 @@ public final class DiscordSession: GatewayClientDelegate {
         pendingAck[channelID] = messageID
         ackTimer?.invalidate()
         ackTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
-            self?.flushAcks()
+            Task { @MainActor in self?.flushAcks() }
         }
     }
 

@@ -3,6 +3,7 @@ import Foundation
 
 /// Looks for new releases and downloads them. Installing is done by the installer helper, which re-checks
 /// everything this class checks. Main-thread only.
+@MainActor
 public final class UpdateChecker {
     public enum State: Equatable {
         case idle

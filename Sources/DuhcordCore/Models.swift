@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// Discord IDs are 64-bit integers sent as strings.
 public typealias Snowflake = String
@@ -15,7 +16,7 @@ public func makeDiscordDecoder() -> JSONDecoder {
     return decoder
 }
 
-public struct User: Decodable, Hashable {
+public struct User: Decodable, Hashable, Sendable {
     public let id: Snowflake
     public let username: String
     public let globalName: String?
@@ -40,7 +41,7 @@ public struct User: Decodable, Hashable {
     }
 }
 
-public struct PermissionOverwrite: Decodable, Hashable {
+public struct PermissionOverwrite: Decodable, Hashable, Sendable {
     public let id: Snowflake
     /// 0 = role, 1 = member.
     public let type: Int
@@ -55,7 +56,7 @@ public struct PermissionOverwrite: Decodable, Hashable {
     }
 }
 
-public enum ChannelKind: Int {
+public enum ChannelKind: Int, Sendable {
     case text = 0
     case dm = 1
     case voice = 2
@@ -71,7 +72,7 @@ public enum ChannelKind: Int {
     case media = 16
 }
 
-public struct Channel: Decodable, Hashable {
+public struct Channel: Decodable, Hashable, Sendable {
     public let id: Snowflake
     public let type: Int
     public var guildId: Snowflake?
@@ -117,7 +118,7 @@ public struct Channel: Decodable, Hashable {
     }
 }
 
-public struct Role: Decodable, Hashable {
+public struct Role: Decodable, Hashable, Sendable {
     public let id: Snowflake
     public let permissions: String
     public let name: String
@@ -149,7 +150,7 @@ public struct Role: Decodable, Hashable {
     }
 }
 
-public struct Member: Decodable, Hashable {
+public struct Member: Decodable, Hashable, Sendable {
     public let user: User?
     public let userId: Snowflake?
     public let roles: [Snowflake]
@@ -158,7 +159,7 @@ public struct Member: Decodable, Hashable {
     public var resolvedUserId: Snowflake? { user?.id ?? userId }
 }
 
-public struct Guild: Decodable, Hashable {
+public struct Guild: Decodable, Hashable, Sendable {
     public let id: Snowflake
     public let name: String
     public let icon: String?
@@ -219,7 +220,7 @@ public struct Guild: Decodable, Hashable {
 }
 
 /// Someone's place in a voice channel. `channelId` is nil when they left.
-public struct VoiceState: Decodable, Hashable {
+public struct VoiceState: Decodable, Hashable, Sendable {
     public let guildId: Snowflake?
     public let channelId: Snowflake?
     public let userId: Snowflake
@@ -267,13 +268,13 @@ public struct VoiceState: Decodable, Hashable {
 }
 
 /// Where to connect for voice in a guild. `endpoint` is nil while Discord picks a server.
-public struct VoiceServerUpdate: Decodable {
+public struct VoiceServerUpdate: Decodable, Sendable {
     public let token: String
     public let guildId: Snowflake?
     public let endpoint: String?
 }
 
-public struct Attachment: Decodable, Hashable {
+public struct Attachment: Decodable, Hashable, Sendable {
     public let id: Snowflake
     public let filename: String
     public let url: String
@@ -307,7 +308,7 @@ public struct Attachment: Decodable, Hashable {
 }
 
 /// An image, thumbnail or video inside an embed. `proxyUrl` is Discord's re-encoding proxy.
-public struct EmbedMedia: Decodable, Hashable {
+public struct EmbedMedia: Decodable, Hashable, Sendable {
     public let url: String?
     public let proxyUrl: String?
     public let width: Int?
@@ -321,7 +322,7 @@ public struct EmbedMedia: Decodable, Hashable {
     }
 }
 
-public struct EmbedField: Decodable, Hashable {
+public struct EmbedField: Decodable, Hashable, Sendable {
     public let name: String
     public let value: String
     public let inline: Bool?
@@ -329,13 +330,13 @@ public struct EmbedField: Decodable, Hashable {
 
 /// A link preview or rich card. Discord builds these on its servers and sends them inside the message,
 /// so showing the text costs nothing extra; only images are ever fetched, and only from Discord's proxy.
-public struct Embed: Decodable, Hashable {
-    public struct Named: Decodable, Hashable {
+public struct Embed: Decodable, Hashable, Sendable {
+    public struct Named: Decodable, Hashable, Sendable {
         public let name: String?
         public let url: String?
     }
 
-    public struct Footer: Decodable, Hashable {
+    public struct Footer: Decodable, Hashable, Sendable {
         public let text: String
     }
 
@@ -385,14 +386,14 @@ public struct Embed: Decodable, Hashable {
 }
 
 /// The message a reply points at. Kept shallow so replies can't nest forever.
-public struct ReferencedMessage: Decodable, Hashable {
+public struct ReferencedMessage: Decodable, Hashable, Sendable {
     public let id: Snowflake
     public let author: User
     /// Replaced for display when it's a private message (see MessagesViewController).
     public var content: String
 }
 
-public struct Message: Decodable, Equatable {
+public struct Message: Decodable, Equatable, Sendable {
     public let id: Snowflake
     public let channelId: Snowflake
     public let author: User
@@ -449,7 +450,7 @@ public struct Message: Decodable, Equatable {
 }
 
 /// MESSAGE_UPDATE can carry only the changed fields.
-public struct MessageUpdate: Decodable {
+public struct MessageUpdate: Decodable, Sendable {
     public let id: Snowflake
     public let channelId: Snowflake
     public let content: String?
@@ -460,8 +461,8 @@ public struct MessageUpdate: Decodable {
 }
 
 /// Someone started typing. Discord repeats it every ~8–10 seconds while they keep going.
-public struct TypingStart: Decodable {
-    public struct Member: Decodable {
+public struct TypingStart: Decodable, Sendable {
+    public struct Member: Decodable, Sendable {
         public let user: User?
         public let nick: String?
     }
@@ -471,18 +472,18 @@ public struct TypingStart: Decodable {
     public let member: Member?
 }
 
-public struct MessageDelete: Decodable {
+public struct MessageDelete: Decodable, Sendable {
     public let id: Snowflake
     public let channelId: Snowflake
 }
 
-public struct MessageAck: Decodable {
+public struct MessageAck: Decodable, Sendable {
     public let channelId: Snowflake
     public let messageId: Snowflake
 }
 
 /// Members we asked for by ID (gateway op 8).
-public struct GuildMembersChunk: Decodable {
+public struct GuildMembersChunk: Decodable, Sendable {
     public let guildId: Snowflake
     public let members: [Member]
     /// Only when asked for; offline members aren't listed.
@@ -508,8 +509,8 @@ extension Member {
 
 /// Sent periodically for servers we aren't subscribed to (large servers we haven't opened), so their
 /// unread markers stay right without receiving every message.
-public struct ChannelUnreadUpdate: Decodable {
-    public struct Entry: Decodable {
+public struct ChannelUnreadUpdate: Decodable, Sendable {
+    public struct Entry: Decodable, Sendable {
         public let id: Snowflake
         public let lastMessageId: Snowflake?
     }
@@ -518,7 +519,7 @@ public struct ChannelUnreadUpdate: Decodable {
     public let channelUnreadUpdates: [Entry]
 }
 
-public struct ReadState: Decodable, Hashable {
+public struct ReadState: Decodable, Hashable, Sendable {
     public let id: Snowflake
     public var lastMessageId: Snowflake?
     public var mentionCount: Int?
@@ -546,7 +547,7 @@ public struct ReadState: Decodable, Hashable {
     }
 }
 
-public struct ReadyEvent: Decodable {
+public struct ReadyEvent: Decodable, Sendable {
     public let user: User
     /// The account's Nitro tier (0: none), which sets how large an upload may be.
     public let premiumType: Int?
@@ -626,17 +627,25 @@ struct LossyArray<Element: Decodable>: Decodable {
 }
 
 public enum DiscordDate {
-    private static let withFraction: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return f
-    }()
+    // Formatter use is serialized because ISO8601DateFormatter is mutable and not thread-safe.
+    private struct Formatters: @unchecked Sendable {
+        let withFraction: ISO8601DateFormatter
+        let plain: ISO8601DateFormatter
+    }
 
-    private static let plain: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withInternetDateTime]
-        return f
-    }()
+    private static let formatterLock = OSAllocatedUnfairLock(initialState: ())
+    private static let formatters = Formatters(
+        withFraction: {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return formatter
+        }(),
+        plain: {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            return formatter
+        }()
+    )
 
     /// Discord sends microseconds ("…:00.123456+00:00"); the formatter is only reliable with milliseconds.
     public static func parse(_ string: String) -> Date? {
@@ -646,6 +655,9 @@ public enum DiscordDate {
             let fraction = s[s.index(after: dot)..<digitsEnd].prefix(3)
             s = String(s[..<dot]) + "." + String(fraction).padding(toLength: 3, withPad: "0", startingAt: 0) + String(s[digitsEnd...])
         }
-        return withFraction.date(from: s) ?? plain.date(from: s)
+        let normalized = s
+        return formatterLock.withLock {
+            formatters.withFraction.date(from: normalized) ?? formatters.plain.date(from: normalized)
+        }
     }
 }

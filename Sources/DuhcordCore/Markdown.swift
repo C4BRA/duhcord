@@ -3,7 +3,7 @@ import Foundation
 /// Parses the subset of Discord markdown we render into flat styled spans.
 /// The UI turns spans into an attributed string; keeping parsing here lets us test it without AppKit.
 public enum Markdown {
-    public struct Style: OptionSet, Hashable {
+    public struct Style: OptionSet, Hashable, Sendable {
         public let rawValue: Int
         public init(rawValue: Int) { self.rawValue = rawValue }
 

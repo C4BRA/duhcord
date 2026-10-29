@@ -7,6 +7,7 @@ import DuhcordVoiceKit
 /// The main gateway arranges the call (our voice state and the voice server to use). The call itself runs in the
 /// voice helper, a separate sandboxed process that gets only that call's voice token, never the account token.
 /// The helper is started on join and let go on leave, so nothing voice-related runs between calls.
+@MainActor
 final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
     enum Status: Equatable {
         case idle
@@ -43,6 +44,7 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
 
     private let session: DiscordSession
     private var connection: NSXPCConnection?
+    private var connectionID: UUID?
     private var voiceSessionID: String?
     private var server: VoiceServerUpdate?
     private var joinTimer: Timer?
@@ -187,9 +189,11 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
     private func startJoinTimer() {
         joinTimer?.invalidate()
         joinTimer = Timer.scheduledTimer(withTimeInterval: Self.joinTimeout, repeats: false) { [weak self] _ in
-            guard let self, self.isInCall, self.connection == nil else { return }
-            self.leave()
-            self.onProblem?("Couldn't join the voice channel", "You may not have permission to join it, or it may be full.")
+            Task { @MainActor [weak self] in
+                guard let self, self.isInCall, self.connection == nil else { return }
+                self.leave()
+                self.onProblem?("Couldn't join the voice channel", "You may not have permission to join it, or it may be full.")
+            }
         }
     }
 
@@ -216,32 +220,37 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
             connection.remoteObjectInterface = NSXPCInterface(with: DuhcordVoiceProtocol.self)
             connection.exportedInterface = NSXPCInterface(with: DuhcordVoiceClientProtocol.self)
             connection.exportedObject = self
-            let lost: () -> Void = { [weak self, weak connection] in
-                DispatchQueue.main.async { self?.helperLost(connection) }
+            let connectionID = UUID()
+            self.connectionID = connectionID
+            let lost: () -> Void = { [weak self] in
+                Task { @MainActor in self?.helperLost(connectionID) }
             }
             connection.invalidationHandler = lost
             connection.interruptionHandler = lost
             connection.resume()
             self.connection = connection
         }
-        let current = connection
+        let connectionID = self.connectionID
         return connection?.remoteObjectProxyWithErrorHandler { [weak self] _ in
-            DispatchQueue.main.async { self?.helperLost(current) }
+            guard let connectionID else { return }
+            Task { @MainActor in self?.helperLost(connectionID) }
         } as? DuhcordVoiceProtocol
     }
 
     private func endHelperCall() {
         guard let connection else { return }
         self.connection = nil
+        connectionID = nil
         (connection.remoteObjectProxy as? DuhcordVoiceProtocol)?.leave()
         // Letting go of the connection lets macOS stop the helper.
         connection.invalidate()
     }
 
-    private func helperLost(_ lostConnection: NSXPCConnection?) {
+    private func helperLost(_ connectionID: UUID) {
         // Only the current helper matters; one we let go of on purpose is expected to disappear.
-        guard let lostConnection, lostConnection === connection else { return }
+        guard connectionID == self.connectionID, let lostConnection = connection else { return }
         connection = nil
+        self.connectionID = nil
         // An interrupted connection is still alive; let go of it so it (and us, its exported object) can go.
         lostConnection.invalidate()
         guard isInCall else { return }
@@ -250,9 +259,9 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
     }
 
     /// From the helper, on an XPC thread.
-    func voiceEvent(_ data: Data) {
+    nonisolated func voiceEvent(_ data: Data) {
         guard let event = try? JSONDecoder().decode(VoiceEvent.self, from: data) else { return }
-        DispatchQueue.main.async { [weak self] in self?.handle(event) }
+        Task { @MainActor [weak self] in self?.handle(event) }
     }
 
     private func handle(_ event: VoiceEvent) {

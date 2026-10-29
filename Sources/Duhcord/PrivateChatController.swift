@@ -18,6 +18,7 @@ import DuhcordCore
 ///   to our approved Macs.
 ///
 /// Main thread only. Private messaging needs macOS 14 (HPKE); on macOS 13 the toggle stays switched off.
+@MainActor
 final class PrivateChatController {
     enum Mode { case standard, `private` }
 
@@ -551,7 +552,7 @@ final class PrivateChatController {
 }
 
 /// An encrypted image in a private message, as the message list shows it.
-struct PrivateImage {
+struct PrivateImage: Sendable {
     let messageID: Snowflake
     /// Its position among the message's images (and attachments).
     let index: Int

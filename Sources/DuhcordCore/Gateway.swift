@@ -1,7 +1,7 @@
 import Foundation
 import Network
 
-public enum GatewayEvent {
+public enum GatewayEvent: Sendable {
     case ready(ReadyEvent)
     case resumed
     case guildCreate(Guild)
@@ -22,6 +22,7 @@ public enum GatewayEvent {
     case presenceUpdate(Presence)
 }
 
+@MainActor
 public protocol GatewayClientDelegate: AnyObject {
     func gateway(_ gateway: GatewayClient, didReceive event: GatewayEvent)
     func gateway(_ gateway: GatewayClient, didChangeState state: GatewayClient.State)
@@ -30,8 +31,9 @@ public protocol GatewayClientDelegate: AnyObject {
 /// The Discord gateway connection: a WebSocket that streams events to us.
 ///
 /// All internal state lives on a private serial queue. Delegate callbacks are delivered on the main queue.
-public final class GatewayClient: NSObject {
-    public enum State: Equatable {
+// Gateway protocol state is confined to its private serial queue.
+public final class GatewayClient: NSObject, @unchecked Sendable {
+    public enum State: Equatable, Sendable {
         case disconnected
         case connecting
         case connected
@@ -64,7 +66,7 @@ public final class GatewayClient: NSObject {
     static let maxMessageSize = 128 * 1024 * 1024
     private static let fatalCloseCodes: Set<Int> = [4004, 4010, 4011, 4012, 4013, 4014]
 
-    public weak var delegate: GatewayClientDelegate?
+    @MainActor public weak var delegate: GatewayClientDelegate?
 
     private let token: String
     private let queue = DispatchQueue(label: "duhcord.gateway")
@@ -134,32 +136,33 @@ public final class GatewayClient: NSObject {
     /// `typing` must be true or Discord ignores the subscription for very large guilds. Only the fields
     /// listed are changed on Discord's side; threads, activities and member updates stay off.
     public func subscribe(toGuild guildID: Snowflake) {
-        let payload = Self.subscriptionPayload(guildID: guildID)
-        queue.async { self.send(payload) }
+        queue.async { self.send(Self.subscriptionPayload(guildID: guildID)) }
     }
 
     /// Joins, moves between or (with a nil channel) leaves voice channels, and sets our mute and deafen.
     public func updateVoiceState(guildID: Snowflake, channelID: Snowflake?, selfMute: Bool, selfDeaf: Bool) {
-        let payload: [String: Any] = [
-            "op": Op.voiceStateUpdate,
-            "d": [
-                "guild_id": guildID,
-                "channel_id": channelID.map { $0 as Any } ?? NSNull(),
-                "self_mute": selfMute,
-                "self_deaf": selfDeaf,
-                "self_video": false,
-            ] as [String: Any],
-        ]
-        queue.async { self.send(payload) }
+        queue.async {
+            self.send([
+                "op": Op.voiceStateUpdate,
+                "d": [
+                    "guild_id": guildID,
+                    "channel_id": channelID.map { $0 as Any } ?? NSNull(),
+                    "self_mute": selfMute,
+                    "self_deaf": selfDeaf,
+                    "self_video": false,
+                ] as [String: Any],
+            ])
+        }
     }
 
     /// Asks for specific members (at most 100), as the official client does to show names it hasn't seen.
     public func requestMembers(guildID: Snowflake, userIDs: [Snowflake], presences: Bool = false) {
-        let payload: [String: Any] = [
-            "op": Op.requestGuildMembers,
-            "d": ["guild_id": guildID, "user_ids": Array(userIDs.prefix(100)), "presences": presences] as [String: Any],
-        ]
-        queue.async { self.send(payload) }
+        queue.async {
+            self.send([
+                "op": Op.requestGuildMembers,
+                "d": ["guild_id": guildID, "user_ids": Array(userIDs.prefix(100)), "presences": presences] as [String: Any],
+            ])
+        }
     }
 
     static func subscriptionPayload(guildID: Snowflake) -> [String: Any] {

@@ -3,6 +3,7 @@ import DuhcordCore
 import UniformTypeIdentifiers
 
 /// The right column: channel title, message history and the input box.
+@MainActor
 final class MessagesViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
     private struct Row {
         let message: Message
@@ -383,7 +384,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 let bytes = Handoff(value: data)
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     let prepared = Handoff(value: ImagePrep.prepare(bytes.value, name: name))
-                    DispatchQueue.main.async {
+                    Task { @MainActor [weak self] in
                         self?.finishJob(id, prepared.value, failure: prepared.value == nil
                             ? "It isn't an image Duhcord can read, or it's too large." : nil, name: name)
                     }
@@ -1106,9 +1107,11 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         typingTimer = nil
         if let deadline = session.typing.nextDeadline {
             let timer = Timer(fire: deadline, interval: 0, repeats: false) { [weak self] _ in
-                guard let self else { return }
-                self.session.typing.tick(at: Date())
-                self.refreshTyping()
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.session.typing.tick(at: Date())
+                    self.refreshTyping()
+                }
             }
             timer.tolerance = 0.5
             RunLoop.main.add(timer, forMode: .common)
@@ -1343,6 +1346,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 }
 
 /// Tells the messages view when a window or divider drag ends.
+@MainActor
 private final class LiveResizeView: NSView {
     var onEndLiveResize: (() -> Void)?
     /// Whether dropped images are wanted, and what to do with them.
@@ -1370,6 +1374,7 @@ private final class LiveResizeView: NSView {
 }
 
 /// One message. Laid out by hand from a precomputed MessageLayout: no Auto Layout, so scrolling stays cheap.
+@MainActor
 private final class MessageCell: NSTableCellView, NSTextViewDelegate {
     static let identifier = NSUserInterfaceItemIdentifier("MessageCell")
     static let bottomPadding: CGFloat = 2

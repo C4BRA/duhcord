@@ -7,6 +7,7 @@ import DuhcordCore
 /// - Format, byte size and pixel count are checked before decoding.
 /// - Kept in a memory cache with a byte budget that macOS can also empty under memory pressure. No disk cache.
 /// - Requests nobody waits for any more (rows scrolled away) are cancelled.
+@MainActor
 final class MediaLoader {
     static let shared = MediaLoader()
 
@@ -20,8 +21,8 @@ final class MediaLoader {
     private var waiters: [URL: [Token: (NSImage?) -> Void]] = [:]
     private var tasks: [URL: Task<Void, Never>] = [:]
     private static let maxBytes = 8 * 1024 * 1024
-    static let maxSourcePixels = 40_000_000
-    static let allowedTypes: Set<String> = ["org.webmproject.webp", "public.png", "public.jpeg", "com.compuserve.gif"]
+    nonisolated static let maxSourcePixels = 40_000_000
+    nonisolated static let allowedTypes: Set<String> = ["org.webmproject.webp", "public.png", "public.jpeg", "com.compuserve.gif"]
 
     func cachedImage(for url: URL) -> NSImage? { cache.object(forKey: url.absoluteString as NSString) }
 
@@ -79,7 +80,8 @@ final class MediaLoader {
 
 /// Downloads at most `limit` bytes: a response that says it's bigger is refused before any of it arrives,
 /// and one that runs past the limit anyway is cut off, so an oversized image is never buffered whole.
-final class CappedDownload: NSObject, URLSessionDataDelegate {
+// URLSession serializes this task's delegate callbacks.
+final class CappedDownload: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let limit: Int
     private var data = Data()
     private var failed = false
@@ -130,6 +132,7 @@ final class CappedDownload: NSObject, URLSessionDataDelegate {
 
 /// An image view that shows a remote image through MediaLoader and cancels when it's reused.
 /// Used for profile pictures and server icons.
+@MainActor
 final class RemoteImageView: NSImageView {
     private var url: URL?
     private var token: MediaLoader.Token?

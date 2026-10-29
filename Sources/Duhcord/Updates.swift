@@ -2,6 +2,7 @@ import AppKit
 import DuhcordUpdateKit
 
 /// App-side helpers for updating: where Duhcord runs from, and talking to the installer helper.
+@MainActor
 enum Updates {
     /// The version in this build's Info.plist ("0.0.0" when run outside an app bundle).
     static var currentVersion: String {
@@ -57,6 +58,7 @@ enum Updates {
 
 /// The info bar under the toolbar (a titlebar accessory), like Safari's and Mail's: a symbol carries the tone
 /// (orange for problems, the accent colour for news), the text says what's going on, and a button acts on it.
+@MainActor
 final class BannerView: NSView {
     enum Tone { case warning, info, secure }
 

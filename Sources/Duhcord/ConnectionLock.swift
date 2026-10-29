@@ -2,6 +2,7 @@ import AppKit
 
 /// A sheet over the main window while Discord can't be reached, laid out like a standard alert (app icon, bold
 /// title, detail, default button). Retry is the only way out.
+@MainActor
 final class ConnectionLock {
     private let sheet: NSWindow
     private let titleLabel = NSTextField(labelWithString: "")

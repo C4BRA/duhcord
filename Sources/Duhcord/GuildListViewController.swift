@@ -3,6 +3,7 @@ import DuhcordCore
 
 /// The sidebar: Direct Messages, then every server, as a standard macOS source list (like Mail's mailboxes).
 /// Rows follow System Settings → Appearance → Sidebar icon size, or the small size in compact layout.
+@MainActor
 final class GuildListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onSelect: ((Place) -> Void)?
     /// "Mark as Read" on a server or on Direct Messages.
@@ -137,6 +138,7 @@ final class GuildListViewController: NSViewController, NSTableViewDataSource, NS
 }
 
 /// "Servers": a standard source-list section header.
+@MainActor
 private final class HeaderCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("HeaderCell")
 
@@ -157,6 +159,7 @@ private final class HeaderCell: NSTableCellView {
 }
 
 /// One sidebar row: icon, name (bold while unread) and a mention count.
+@MainActor
 private final class PlaceCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("PlaceCell")
 
@@ -256,6 +259,7 @@ private final class PlaceCell: NSTableCellView {
 }
 
 /// A source-list count badge (like Mail's unread counts), red because mentions need attention.
+@MainActor
 final class BadgeView: NSView {
     private let label = NSTextField(labelWithString: "")
 

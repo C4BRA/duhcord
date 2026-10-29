@@ -2,7 +2,8 @@ import DuhcordVoiceKit
 import Foundation
 
 /// The object the app talks to over XPC. Holds at most one call; everything about it runs on one serial queue.
-final class VoiceService: NSObject, DuhcordVoiceProtocol {
+// Voice service state is confined to its private serial queue.
+final class VoiceService: NSObject, DuhcordVoiceProtocol, @unchecked Sendable {
     private weak var connection: NSXPCConnection?
     private let queue = DispatchQueue(label: "duhcord.voice", qos: .userInteractive)
     private var call: VoiceCall?

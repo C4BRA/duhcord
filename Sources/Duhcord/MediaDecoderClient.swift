@@ -3,7 +3,7 @@ import CoreGraphics
 import DuhcordMediaKit
 import Foundation
 
-final class MediaDecoderClient {
+final class MediaDecoderClient: @unchecked Sendable {
     static let shared = MediaDecoderClient()
 
     private let lock = NSLock()
@@ -12,9 +12,10 @@ final class MediaDecoderClient {
     private init() {}
 
     func decode(_ data: Data, maxPixel: Int, allowedTypes: [String], maxSourcePixels: Int, pointSize: NSSize,
-                completion: @escaping (NSImage?) -> Void) {
-        let finish: (NSImage?) -> Void = { image in
-            DispatchQueue.main.async { completion(image) }
+                completion: @escaping @MainActor @Sendable (NSImage?) -> Void) {
+        let finish: @Sendable (NSImage?) -> Void = { image in
+            let image = Handoff(value: image)
+            DispatchQueue.main.async { completion(image.value) }
         }
         guard Bundle.main.bundleIdentifier != nil else {
             DispatchQueue.global(qos: .utility).async {
@@ -50,9 +51,10 @@ final class MediaDecoderClient {
     }
 
     func decodeFrames(_ data: Data, maxPixel: Int, allowedTypes: [String],
-                      completion: @escaping ([CGImage]?, [Double]) -> Void) {
-        let finish: ([CGImage]?, [Double]) -> Void = { frames, delays in
-            DispatchQueue.main.async { completion(frames, delays) }
+                      completion: @escaping @MainActor @Sendable ([CGImage]?, [Double]) -> Void) {
+        let finish: @Sendable ([CGImage]?, [Double]) -> Void = { frames, delays in
+            let frames = Handoff(value: frames)
+            DispatchQueue.main.async { completion(frames.value, delays) }
         }
         guard Bundle.main.bundleIdentifier != nil else {
             DispatchQueue.global(qos: .utility).async {
@@ -161,7 +163,7 @@ final class MediaDecoderClient {
     }
 }
 
-private final class ReplyGate {
+private final class ReplyGate: @unchecked Sendable {
     private let lock = NSLock()
     private var hasReplied = false
 
