@@ -80,6 +80,8 @@ jobs:
         with:
           name: Duhcord-unsigned.zip
           path: build
+          # Keep the zip as uploaded so its hash can be checked before it's unpacked.
+          skip-decompress: true
       - name: Check unsigned app hash
         run: echo "${{ needs.build.outputs.sha256 }}  build/Duhcord-unsigned.zip" | shasum -a 256 -c -
       - name: Unpack unsigned app
