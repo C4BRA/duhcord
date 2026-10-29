@@ -305,9 +305,10 @@ public enum PrivateCrypto {
         return content
     }
 
-    /// The text of a private message, if it was sealed to `recipient` (or by it) by one of `senders` in this channel.
+    /// The text of a private message, if it was sealed to `recipient` by one of `senders`
+    /// or by `recipient` when `fromSelf` is true.
     public static func open(_ payload: Data, channelID: Snowflake, recipient: Curve25519.KeyAgreement.PrivateKey,
-                            senders: [Curve25519.KeyAgreement.PublicKey]) -> Opened? {
+                            senders: [Curve25519.KeyAgreement.PublicKey], fromSelf: Bool) -> Opened? {
         let data = Data(payload)
         guard data.count > fixedHeader, data[0] == PrivateMessaging.messageType else { return nil }
         let flags = data[1]
@@ -322,7 +323,7 @@ public enum PrivateCrypto {
         // Possible message keys: re-derived for our own message, else one per sender key with this ID (an ID
         // shared by a planted key can't hide the real sender's key).
         var keys: [SymmetricKey] = []
-        if senderID == myID { keys.append(messageKey(recipient, salt: salt, channelID: channelID)) }
+        if fromSelf && senderID == myID { keys.append(messageKey(recipient, salt: salt, channelID: channelID)) }
         if let start = (0..<count).map({ fixedHeader + $0 * entrySize }).first(where: { data[$0..<($0 + 4)] == myID }) {
             for sender in senders where PrivateMessaging.keyID(sender.rawRepresentation) == senderID {
                 guard let hpke = try? HPKE.Recipient(privateKey: recipient, ciphersuite: suite, info: info(channelID: channelID),

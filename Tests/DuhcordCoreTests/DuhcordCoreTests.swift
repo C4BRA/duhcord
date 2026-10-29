@@ -1193,16 +1193,18 @@ final class PrivateMessagingTests: XCTestCase {
         // The image's key travels inside the message, which only the recipients can open.
         let content = try PrivateCrypto.seal("look", files: [file], channelID: "5", sender: alice, recipients: [bob.publicKey])
         guard case .encrypted(let payload) = PrivateMessaging.kind(of: content) else { return XCTFail("not encrypted") }
-        let opened = try XCTUnwrap(PrivateCrypto.open(payload, channelID: "5", recipient: bob, senders: [alice.publicKey]))
+        let opened = try XCTUnwrap(PrivateCrypto.open(payload, channelID: "5", recipient: bob, senders: [alice.publicKey],
+                                                      fromSelf: false))
         XCTAssertEqual(opened.text, "look")
         XCTAssertEqual(opened.files, [file])
         // The sender reads their own, images included.
-        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "5", recipient: alice, senders: [])?.files, [file])
+        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "5", recipient: alice, senders: [], fromSelf: true)?.files, [file])
 
         // An image alone, with no text.
         let bare = try PrivateCrypto.seal("", files: [file, file], channelID: "5", sender: alice, recipients: [bob.publicKey])
         guard case .encrypted(let barePayload) = PrivateMessaging.kind(of: bare) else { return XCTFail("not encrypted") }
-        let bareOpened = try XCTUnwrap(PrivateCrypto.open(barePayload, channelID: "5", recipient: bob, senders: [alice.publicKey]))
+        let bareOpened = try XCTUnwrap(PrivateCrypto.open(barePayload, channelID: "5", recipient: bob,
+                                                          senders: [alice.publicKey], fromSelf: false))
         XCTAssertEqual(bareOpened.text, "")
         XCTAssertEqual(bareOpened.files.count, 2)
     }
@@ -1285,21 +1287,34 @@ final class PrivateMessagingTests: XCTestCase {
         guard case .encrypted(let payload) = PrivateMessaging.kind(of: content) else { return XCTFail("not encrypted") }
 
         // The recipient can read it, and so can the sender, without a copy sealed to themselves.
-        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "900", recipient: bob, senders: [alice.publicKey])?.text, text)
-        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "900", recipient: alice, senders: [])?.text, text)
+        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "900", recipient: bob, senders: [alice.publicKey],
+                                          fromSelf: false)?.text, text)
+        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "900", recipient: alice, senders: [], fromSelf: true)?.text, text)
         XCTAssertEqual(payload[26], 1, "one recipient entry: the sender's own key is skipped")
         // Not someone it wasn't sealed to, not in another DM, and not as if from someone else.
-        XCTAssertNil(PrivateCrypto.open(payload, channelID: "900", recipient: eve, senders: [alice.publicKey]))
-        XCTAssertNil(PrivateCrypto.open(payload, channelID: "901", recipient: bob, senders: [alice.publicKey]))
-        XCTAssertNil(PrivateCrypto.open(payload, channelID: "901", recipient: alice, senders: []))
-        XCTAssertNil(PrivateCrypto.open(payload, channelID: "900", recipient: bob, senders: [eve.publicKey]))
+        XCTAssertNil(PrivateCrypto.open(payload, channelID: "900", recipient: eve, senders: [alice.publicKey], fromSelf: false))
+        XCTAssertNil(PrivateCrypto.open(payload, channelID: "901", recipient: bob, senders: [alice.publicKey], fromSelf: false))
+        XCTAssertNil(PrivateCrypto.open(payload, channelID: "901", recipient: alice, senders: [], fromSelf: true))
+        XCTAssertNil(PrivateCrypto.open(payload, channelID: "900", recipient: bob, senders: [eve.publicKey], fromSelf: false))
         // Any changed byte is rejected.
         for index in [0, 1, 3, 10, 23, 30, 60, payload.count - 1] {
             var tampered = payload
             tampered[index] ^= 0x01
-            XCTAssertNil(PrivateCrypto.open(tampered, channelID: "900", recipient: bob, senders: [alice.publicKey]), "byte \(index)")
+            XCTAssertNil(PrivateCrypto.open(tampered, channelID: "900", recipient: bob, senders: [alice.publicKey],
+                                            fromSelf: false), "byte \(index)")
         }
         XCTAssertThrowsError(try PrivateCrypto.seal("a", channelID: "1", sender: alice, recipients: [alice.publicKey]))
+    }
+
+    func testOwnKeyPathNeedsOwnAuthorship() throws {
+        guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
+        let alice = Curve25519.KeyAgreement.PrivateKey(), bob = Curve25519.KeyAgreement.PrivateKey()
+        let content = try PrivateCrypto.seal("hi", channelID: "1", sender: alice, recipients: [bob.publicKey])
+        guard case .encrypted(let payload) = PrivateMessaging.kind(of: content) else { return XCTFail("not encrypted") }
+
+        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "1", recipient: alice, senders: [], fromSelf: true)?.text, "hi")
+        XCTAssertNil(PrivateCrypto.open(payload, channelID: "1", recipient: alice, senders: [], fromSelf: false))
+        XCTAssertNil(PrivateCrypto.open(payload, channelID: "1", recipient: alice, senders: [alice.publicKey], fromSelf: false))
     }
 
     func testSendTimeAndSaltCarryThrough() throws {
@@ -1310,8 +1325,8 @@ final class PrivateMessagingTests: XCTestCase {
         let second = try PrivateCrypto.seal("hi", channelID: "1", sender: alice, recipients: [bob.publicKey], now: sentAt)
         guard case .encrypted(let a) = PrivateMessaging.kind(of: first), case .encrypted(let b) = PrivateMessaging.kind(of: second)
         else { return XCTFail("not encrypted") }
-        let openedA = PrivateCrypto.open(a, channelID: "1", recipient: bob, senders: [alice.publicKey])
-        let openedB = PrivateCrypto.open(b, channelID: "1", recipient: bob, senders: [alice.publicKey])
+        let openedA = PrivateCrypto.open(a, channelID: "1", recipient: bob, senders: [alice.publicKey], fromSelf: false)
+        let openedB = PrivateCrypto.open(b, channelID: "1", recipient: bob, senders: [alice.publicKey], fromSelf: false)
         XCTAssertEqual(openedA?.sentAt, sentAt)
         XCTAssertEqual(openedA?.salt.count, 16)
         // Each message has its own salt, so a reposted copy (same salt) stands out.
@@ -1319,7 +1334,7 @@ final class PrivateMessagingTests: XCTestCase {
         // The time is authenticated: changing it breaks the message.
         var tampered = a
         tampered[7] ^= 0x01
-        XCTAssertNil(PrivateCrypto.open(tampered, channelID: "1", recipient: bob, senders: [alice.publicKey]))
+        XCTAssertNil(PrivateCrypto.open(tampered, channelID: "1", recipient: bob, senders: [alice.publicKey], fromSelf: false))
     }
 
     func testAPlantedKeyWithTheSameIDDoesNotHideTheRealSender() throws {
@@ -1329,7 +1344,8 @@ final class PrivateMessagingTests: XCTestCase {
         guard case .encrypted(let payload) = PrivateMessaging.kind(of: content) else { return XCTFail("not encrypted") }
         // Other keys tried first (as a planted key with a colliding ID would be) don't stop the real one working.
         let others = (0..<3).map { _ in Curve25519.KeyAgreement.PrivateKey().publicKey }
-        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "1", recipient: bob, senders: others + [alice.publicKey])?.text, "hi")
+        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "1", recipient: bob, senders: others + [alice.publicKey],
+                                          fromSelf: false)?.text, "hi")
     }
 
     func testPrivateMessagesHoldMoreThanAPlainOne() throws {
@@ -1340,7 +1356,8 @@ final class PrivateMessagingTests: XCTestCase {
         let sealed = try PrivateCrypto.seal(dense, channelID: "1", sender: alice, recipients: [bob.publicKey])
         XCTAssertLessThanOrEqual(sealed.utf16.count, 2000)
         guard case .encrypted(let payload) = PrivateMessaging.kind(of: sealed) else { return XCTFail("not encrypted") }
-        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "1", recipient: bob, senders: [alice.publicKey])?.text, dense)
+        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "1", recipient: bob, senders: [alice.publicKey],
+                                          fromSelf: false)?.text, dense)
         // Ordinary prose compresses, so far more fits.
         let prose = String(repeating: "The quick brown fox jumps over the lazy dog. ", count: 200)
         XCTAssertNoThrow(try PrivateCrypto.seal(prose, channelID: "1", sender: alice, recipients: [bob.publicKey]))
