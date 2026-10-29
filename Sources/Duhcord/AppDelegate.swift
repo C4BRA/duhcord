@@ -497,11 +497,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         let go = NSMenu(title: "Go")
         go.addItem(withTitle: "Jump to Channel…", action: #selector(MainWindowController.showQuickSwitcher(_:)), keyEquivalent: "k")
         let prev = go.addItem(withTitle: "Previous Channel", action: #selector(MainWindowController.selectPreviousChannel(_:)), keyEquivalent: String(Character(UnicodeScalar(NSUpArrowFunctionKey)!)))
-        prev.keyEquivalentModifierMask = [.option]
+        prev.keyEquivalentModifierMask = [.option, .command]
         let next = go.addItem(withTitle: "Next Channel", action: #selector(MainWindowController.selectNextChannel(_:)), keyEquivalent: String(Character(UnicodeScalar(NSDownArrowFunctionKey)!)))
-        next.keyEquivalentModifierMask = [.option]
+        next.keyEquivalentModifierMask = [.option, .command]
         let unread = go.addItem(withTitle: "Next Unread Channel", action: #selector(MainWindowController.selectNextUnread(_:)), keyEquivalent: String(Character(UnicodeScalar(NSDownArrowFunctionKey)!)))
-        unread.keyEquivalentModifierMask = [.option, .shift]
+        unread.keyEquivalentModifierMask = [.option, .shift, .command]
         main.addItem(submenu: go, title: "Go")
 
         // Keyboard control of calls, so voice works without the mouse.
