@@ -58,7 +58,7 @@ enum Updates {
 /// The info bar under the toolbar (a titlebar accessory), like Safari's and Mail's: a symbol carries the tone
 /// (orange for problems, the accent colour for news), the text says what's going on, and a button acts on it.
 final class BannerView: NSView {
-    enum Tone { case warning, info }
+    enum Tone { case warning, info, secure }
 
     var onAction: (() -> Void)?
     private let icon = NSImageView()
@@ -94,9 +94,17 @@ final class BannerView: NSView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     func show(_ text: String, tone: Tone, action: String?) {
-        icon.image = NSImage(systemSymbolName: tone == .warning ? "exclamationmark.triangle.fill" : "info.circle.fill",
-                             accessibilityDescription: tone == .warning ? "Warning" : "Information")
-        icon.contentTintColor = tone == .warning ? .systemOrange : .controlAccentColor
+        switch tone {
+        case .warning:
+            icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Warning")
+            icon.contentTintColor = .systemOrange
+        case .info:
+            icon.image = NSImage(systemSymbolName: "info.circle.fill", accessibilityDescription: "Information")
+            icon.contentTintColor = .controlAccentColor
+        case .secure:
+            icon.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: "Private")
+            icon.contentTintColor = .systemGreen
+        }
         label.stringValue = text
         button.title = action ?? ""
         button.isHidden = action == nil

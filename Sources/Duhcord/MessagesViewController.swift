@@ -44,10 +44,24 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             }
         }
     }
+    /// Private messaging (encrypted DMs). Set by the window controller.
+    var privateChat: PrivateChatController?
+    /// Under the toolbar in a DM: the private chat's state (waiting, not verified, a request) and what to do.
+    private let privateBar = BannerView()
+    private var scrollToTop: NSLayoutConstraint!
+    private var scrollToBar: NSLayoutConstraint!
+
+    private var isPrivate: Bool {
+        guard let channelID, let privateChat else { return false }
+        return privateChat.mode(for: channelID) == .private
+    }
+
     private struct LayoutKey: Hashable {
         let id: Snowflake
         let revision: Int
         let grouped: Bool
+        /// What's shown can differ from what was sent (a private message, decrypted or folded away).
+        let shown: Int
     }
 
     private struct CachedLayout {
@@ -125,13 +139,20 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         loadingSpinner.isDisplayedWhenStopped = false
         table.setAccessibilityLabel("Messages")
 
-        [scrollView, typingTabs, input, emptyLabel, loadingSpinner].forEach {
+        [scrollView, typingTabs, input, emptyLabel, loadingSpinner, privateBar].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
         }
+        privateBar.isHidden = true
+        privateBar.onAction = { [weak self] in self?.privateBarAction() }
+        scrollToTop = scrollView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor)
+        scrollToBar = scrollView.topAnchor.constraint(equalTo: privateBar.bottomAnchor)
+        scrollToTop.isActive = true
         NSLayoutConstraint.activate([
             // The channel's name is in the toolbar; messages start just below it.
-            scrollView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
+            privateBar.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
+            privateBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            privateBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             input.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: Theme.Spacing.group),
@@ -159,6 +180,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         layoutCache = [:]
 
         refreshInput()
+        refreshPrivateBar()
         rebuildRows()
         table.reloadData()
         scrollToBottom()
@@ -167,13 +189,116 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     /// The message box follows the channel: named after it, and only usable once Duhcord knows the channel.
+    /// In Private, it says so, and waits for the other person's key.
     private func refreshInput() {
         if let channelID, let channel = store.channel(channelID) {
-            input.placeholder = channel.isPrivate ? "Message @\(channel.displayName)" : "Message #\(channel.displayName)"
-            input.isEnabled = true
+            if isPrivate {
+                let ready: Bool
+                if case .ready = privateChat?.status(for: channelID) { ready = true } else { ready = false }
+                input.placeholder = ready ? "Private message to @\(channel.displayName)" : "Waiting for @\(channel.displayName)…"
+                input.isEnabled = ready
+            } else {
+                input.placeholder = channel.isPrivate ? "Message @\(channel.displayName)" : "Message #\(channel.displayName)"
+                input.isEnabled = true
+            }
         } else {
             input.placeholder = ""
             input.isEnabled = false
+        }
+    }
+
+    // MARK: - Private messaging
+
+    /// A message as shown: private messages decrypted in the Private view and folded to one line elsewhere,
+    /// handshakes as a short note. Everything else unchanged.
+    private func displayed(_ message: Message) -> Message {
+        var shown = message
+        switch PrivateMessaging.kind(of: message.content) {
+        case .plain:
+            return message
+        case .handshake:
+            shown.content = message.author.id == store.me?.id ? "🔒 *You offered to chat privately.*" : "🔒 *Wants to chat privately.*"
+        case .encrypted:
+            if isPrivate {
+                shown.content = privateChat?.plaintext(of: message) ?? "🔒 *This private message can't be read with this Mac's key.*"
+            } else {
+                shown.content = "🔒 *Private message. Switch to Private to read it.*"
+            }
+        }
+        return shown
+    }
+
+    /// A key arrived, the mode switched or a request came in: redraw for it.
+    func privateChanged() {
+        layoutCache = [:]
+        rebuildRows()
+        table.reloadData()
+        scrollToBottom()
+        updateEmptyState()
+        refreshInput()
+        refreshPrivateBar()
+    }
+
+    private enum BarAction { case none, verify, accept }
+    private var barAction = BarAction.none
+
+    private func refreshPrivateBar() {
+        guard let channelID, let privateChat, let peer = privateChat.peer(in: channelID) else {
+            setPrivateBar(nil)
+            return
+        }
+        let name = peer.displayName
+        if isPrivate {
+            switch privateChat.status(for: channelID) {
+            case .unavailable:
+                setPrivateBar(nil)
+            case .waiting:
+                setPrivateBar("Waiting for \(name) to set up private chat. They need Duhcord to read private messages.", tone: .info)
+            case .ready(let verified, let keyChanged):
+                if keyChanged {
+                    setPrivateBar("\(name)'s key changed: a new Mac, a reinstall, or someone in the middle. Check before sending.",
+                                  tone: .warning, action: "Verify…", then: .verify)
+                } else if !verified {
+                    setPrivateBar("Private chat with \(name). Compare safety numbers to make sure no one is in the middle.",
+                                  tone: .secure, action: "Verify…", then: .verify)
+                } else {
+                    setPrivateBar("Private chat with \(name). Verified.", tone: .secure, action: "Safety Number", then: .verify)
+                }
+            }
+        } else if privateChat.hasRequest(in: channelID) {
+            setPrivateBar("\(name) wants to chat privately.", tone: .info, action: "Chat Privately", then: .accept)
+        } else {
+            setPrivateBar(nil)
+        }
+    }
+
+    private func setPrivateBar(_ text: String?, tone: BannerView.Tone = .info, action: String? = nil, then: BarAction = .none) {
+        barAction = then
+        if let text { privateBar.show(text, tone: tone, action: action) }
+        privateBar.isHidden = text == nil
+        scrollToBar.isActive = text != nil
+        scrollToTop.isActive = text == nil
+    }
+
+    private func privateBarAction() {
+        guard let channelID, let privateChat else { return }
+        switch barAction {
+        case .none:
+            break
+        case .accept:
+            privateChat.setMode(.private, for: channelID)
+        case .verify:
+            guard let number = privateChat.safetyNumber(for: channelID), let window = view.window else { return }
+            let name = privateChat.peer(in: channelID)?.displayName ?? "them"
+            let alert = NSAlert()
+            alert.messageText = "Safety number with \(name)"
+            alert.informativeText = number + "\n\nCompare this with \(name)'s, in person or in a voice call (Duhcord's calls are end-to-end "
+                + "encrypted). If the numbers match, only the two of you can read your private messages."
+            alert.addButton(withTitle: "Mark as Verified")
+            alert.addButton(withTitle: "Cancel")
+            alert.beginSheetModal(for: window) { response in
+                if response == .alertFirstButtonReturn { privateChat.markVerified(in: channelID) }
+            }
         }
     }
 
@@ -181,6 +306,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     /// before Discord announced it), this switches its message box on.
     func channelsChanged() {
         refreshInput()
+        refreshPrivateBar()
     }
 
     func messagesChanged(in channelID: Snowflake) {
@@ -257,10 +383,15 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         result.reserveCapacity(messages.count)
         var previous: Message?
         let query = filterText.trimmingCharacters(in: .whitespaces)
+        let privateView = isPrivate
         for message in messages {
+            // The Private view lists only private messages; the standard view shows them folded away.
+            if privateView {
+                guard case .encrypted = PrivateMessaging.kind(of: message.content) else { continue }
+            }
             // While searching, each match stands on its own, with its author line.
             if !query.isEmpty {
-                let text = message.content + " " + message.author.displayName + " " + message.author.username
+                let text = displayed(message).content + " " + message.author.displayName + " " + message.author.username
                 guard text.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil else { continue }
                 result.append(Row(message: message, grouped: false))
                 continue
@@ -291,7 +422,11 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         }
         loadingSpinner.stopAnimation(nil)
         if rows.isEmpty {
-            emptyLabel.stringValue = filterText.isEmpty ? "No Messages Yet" : "No Matches in Loaded Messages"
+            if !filterText.isEmpty {
+                emptyLabel.stringValue = "No Matches in Loaded Messages"
+            } else {
+                emptyLabel.stringValue = isPrivate ? "No Private Messages Yet" : "No Messages Yet"
+            }
             emptyLabel.isHidden = false
         } else {
             emptyLabel.isHidden = true
@@ -381,8 +516,20 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     private func send(_ text: String) {
         guard let channelID else { return }
+        var content = text
+        if isPrivate, let privateChat {
+            do {
+                content = try privateChat.seal(text, in: channelID)
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "Private message not sent"
+                alert.informativeText = error.localizedDescription
+                if let window = view.window { alert.beginSheetModal(for: window) }
+                return
+            }
+        }
         input.text = ""
-        session.send(text, to: channelID) { [weak self] error in
+        session.send(content, to: channelID) { [weak self] error in
             guard let self, let error else { return }
             // Put the text back so nothing is lost.
             if self.input.text.isEmpty { self.input.text = text }
@@ -400,14 +547,15 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private func layout(for row: Row) -> CachedLayout {
         let message = row.message
         // Edits and late link previews bump the revision.
-        let key = LayoutKey(id: message.id, revision: message.revision, grouped: row.grouped)
+        let shown = displayed(message)
+        let key = LayoutKey(id: message.id, revision: message.revision, grouped: row.grouped, shown: shown.content.hashValue)
         if let cached = layoutCache[key] { return cached }
         let resolver = store.resolver(for: message)
         let built = MessageLayoutBuilder.build(
-            message: message, grouped: row.grouped, cellWidth: table.bounds.width, sidePadding: Self.sidePadding,
+            message: shown, grouped: row.grouped, cellWidth: table.bounds.width, sidePadding: Self.sidePadding,
             headerHeight: Self.headerHeight, topPadding: MessageCell.topPadding(grouped: row.grouped),
             bottomPadding: MessageCell.bottomPadding, resolver: resolver)
-        let cached = CachedLayout(layout: built, header: row.grouped ? nil : Theme.header(for: message))
+        let cached = CachedLayout(layout: built, header: row.grouped ? nil : Theme.header(for: shown))
         layoutCache[key] = cached
         return cached
     }
@@ -448,7 +596,9 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private func menuItems(for message: Message, in cell: MessageCell) -> [NSMenuItem] {
         let guildID = store.channel(message.channelId)?.guildId
         return [
-            ActionMenuItem("Copy Text", enabled: !message.content.isEmpty) { Pasteboard.copy(message.content) },
+            ActionMenuItem("Copy Text", enabled: !message.content.isEmpty) { [weak self] in
+                Pasteboard.copy(self?.displayed(message).content ?? message.content)
+            },
             ActionMenuItem("Copy Message Link") {
                 Pasteboard.copy(DiscordLink.message(message.id, channelID: message.channelId, guildID: guildID))
             },
@@ -464,7 +614,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private func spokenText(for message: Message) -> String {
         var parts = [message.author.displayName]
         if let date = message.date { parts.append(Theme.timeFormatter.string(from: date)) }
-        if !message.content.isEmpty { parts.append(message.content) }
+        let content = displayed(message).content
+        if !content.isEmpty { parts.append(content) }
         let attachments = message.attachments.count
         if attachments > 0 { parts.append("\(attachments) attachment\(attachments == 1 ? "" : "s")") }
         if message.editedTimestamp != nil { parts.append("edited") }

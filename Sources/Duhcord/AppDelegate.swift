@@ -218,8 +218,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         if let channel, !channel.isPrivate {
             content.subtitle = "#" + channel.displayName
         }
-        // Names instead of <@123> tokens, and no Markdown characters; spoilers stay hidden.
-        let text = Markdown.plainText(message.content, resolver: session.store.resolver(for: message))
+        // Names instead of <@123> tokens, and no Markdown characters; spoilers stay hidden. Private messages
+        // aren't decrypted into Notification Centre, which keeps a copy.
+        let text: String
+        switch PrivateMessaging.kind(of: message.content) {
+        case .plain: text = Markdown.plainText(message.content, resolver: session.store.resolver(for: message))
+        case .handshake: text = "🔒 Wants to chat privately"
+        case .encrypted: text = "🔒 Private message"
+        }
         content.body = text.isEmpty ? (message.attachments.isEmpty ? "Sent a message" : "Sent an attachment") : text
         content.sound = Settings.notificationSound ? .default : nil
         content.userInfo = ["channelID": message.channelId]
@@ -309,6 +315,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         let view = NSMenu(title: "View")
         let sidebar = view.addItem(withTitle: "Show Sidebar", action: #selector(NSSplitViewController.toggleSidebar(_:)), keyEquivalent: "s")
         sidebar.keyEquivalentModifierMask = [.control, .command]
+        let privateItem = view.addItem(withTitle: "Private Messages", action: #selector(MainWindowController.togglePrivateMessages(_:)), keyEquivalent: "p")
+        privateItem.keyEquivalentModifierMask = [.command, .option]
+        view.addItem(.separator())
         let fullScreen = view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         fullScreen.keyEquivalentModifierMask = [.control, .command]
         main.addItem(submenu: view, title: "View")

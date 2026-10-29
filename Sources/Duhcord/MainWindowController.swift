@@ -19,6 +19,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private var switcher: QuickSwitcher?
     private var voiceDetails: VoiceDetailsWindowController?
     private let profiles: ProfileController
+    private let privateChat: PrivateChatController
+    /// Standard / Private, for the DM on screen.
+    private var privateModeItem: NSToolbarItemGroup?
     /// The toolbar's search field: finds messages in the conversation on screen (⌘F).
     private let searchItem = NSSearchToolbarItem(itemIdentifier: .search)
     private let connectionLock = ConnectionLock()
@@ -39,6 +42,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         channelList = ChannelListViewController(store: session.store, voice: voice)
         messages = MessagesViewController(session: session)
         profiles = ProfileController(session: session)
+        privateChat = PrivateChatController(session: session)
 
         let split = NSSplitViewController()
         let sidebar = NSSplitViewItem(sidebarWithViewController: guildList)
@@ -87,6 +91,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             self?.profiles.showCard(userID: userID, guildID: guildID, relativeTo: rect, of: view)
         }
         profiles.isLocked = { [weak self] in self?.isLocked ?? false }
+        messages.privateChat = privateChat
+        privateChat.onChange = { [weak self] channelID in
+            guard let self else { return }
+            if channelID == nil || channelID == self.session.store.focusedChannelID { self.messages.privateChanged() }
+            self.refreshPrivateModeItem()
+        }
         profiles.onOpenGuild = { [weak self] guildID in
             self?.select(place: .guild(guildID))
             self?.window?.makeKeyAndOrderFront(nil)
@@ -145,6 +155,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         switch menuItem.action {
         case #selector(findInConversation(_:)):
             return session.store.focusedChannelID != nil
+        case #selector(togglePrivateMessages(_:)):
+            guard let channelID = session.store.focusedChannelID else { return false }
+            menuItem.state = privateChat.mode(for: channelID) == .private ? .on : .off
+            return privateChat.status(for: channelID) != .unavailable
         case #selector(toggleMute(_:)):
             menuItem.title = voice.muted ? "Unmute" : "Mute"
             return voice.isInCall
@@ -236,6 +250,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         case .presence(let userID):
             profiles.presenceChanged(userID)
         case .messages(let channelID):
+            // Handshakes in a DM set up private chat; read them before showing the messages.
+            privateChat.scan(channelID: channelID)
             messages.messagesChanged(in: channelID)
         case .unread:
             // A burst of events (a busy channel, READY's backlog) becomes one refresh at the end of this run-loop turn.
@@ -282,6 +298,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         channelList.select(channelID)
         messages.show(channelID: channelID)
         session.open(channelID: channelID)
+        privateChat.scan(channelID: channelID)
+        refreshPrivateModeItem()
         updateTitle()
     }
 
@@ -300,6 +318,59 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         }
         self.switcher = switcher
         switcher.present(over: window)
+    }
+
+    // MARK: - Private messaging
+
+    /// The toggle follows the DM on screen: off for servers and group DMs, and on macOS 13, which lacks HPKE.
+    private func refreshPrivateModeItem() {
+        guard let item = privateModeItem else { return }
+        let channelID = session.store.focusedChannelID
+        let available = channelID.map { privateChat.status(for: $0) != .unavailable } ?? false
+        item.isEnabled = available
+        item.subitems.forEach { $0.isEnabled = available }
+        item.selectedIndex = channelID.map { privateChat.mode(for: $0) == .private ? 1 : 0 } ?? 0
+        if !PrivateChatController.isSupported {
+            item.toolTip = "Private messaging needs macOS 14 or later"
+        } else if available {
+            item.toolTip = "Standard messages, or end-to-end encrypted private messages that only Duhcord can read"
+        } else {
+            item.toolTip = "Private messaging is for one-to-one DMs"
+        }
+    }
+
+    @objc private func privateModeChanged(_ sender: NSToolbarItemGroup) {
+        setPrivateMode(sender.selectedIndex == 1)
+    }
+
+    /// View → Private Messages (⌥⌘P): the same switch from the keyboard.
+    @objc func togglePrivateMessages(_ sender: Any?) {
+        guard let channelID = session.store.focusedChannelID else { return }
+        setPrivateMode(privateChat.mode(for: channelID) != .private)
+    }
+
+    private func setPrivateMode(_ on: Bool) {
+        guard let channelID = session.store.focusedChannelID, privateChat.status(for: channelID) != .unavailable else {
+            refreshPrivateModeItem()
+            return
+        }
+        // The first time with someone, say what will happen: a visible message goes to them.
+        if on, privateChat.status(for: channelID) == .waiting, !privateChat.hasRequest(in: channelID),
+           let window, let name = privateChat.peer(in: channelID)?.displayName {
+            let alert = NSAlert()
+            alert.messageText = "Chat privately with \(name)?"
+            alert.informativeText = "Duhcord sends \(name) a short message that sets up end-to-end encryption. If they use "
+                + "Duhcord, their app answers it and private messaging starts. If not, they see a note asking them to."
+            alert.addButton(withTitle: "Chat Privately")
+            alert.addButton(withTitle: "Cancel")
+            alert.beginSheetModal(for: window) { [weak self] response in
+                guard let self else { return }
+                if response == .alertFirstButtonReturn { self.privateChat.setMode(.private, for: channelID) }
+                self.refreshPrivateModeItem()
+            }
+            return
+        }
+        privateChat.setMode(on ? .private : .standard, for: channelID)
     }
 
     /// ⌘F: search the messages loaded in this conversation.
@@ -395,7 +466,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     @objc func leaveVoice(_ sender: Any?) { voice.leave() }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, .jumpTo, .search]
+        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, .privateMode, .jumpTo, .search]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -404,6 +475,19 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if id == .privateMode {
+            let group = NSToolbarItemGroup(itemIdentifier: .privateMode, titles: ["Standard", "Private"],
+                                           selectionMode: .selectOne, labels: ["Standard", "Private"],
+                                           target: self, action: #selector(privateModeChanged(_:)))
+            group.label = "Messages"
+            group.autovalidates = false
+            group.subitems.forEach { $0.autovalidates = false }
+            group.subitems.last?.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)
+            group.setAccessibilityLabel("Private messaging")
+            privateModeItem = group
+            refreshPrivateModeItem()
+            return group
+        }
         if id == .search {
             searchItem.searchField.placeholderString = "Search Conversation"
             searchItem.searchField.delegate = self
@@ -445,6 +529,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 extension NSToolbarItem.Identifier {
     static let jumpTo = Self("jumpTo")
     static let search = Self("search")
+    static let privateMode = Self("privateMode")
     static let update = Self("update")
     static let voiceMute = Self("voiceMute")
     static let voiceDeafen = Self("voiceDeafen")

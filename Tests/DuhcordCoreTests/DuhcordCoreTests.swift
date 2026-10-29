@@ -1095,3 +1095,64 @@ extension StoreTests {
         XCTAssertEqual(store.privateChannels.map(\.id), ["900"])
     }
 }
+
+final class PrivateMessagingTests: XCTestCase {
+    func testHandshakeRoundTrip() {
+        let key = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
+        let content = PrivateMessaging.handshake(publicKey: key, wantsReply: true)
+        XCTAssertTrue(content.hasPrefix(PrivateMessaging.handshakeNotice))
+        XCTAssertEqual(PrivateMessaging.kind(of: content), .handshake(key: key, wantsReply: true))
+        XCTAssertEqual(PrivateMessaging.kind(of: "hello"), .plain)
+        XCTAssertEqual(PrivateMessaging.kind(of: "dhk1:not base64 !!"), .plain)
+    }
+
+    func testSafetyNumberIsTheSameBothWays() {
+        let a = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
+        let b = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
+        let number = PrivateMessaging.safetyNumber(a, b)
+        XCTAssertEqual(number, PrivateMessaging.safetyNumber(b, a))
+        XCTAssertEqual(number.split(separator: " ").count, 12)
+        XCTAssertEqual(number.filter(\.isNumber).count, 60)
+        XCTAssertNotEqual(number, PrivateMessaging.safetyNumber(a, Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation))
+    }
+
+    func testSealAndOpen() throws {
+        guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
+        let alice = Curve25519.KeyAgreement.PrivateKey(), bob = Curve25519.KeyAgreement.PrivateKey()
+        let eve = Curve25519.KeyAgreement.PrivateKey()
+        let content = try PrivateCrypto.seal("hi **bob** 👋", channelID: "900", sender: alice,
+                                             recipients: [bob.publicKey, alice.publicKey])
+        XCTAssertTrue(content.hasPrefix(PrivateMessaging.messageNotice))
+        XCTAssertFalse(content.contains("bob"))
+        guard case .encrypted(let payload) = PrivateMessaging.kind(of: content) else { return XCTFail("not encrypted") }
+
+        // Both recipients can read it; the sender's own copy too.
+        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "900", recipient: bob, senders: [alice.publicKey]), "hi **bob** 👋")
+        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "900", recipient: alice, senders: [alice.publicKey]), "hi **bob** 👋")
+        // Not someone it wasn't sealed to, not in another DM, and not as if from someone else.
+        XCTAssertNil(PrivateCrypto.open(payload, channelID: "900", recipient: eve, senders: [alice.publicKey]))
+        XCTAssertNil(PrivateCrypto.open(payload, channelID: "901", recipient: bob, senders: [alice.publicKey]))
+        XCTAssertNil(PrivateCrypto.open(payload, channelID: "900", recipient: bob, senders: [eve.publicKey]))
+        // Any changed byte is rejected.
+        for index in [0, 9, 20, payload.count - 1] {
+            var tampered = payload
+            tampered[index] ^= 0x01
+            XCTAssertNil(PrivateCrypto.open(tampered, channelID: "900", recipient: bob, senders: [alice.publicKey]), "byte \(index)")
+        }
+    }
+
+    func testLengthIsPaddedAndLimited() throws {
+        guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
+        let alice = Curve25519.KeyAgreement.PrivateKey(), bob = Curve25519.KeyAgreement.PrivateKey()
+        let short = try PrivateCrypto.seal("a", channelID: "1", sender: alice, recipients: [bob.publicKey])
+        let longer = try PrivateCrypto.seal(String(repeating: "a", count: 100), channelID: "1", sender: alice, recipients: [bob.publicKey])
+        XCTAssertEqual(short.count, longer.count, "both fit the same padding block")
+        XCTAssertNoThrow(try PrivateCrypto.seal(String(repeating: "a", count: 1000), channelID: "1", sender: alice,
+                                                recipients: [bob.publicKey, alice.publicKey]))
+        XCTAssertThrowsError(try PrivateCrypto.seal(String(repeating: "a", count: 1600), channelID: "1", sender: alice,
+                                                    recipients: [bob.publicKey])) { error in
+            XCTAssertEqual(error as? PrivateMessagingError, .tooLong)
+        }
+        XCTAssertThrowsError(try PrivateCrypto.seal("a", channelID: "1", sender: alice, recipients: []))
+    }
+}

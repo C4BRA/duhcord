@@ -22,6 +22,7 @@ A small, native Discord client for macOS, written in Swift with AppKit: no Elect
 |------|--------|
 | ⌘K | Jump to a channel or DM |
 | ⌘F | Search the conversation |
+| ⌥⌘P | Switch a DM between Standard and Private |
 | ⌥↑ / ⌥↓ | Previous / next channel |
 | ⌥⇧↓ | Next unread channel |
 | ⇧⌘M / ⇧⌘D | Mute / deafen in a call |
@@ -39,6 +40,15 @@ Voice channels in the channel list show who's in them, with a green ring around 
 - **Kept away from your login.** Calls run in a separate helper process, sandboxed on its own with only network and microphone access. It gets a voice token that's good for one call, never your account token. libdave is C++, and running it there keeps any bug in it away from your login.
 - **The microphone is only open while you're unmuted.** Muting closes it, so macOS's microphone indicator turns off. Deafening stops all audio. The helper exits when you leave.
 - **Light on resources.** macOS encodes and decodes the audio (Opus) and handles echo and noise (Apple's voice processing). Nothing is sent while you're quiet. A call uses about 64 kbit/s up while you talk, plus about 64 kbit/s down per person talking.
+
+## Private messaging
+
+DMs between Duhcord users can be end-to-end encrypted, so Discord only ever stores scrambled text. Switch a DM from **Standard** to **Private** in the toolbar (or **View → Private Messages**, ⌥⌘P). The Private view lists only the private messages; the standard view folds them to one line.
+
+- **Setting up.** The first time, Duhcord sends the other person a short handshake message carrying your key. If they use Duhcord, it offers them private chat; once they accept, their app answers with their key and you can start. On other apps the handshake and private messages show a note instead.
+- **How it's encrypted.** Each Duhcord install has a key pair (X25519) kept in your login keychain. Every private message is sealed to the other person's keys and your own with HPKE (RFC 9180, ChaCha20-Poly1305) in authenticated mode, so it can only have come from you, and it's tied to that DM. Text is padded so its length gives little away. Nothing else is stored: history loaded from Discord later decrypts again.
+- **Checking.** Discord carries the keys, so compare the **safety number** with the other person, in person or in a voice call, and mark it verified. If their key changes later, Duhcord warns you.
+- **Limits.** One-to-one DMs only; up to about 1,000 characters per message; text only, no attachments yet. Discord still sees who you talk to and when. Private messaging needs macOS 14 or later, and private messages can't be read on Discord's own apps, including yours.
 
 ## How it stays light
 
