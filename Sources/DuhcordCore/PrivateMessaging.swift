@@ -252,8 +252,8 @@ enum Deflate {
 
 /// 15 bits per character. Discord counts a message's length in UTF-16 code units, and every character here is
 /// one: CJK Extension A (U+3400–U+4DBF), the CJK Unified Ideographs (U+4E00–U+9FFF) and the first Hangul
-/// syllables (U+AC00–U+BC3F), 32,768 assigned characters that Unicode normalisation leaves alone. A final group of
-/// up to 7 bits uses the next 128 Hangul syllables (U+BC40–U+BCBF), so the decoder knows where the data ends.
+/// syllables (U+AC00–U+C03F), 32,768 assigned characters that Unicode normalisation leaves alone. A final group of
+/// up to 7 bits uses the next 128 Hangul syllables (U+C040–U+C0BF), so the decoder knows where the data ends.
 enum DenseText {
     private static func character(_ value: UInt32) -> Unicode.Scalar {
         let code: UInt32
@@ -269,7 +269,7 @@ enum DenseText {
         switch scalar.value {
         case 0x3400...0x4DBF: return scalar.value - 0x3400
         case 0x4E00...0x9FFF: return scalar.value - 0x4E00 + 6592
-        case 0xAC00...0xBC3F: return scalar.value - 0xAC00 + 27584
+        case 0xAC00...0xC03F: return scalar.value - 0xAC00 + 27584
         default: return nil
         }
     }
@@ -290,7 +290,7 @@ enum DenseText {
         if bits > 7 {
             scalars.append(character(acc << UInt32(15 - bits) & 0x7FFF))
         } else if bits > 0 {
-            scalars.append(Unicode.Scalar(0xBC40 + (acc << UInt32(7 - bits) & 0x7F))!)
+            scalars.append(Unicode.Scalar(0xC040 + (acc << UInt32(7 - bits) & 0x7F))!)
         }
         return String(scalars)
     }
@@ -305,8 +305,8 @@ enum DenseText {
             if let v = value(scalar) {
                 acc = acc << 15 | v
                 bits += 15
-            } else if index == scalars.count - 1, (0xBC40...0xBCBF).contains(scalar.value) {
-                acc = acc << 7 | (scalar.value - 0xBC40)
+            } else if index == scalars.count - 1, (0xC040...0xC0BF).contains(scalar.value) {
+                acc = acc << 7 | (scalar.value - 0xC040)
                 bits += 7
             } else {
                 return nil
