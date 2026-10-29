@@ -125,7 +125,7 @@ public enum MediaDecoding {
             guard let baseAddress = buffer.baseAddress,
                   let context = CGContext(data: baseAddress, width: width, height: height, bitsPerComponent: 8,
                                           bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
-                                          bitmapInfo: bitmapInfo) else { return false }
+                                          bitmapInfo: bitmapInfo.rawValue) else { return false }
             context.interpolationQuality = .high
             context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
             return true
