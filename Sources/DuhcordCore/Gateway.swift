@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 public enum GatewayEvent {
     case ready(ReadyEvent)
@@ -36,7 +37,7 @@ public final class GatewayClient: NSObject {
         case connected
         /// A routine reconnect (Discord asked for one, or the socket dropped once). Happens silently.
         case reconnecting
-        /// Couldn't reach Discord. Nothing happens until `retry()` is called.
+        /// Couldn't reach Discord. We keep retrying in the background.
         case unreachable
         /// The token was rejected. We will not reconnect.
         case authenticationFailed
@@ -78,12 +79,19 @@ public final class GatewayClient: NSObject {
     private var sequence: Int?
     private var sessionID: String?
     private var resumeURL: URL?
-    /// Reconnects tried since the last successful READY/RESUMED. One silent attempt is allowed; after that we stop.
+    /// Reconnect attempts since the last successful READY/RESUMED. One quiet retry precedes background backoff.
     private var reconnectAttempt = 0
+    private var reconnectWorkItem: DispatchWorkItem?
+    private var pathMonitor: NWPathMonitor?
+    private var state: State = .disconnected
     private var stopped = false
 
     /// Where to reconnect: the resume address while a session can be resumed, else the main gateway.
     private var reconnectURL: URL { (sessionID != nil ? resumeURL : nil) ?? ClientIdentity.gatewayURL }
+
+    static func reconnectDelay(attempt: Int, random: Double) -> TimeInterval {
+        min(60, pow(2, Double(attempt))) * (0.5 + 0.5 * random)
+    }
 
     public init(token: String) {
         self.token = token
@@ -93,6 +101,8 @@ public final class GatewayClient: NSObject {
     public func connect() {
         queue.async {
             self.stopped = false
+            self.reconnectAttempt = 0
+            self.startPathMonitor()
             self.open(url: ClientIdentity.gatewayURL)
             self.publish(state: .connecting)
         }
@@ -100,18 +110,16 @@ public final class GatewayClient: NSObject {
 
     /// Tries again after `unreachable`, resuming the previous session if Discord still has it.
     public func retry() {
-        queue.async {
-            guard !self.stopped else { return }
-            self.reconnectAttempt = 0
-            let url = self.reconnectURL
-            self.open(url: url)
-            self.publish(state: .connecting)
-        }
+        queue.async { self.retryNow() }
     }
 
     public func disconnect() {
         queue.async {
             self.stopped = true
+            self.reconnectWorkItem?.cancel()
+            self.reconnectWorkItem = nil
+            self.pathMonitor?.cancel()
+            self.pathMonitor = nil
             self.teardown(closeCode: .normalClosure)
             self.sessionID = nil
             self.sequence = nil
@@ -164,7 +172,29 @@ public final class GatewayClient: NSObject {
 
     // MARK: - Connection lifecycle
 
+    private func startPathMonitor() {
+        guard pathMonitor == nil else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self, path.status == .satisfied, self.state == .unreachable else { return }
+            self.retryNow()
+        }
+        pathMonitor = monitor
+        monitor.start(queue: queue)
+    }
+
+    private func retryNow() {
+        guard !stopped else { return }
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+        reconnectAttempt = 0
+        open(url: reconnectURL)
+        publish(state: .connecting)
+    }
+
     private func open(url: URL) {
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
         teardown(closeCode: .goingAway)
         var request = URLRequest(url: url)
         request.setValue(ClientIdentity.userAgent, forHTTPHeaderField: "User-Agent")
@@ -205,19 +235,29 @@ public final class GatewayClient: NSObject {
         }
 
         teardown(closeCode: .goingAway)
-        // Discord routinely asks clients to reconnect, so one quiet attempt is fine. If that attempt also fails
-        // we can't reach Discord: stop and wait for the user to press Retry instead of retrying in the background.
-        guard reconnectAttempt == 0 else {
-            publish(state: .unreachable)
+        // Discord routinely asks clients to reconnect, so allow one quiet attempt before showing the offline bar.
+        if reconnectAttempt == 0 {
+            reconnectAttempt = 1
+            publish(state: .reconnecting)
+            scheduleReconnect(after: Double.random(in: 1...3))
             return
         }
+        publish(state: .unreachable)
+        let delay = Self.reconnectDelay(attempt: reconnectAttempt, random: Double.random(in: 0...1))
         reconnectAttempt += 1
-        publish(state: .reconnecting)
-        queue.asyncAfter(deadline: .now() + Double.random(in: 1...3)) { [weak self] in
+        scheduleReconnect(after: delay)
+    }
+
+    private func scheduleReconnect(after delay: TimeInterval) {
+        guard !stopped else { return }
+        let work = DispatchWorkItem { [weak self] in
             guard let self, !self.stopped, self.task == nil else { return }
-            let url = self.reconnectURL
-            self.open(url: url)
+            self.reconnectWorkItem = nil
+            self.open(url: self.reconnectURL)
         }
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = work
+        queue.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     // MARK: - Receiving
@@ -436,6 +476,8 @@ public final class GatewayClient: NSObject {
     }
 
     private func publish(state: State) {
+        guard self.state != state else { return }
+        self.state = state
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.delegate?.gateway(self, didChangeState: state)

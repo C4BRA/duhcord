@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
     /// The connected session's token and account (the account is nil until Discord's READY for a new login).
     private var sessionToken: String?
     private var sessionAccountID: Snowflake?
+    private var isOffline = false
     /// Shown once the next account is on screen (why the previous one went away).
     private var pendingNotice: (title: String, detail: String)?
     private var settingsWindow: SettingsWindowController?
@@ -35,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
     func applicationDidFinishLaunching(_ notification: Notification) {
         Settings.registerDefaults()
         updates = UpdateController()
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake),
+                                                          name: NSWorkspace.didWakeNotification, object: nil)
         NSApp.mainMenu = buildMenu()
         if canNotify { UNUserNotificationCenter.current().delegate = self }
         if let token = AccountStore.launchToken() {
@@ -52,6 +55,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
 
     func applicationDidBecomeActive(_ notification: Notification) { session?.isActive = true }
     func applicationDidResignActive(_ notification: Notification) { session?.isActive = false }
+
+    @objc private func didWake(_ notification: Notification) {
+        if isOffline { session?.retry() }
+    }
 
     // MARK: - Login flow
 
@@ -73,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
     }
 
     private func start(token: String, accountID: Snowflake?) {
+        isOffline = false
         session?.disconnect()
         sessionToken = token
         sessionAccountID = accountID
@@ -345,10 +353,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
             // Discord ended the session for good; reconnecting can't fix it.
             endSession(session, message: "Discord ended a session (code \(code)). Scan a new code to log back in to it.")
         case .unreachable:
-            lock { [weak session] in session?.retry() }
+            isOffline = true
+            if mainWindow != nil {
+                mainWindow?.setOffline { [weak session] in session?.retry() }
+            } else {
+                lock { [weak session] in session?.retry() }
+            }
         case .reconnecting:
-            mainWindow?.setStatus("Reconnecting…")
+            if !isOffline { mainWindow?.setStatus("Reconnecting…") }
         case .connected:
+            isOffline = false
+            mainWindow?.setOffline(nil)
             mainWindow?.setStatus(nil)
             mainWindow?.unlock()
         case .connecting, .disconnected:

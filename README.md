@@ -67,6 +67,7 @@ DMs between Duhcord users can be end-to-end encrypted, so Discord only ever stor
 - The live connection is compressed (`zlib-stream`, usually 3–10× smaller) and unpacked by macOS's built-in Compression framework. A single decompressed message is capped at 128 MB.
 - It only decodes the events it uses.
 - It keeps messages for at most 8 channels, 300 each, so memory stays flat. History never loads in the background.
+- If Discord can't be reached, an offline bar leaves loaded messages readable while Duhcord reconnects automatically. Retries back off up to a minute and happen immediately when the network returns.
 - Messages are laid out by hand, and only for the rows on screen.
 - Images come from Discord's image proxy at exactly the size drawn and are decoded straight to that size. They load only while on screen and are kept in a small memory cache, never on disk. Link previews come inside messages, so Duhcord never visits linked sites, and activity pictures hosted elsewhere (Spotify, YouTube, Twitch) aren't loaded.
 - GIFs animate on hover (or while visible, under **Settings → Animate GIFs**), a few at a time, and only while Duhcord is in front. Videos play on click, one at a time, with a few seconds buffered.

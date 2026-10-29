@@ -383,6 +383,19 @@ final class GatewayPayloadTests: XCTestCase {
     }
 }
 
+final class GatewayReconnectTests: XCTestCase {
+    func testReconnectDelay() {
+        XCTAssertEqual(GatewayClient.reconnectDelay(attempt: 1, random: 0), 1)
+        XCTAssertEqual(GatewayClient.reconnectDelay(attempt: 1, random: 1), 2)
+        XCTAssertEqual(GatewayClient.reconnectDelay(attempt: 10, random: 0), 30)
+        XCTAssertEqual(GatewayClient.reconnectDelay(attempt: 10, random: 1), 60)
+
+        let delays = (1...10).map { GatewayClient.reconnectDelay(attempt: $0, random: 1) }
+        XCTAssertEqual(delays, delays.sorted())
+        XCTAssertEqual(delays.suffix(5), Array(repeating: 60, count: 5))
+    }
+}
+
 
 final class UpdateVerifierTests: XCTestCase {
     private let key = Curve25519.Signing.PrivateKey()
