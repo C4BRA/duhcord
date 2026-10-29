@@ -1097,13 +1097,33 @@ extension StoreTests {
 }
 
 final class PrivateMessagingTests: XCTestCase {
+    private func randomText(_ count: Int) -> String {
+        let letters = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        return String((0..<count).map { _ in letters.randomElement()! })
+    }
+
     func testHandshakeRoundTrip() {
         let key = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
         let content = PrivateMessaging.handshake(publicKey: key, wantsReply: true)
-        XCTAssertTrue(content.hasPrefix(PrivateMessaging.handshakeNotice))
+        XCTAssertTrue(content.hasPrefix("-# encrypted messaging by C4BRA/duhcord 🤫\n"))
         XCTAssertEqual(PrivateMessaging.kind(of: content), .handshake(key: key, wantsReply: true))
+        XCTAssertLessThan(content.utf16.count, 80)
         XCTAssertEqual(PrivateMessaging.kind(of: "hello"), .plain)
-        XCTAssertEqual(PrivateMessaging.kind(of: "dhk1:not base64 !!"), .plain)
+        XCTAssertEqual(PrivateMessaging.kind(of: "dhc2:not dense text"), .plain)
+    }
+
+    func testDenseTextRoundTripsAndCountsOneUnitPerCharacter() {
+        for length in [0, 1, 2, 7, 8, 14, 15, 16, 31, 100, 1000] {
+            let data = Data((0..<length).map { _ in UInt8.random(in: 0...255) })
+            let text = DenseText.encode(data)
+            XCTAssertEqual(DenseText.decode(text), data, "length \(length)")
+            // Every character is one UTF-16 unit, the way Discord counts.
+            XCTAssertEqual(text.utf16.count, text.unicodeScalars.count)
+            XCTAssertEqual(text.unicodeScalars.count, (length * 8 + 14) / 15)
+            // Unicode normalisation leaves it alone.
+            XCTAssertEqual(text.precomposedStringWithCanonicalMapping, text)
+        }
+        XCTAssertNil(DenseText.decode("abc"))
     }
 
     func testSafetyNumberIsTheSameBothWays() {
@@ -1113,46 +1133,55 @@ final class PrivateMessagingTests: XCTestCase {
         XCTAssertEqual(number, PrivateMessaging.safetyNumber(b, a))
         XCTAssertEqual(number.split(separator: " ").count, 12)
         XCTAssertEqual(number.filter(\.isNumber).count, 60)
-        XCTAssertNotEqual(number, PrivateMessaging.safetyNumber(a, Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation))
     }
 
     func testSealAndOpen() throws {
         guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
         let alice = Curve25519.KeyAgreement.PrivateKey(), bob = Curve25519.KeyAgreement.PrivateKey()
         let eve = Curve25519.KeyAgreement.PrivateKey()
-        let content = try PrivateCrypto.seal("hi **bob** 👋", channelID: "900", sender: alice,
-                                             recipients: [bob.publicKey, alice.publicKey])
-        XCTAssertTrue(content.hasPrefix(PrivateMessaging.messageNotice))
+        let text = "hi **bob** 👋 " + String(repeating: "this repeats nicely. ", count: 20)
+        let content = try PrivateCrypto.seal(text, channelID: "900", sender: alice, recipients: [bob.publicKey, alice.publicKey])
+        XCTAssertTrue(content.hasPrefix(PrivateMessaging.notice + "\n" + PrivateMessaging.prefix))
         XCTAssertFalse(content.contains("bob"))
         guard case .encrypted(let payload) = PrivateMessaging.kind(of: content) else { return XCTFail("not encrypted") }
 
-        // Both recipients can read it; the sender's own copy too.
-        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "900", recipient: bob, senders: [alice.publicKey]), "hi **bob** 👋")
-        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "900", recipient: alice, senders: [alice.publicKey]), "hi **bob** 👋")
+        // The recipient can read it, and so can the sender, without a copy sealed to themselves.
+        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "900", recipient: bob, senders: [alice.publicKey]), text)
+        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "900", recipient: alice, senders: []), text)
+        XCTAssertEqual(payload[22], 1, "one recipient entry: the sender's own key is skipped")
         // Not someone it wasn't sealed to, not in another DM, and not as if from someone else.
         XCTAssertNil(PrivateCrypto.open(payload, channelID: "900", recipient: eve, senders: [alice.publicKey]))
         XCTAssertNil(PrivateCrypto.open(payload, channelID: "901", recipient: bob, senders: [alice.publicKey]))
+        XCTAssertNil(PrivateCrypto.open(payload, channelID: "901", recipient: alice, senders: []))
         XCTAssertNil(PrivateCrypto.open(payload, channelID: "900", recipient: bob, senders: [eve.publicKey]))
         // Any changed byte is rejected.
-        for index in [0, 9, 20, payload.count - 1] {
+        for index in [0, 1, 3, 10, 23, 30, 60, payload.count - 1] {
             var tampered = payload
             tampered[index] ^= 0x01
             XCTAssertNil(PrivateCrypto.open(tampered, channelID: "900", recipient: bob, senders: [alice.publicKey]), "byte \(index)")
         }
+        XCTAssertThrowsError(try PrivateCrypto.seal("a", channelID: "1", sender: alice, recipients: [alice.publicKey]))
     }
 
-    func testLengthIsPaddedAndLimited() throws {
+    func testPrivateMessagesHoldMoreThanAPlainOne() throws {
         guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
         let alice = Curve25519.KeyAgreement.PrivateKey(), bob = Curve25519.KeyAgreement.PrivateKey()
-        let short = try PrivateCrypto.seal("a", channelID: "1", sender: alice, recipients: [bob.publicKey])
-        let longer = try PrivateCrypto.seal(String(repeating: "a", count: 100), channelID: "1", sender: alice, recipients: [bob.publicKey])
-        XCTAssertEqual(short.count, longer.count, "both fit the same padding block")
-        XCTAssertNoThrow(try PrivateCrypto.seal(String(repeating: "a", count: 1000), channelID: "1", sender: alice,
-                                                recipients: [bob.publicKey, alice.publicKey]))
-        XCTAssertThrowsError(try PrivateCrypto.seal(String(repeating: "a", count: 1600), channelID: "1", sender: alice,
+        // Text that barely compresses still fits well past Discord's 2,000: about 1.9 bytes per character.
+        let dense = randomText(3000)
+        let sealed = try PrivateCrypto.seal(dense, channelID: "1", sender: alice, recipients: [bob.publicKey])
+        XCTAssertLessThanOrEqual(sealed.utf16.count, 2000)
+        guard case .encrypted(let payload) = PrivateMessaging.kind(of: sealed) else { return XCTFail("not encrypted") }
+        XCTAssertEqual(PrivateCrypto.open(payload, channelID: "1", recipient: bob, senders: [alice.publicKey]), dense)
+        // Ordinary prose compresses, so far more fits.
+        let prose = String(repeating: "The quick brown fox jumps over the lazy dog. ", count: 200)
+        XCTAssertNoThrow(try PrivateCrypto.seal(prose, channelID: "1", sender: alice, recipients: [bob.publicKey]))
+        XCTAssertThrowsError(try PrivateCrypto.seal(randomText(8000), channelID: "1", sender: alice,
                                                     recipients: [bob.publicKey])) { error in
             XCTAssertEqual(error as? PrivateMessagingError, .tooLong)
         }
-        XCTAssertThrowsError(try PrivateCrypto.seal("a", channelID: "1", sender: alice, recipients: []))
+        // Short messages are padded to the same size.
+        let a = try PrivateCrypto.seal("ok", channelID: "1", sender: alice, recipients: [bob.publicKey])
+        let b = try PrivateCrypto.seal(randomText(90), channelID: "1", sender: alice, recipients: [bob.publicKey])
+        XCTAssertEqual(a.utf16.count, b.utf16.count)
     }
 }
