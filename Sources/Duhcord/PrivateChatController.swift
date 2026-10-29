@@ -507,7 +507,8 @@ final class PrivateChatController {
         let waiting = fromMe ? directory.deviceKeys(.pending) : directory.keys(of: authorID, .pending)
         func attempt(_ senders: [Data]) -> PrivateCrypto.Opened? {
             PrivateCrypto.open(payload, channelID: channelID, recipient: key,
-                               senders: senders.compactMap { try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: $0) })
+                               senders: senders.compactMap { try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: $0) },
+                               fromSelf: fromMe)
         }
         var warnings: [String] = []
         var result = attempt(trusted)
