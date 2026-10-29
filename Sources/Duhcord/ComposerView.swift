@@ -178,22 +178,22 @@ final class PlaceholderTextView: NSTextView {
     var acceptsImages: (() -> Bool)?
 
     override func paste(_ sender: Any?) {
-        if acceptsImages?() == true, PrivateImagePrep.canRead(.general), onImages?(.general) == true { return }
+        if acceptsImages?() == true, ImagePrep.canRead(.general), onImages?(.general) == true { return }
         super.paste(sender)
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if acceptsImages?() == true, PrivateImagePrep.canRead(sender.draggingPasteboard) { return .copy }
+        if acceptsImages?() == true, ImagePrep.canRead(sender.draggingPasteboard) { return .copy }
         return super.draggingEntered(sender)
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        if acceptsImages?() == true, PrivateImagePrep.canRead(sender.draggingPasteboard) { return .copy }
+        if acceptsImages?() == true, ImagePrep.canRead(sender.draggingPasteboard) { return .copy }
         return super.draggingUpdated(sender)
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        if acceptsImages?() == true, PrivateImagePrep.canRead(sender.draggingPasteboard),
+        if acceptsImages?() == true, ImagePrep.canRead(sender.draggingPasteboard),
            onImages?(sender.draggingPasteboard) == true { return true }
         return super.performDragOperation(sender)
     }

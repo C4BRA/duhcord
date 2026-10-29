@@ -20,8 +20,8 @@ final class MediaLoader {
     }()
     private var waiters: [URL: [Token: (NSImage?) -> Void]] = [:]
     private var tasks: [URL: Task<Void, Never>] = [:]
-    /// Decoding happens off the main thread, two at a time at most.
-    private let decodeQueue: OperationQueue = {
+    /// Decoding happens off the main thread, two at a time at most (private images share it).
+    let decodeQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.maxConcurrentOperationCount = 2
         queue.qualityOfService = .utility

@@ -144,6 +144,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         // Nothing stays usable while locked: profiles (and their message boxes) and the call details close too.
         profiles.closeAll()
         voiceDetails?.close()
+        // Decrypted images don't stay on screen while the rest of the app is out of reach.
+        PrivateImagePreview.closeAll()
         // Without the main connection Discord drops the call anyway; don't leave it half-running.
         voice.leave()
         connectionLock.show(over: window, title: title, detail: detail, onRetry: retry)

@@ -149,12 +149,18 @@ final class PrivateChatController {
     /// is trusted (images from a key that isn't aren't decoded).
     private struct Opened {
         let text: String
+        /// The text as sent, without warning lines.
+        let original: String
         let files: [PrivateFile]
         let trusted: Bool
     }
 
-    /// Opened private messages by ID (nil: couldn't be read). Cleared when keys change.
-    private var opened: [Snowflake: Opened?] = [:]
+    /// Opened private messages by ID, with the content they were opened from (an edit replaces it), nil when it
+    /// couldn't be read. Cleared when keys change.
+    private var opened: [Snowflake: (content: String, value: Opened?)] = [:]
+    /// Whether each person's current safety number is the one that was verified. Checked often (menus, the
+    /// toolbar, every mouse move of a drag), so it's remembered until the keys or the directory change.
+    private var verifiedCache: [Snowflake: Bool] = [:]
     private var seenHandshakes: Set<Snowflake> = []
     /// People who sent a handshake we haven't agreed to yet.
     private(set) var requests: Set<Snowflake> = []
@@ -172,6 +178,7 @@ final class PrivateChatController {
         guard let me = store.me?.id else { return nil }
         if loadedFor != me {
             loadedFor = me
+            verifiedCache = [:]
             privateKey = Keychain.data(service: Self.keyService, account: me)
                 .flatMap { try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: $0) }
             directory = Keychain.data(service: Self.directoryService, account: me)
@@ -180,11 +187,14 @@ final class PrivateChatController {
         if privateKey == nil, create {
             let key = Curve25519.KeyAgreement.PrivateKey()
             if Keychain.setData(key.rawRepresentation, service: Self.keyService, account: me) { privateKey = key }
+            verifiedCache = [:]
         }
         return privateKey
     }
 
+    /// Every change to the directory is saved, so this is also where remembered verification goes stale.
     private func saveDirectory() {
+        verifiedCache = [:]
         guard let me = loadedFor, let data = try? JSONEncoder().encode(directory) else { return }
         Keychain.setData(data, service: Self.directoryService, account: me)
     }
@@ -218,7 +228,13 @@ final class PrivateChatController {
         _ = loadIfNeeded()
         let newKey = !directory.keys(of: peer.id, .pending).isEmpty
         guard !directory.keys(of: peer.id, .accepted).isEmpty else { return .waiting(newKey: newKey) }
-        let verified = safetyNumber(for: channelID).map { directory.verified[peer.id] == Self.fingerprint($0) } ?? false
+        let verified: Bool
+        if let cached = verifiedCache[peer.id] {
+            verified = cached
+        } else {
+            verified = safetyNumber(for: channelID).map { directory.verified[peer.id] == Self.fingerprint($0) } ?? false
+            verifiedCache[peer.id] = verified
+        }
         return .ready(verified: verified, newKey: newKey)
     }
 
@@ -268,42 +284,57 @@ final class PrivateChatController {
     }
 
     /// The 60-digit number to compare with the other person, over every key each side encrypts to, or nil before
-    /// their key arrives. With `includingNew`, what it becomes if their waiting keys are accepted.
-    func safetyNumber(for channelID: Snowflake, includingNew: Bool = false) -> String? {
-        guard let peer = peer(in: channelID), myPublicKey != nil else { return nil }
-        var theirs = directory.keys(of: peer.id, .accepted)
-        if includingNew { theirs += directory.keys(of: peer.id, .pending) }
-        guard !theirs.isEmpty else { return nil }
-        return PrivateMessaging.safetyNumber(ownKeys, theirs)
+    /// their key arrives.
+    func safetyNumber(for channelID: Snowflake) -> String? {
+        safetyNumber(for: channelID, accepting: [])
     }
 
     private static func fingerprint(_ safetyNumber: String) -> Data {
         Data(SHA256.hash(data: Data(safetyNumber.utf8)))
     }
 
-    /// The safety numbers matched: verified until a key on either side changes.
-    func markVerified(in channelID: Snowflake) {
-        guard let peer = peer(in: channelID), let number = safetyNumber(for: channelID) else { return }
+    /// The safety number `number`, which the person compared, matched. Verified until a key on either side
+    /// changes. Returns false (and verifies nothing) if the keys changed since `number` was shown.
+    @discardableResult
+    func markVerified(in channelID: Snowflake, number: String) -> Bool {
+        guard let peer = peer(in: channelID), safetyNumber(for: channelID) == number else { return false }
         directory.verified[peer.id] = Self.fingerprint(number)
         saveDirectory()
         onChange?(channelID)
+        return true
     }
 
-    /// Trusts the other person's waiting keys, so they receive messages from now on. With `verified`, the safety
-    /// number including them was compared and matched.
-    func acceptNewKeys(in channelID: Snowflake, verified: Bool) {
-        setNewKeys(in: channelID, to: .accepted)
-        if verified { markVerified(in: channelID) }
+    /// The other person's keys waiting to be accepted, as shown for review.
+    func newKeys(in channelID: Snowflake) -> [Data] {
+        guard let peer = peer(in: channelID) else { return [] }
+        return directory.keys(of: peer.id, .pending)
     }
 
-    /// Refuses the other person's waiting keys for good: they never receive messages, and what they sent isn't shown.
-    func rejectNewKeys(in channelID: Snowflake) {
-        setNewKeys(in: channelID, to: .rejected)
+    /// The safety number if `keys` (waiting ones) were accepted too.
+    func safetyNumber(for channelID: Snowflake, accepting keys: [Data]) -> String? {
+        guard let peer = peer(in: channelID), myPublicKey != nil else { return nil }
+        let theirs = directory.keys(of: peer.id, .accepted) + keys
+        return theirs.isEmpty ? nil : PrivateMessaging.safetyNumber(ownKeys, theirs)
     }
 
-    private func setNewKeys(in channelID: Snowflake, to trust: Trust) {
+    /// Trusts exactly `keys`, the waiting keys that were shown, so they receive messages from now on. A key that
+    /// arrived while they were being reviewed stays waiting. With `comparedNumber`, the safety number shown with
+    /// them matched; returns false if it no longer applies (the keys changed meanwhile), and nothing is verified.
+    @discardableResult
+    func acceptNewKeys(_ keys: [Data], in channelID: Snowflake, comparedNumber: String?) -> Bool {
+        setTrust(.accepted, forKeys: keys, in: channelID)
+        guard let comparedNumber else { return true }
+        return markVerified(in: channelID, number: comparedNumber)
+    }
+
+    /// Refuses `keys` for good: they never receive messages, and what was sent from them isn't shown.
+    func rejectNewKeys(_ keys: [Data], in channelID: Snowflake) {
+        setTrust(.rejected, forKeys: keys, in: channelID)
+    }
+
+    private func setTrust(_ trust: Trust, forKeys chosen: [Data], in channelID: Snowflake) {
         guard let peer = peer(in: channelID), var keys = directory.people[peer.id] else { return }
-        for i in keys.indices where keys[i].trust == .pending { keys[i].state = trust }
+        for i in keys.indices where keys[i].trust == .pending && chosen.contains(keys[i].key) { keys[i].state = trust }
         directory.people[peer.id] = keys
         keysChanged(in: channelID)
     }
@@ -421,22 +452,42 @@ final class PrivateChatController {
         return try PrivateCrypto.seal(text, files: files, channelID: channelID, sender: key, recipients: recipients)
     }
 
+    /// One of our private messages without its image at `index`, sealed again (to the keys trusted now) for an
+    /// edit that also deletes that attachment. Nil when nothing would be left, so the message should be deleted.
+    func content(of message: Message, removingImage index: Int) throws -> String? {
+        guard let opened = open(content: message.content, id: message.id, authorID: message.author.id,
+                                channelID: message.channelId, postedAt: Self.postedAt(message)),
+              opened.files.indices.contains(index) else { throw PrivateMessagingError.noRecipients }
+        var files = opened.files
+        files.remove(at: index)
+        if files.isEmpty, opened.original.isEmpty { return nil }
+        return try seal(opened.original, files: files, in: message.channelId)
+    }
+
     /// The text of a private message, or nil if it isn't one or can't be read with our key. A copy that Discord
     /// could have reposted (sealed long before it appeared, or carrying an earlier message's salt), or one sent
     /// from a key that isn't trusted yet, starts with a warning line. Rejected keys' messages aren't shown.
     func plaintext(of message: Message) -> String? {
-        plaintext(content: message.content, id: message.id, authorID: message.author.id, channelID: message.channelId)
+        open(content: message.content, id: message.id, authorID: message.author.id, channelID: message.channelId,
+             postedAt: Self.postedAt(message))?.text
+    }
+
+    /// When a message's current content appeared: an edit replaces it (removing an image re-seals the text).
+    private static func postedAt(_ message: Message) -> Date {
+        message.editedTimestamp.flatMap(DiscordDate.parse) ?? date(of: message.id)
     }
 
     /// The same for a message known only by its parts (the message a reply quotes).
+    /// The text of a quoted private message, for a reply's preview line: as sent, without warnings (the message
+    /// itself shows those).
     func plaintext(content: String, id: Snowflake, authorID: Snowflake, channelID: Snowflake) -> String? {
-        open(content: content, id: id, authorID: authorID, channelID: channelID)?.text
+        open(content: content, id: id, authorID: authorID, channelID: channelID)?.original
     }
 
     /// The images in a private message, matched to its attachments. Empty if it has none or can't be read.
     func images(of message: Message) -> [PrivateImage] {
         guard let opened = open(content: message.content, id: message.id, authorID: message.author.id,
-                                channelID: message.channelId) else { return [] }
+                                channelID: message.channelId, postedAt: Self.postedAt(message)) else { return [] }
         return opened.files.enumerated().map { index, file in
             // The attachment at the same position, if it's the size this image's attachment must be.
             let attachment = message.attachments.indices.contains(index) ? message.attachments[index] : nil
@@ -446,8 +497,9 @@ final class PrivateChatController {
         }
     }
 
-    private func open(content: String, id: Snowflake, authorID: Snowflake, channelID: Snowflake) -> Opened? {
-        if let cached = opened[id] { return cached }
+    private func open(content: String, id: Snowflake, authorID: Snowflake, channelID: Snowflake,
+                      postedAt: Date? = nil) -> Opened? {
+        if let cached = opened[id], cached.content == content { return cached.value }
         guard #available(macOS 14, *), case .encrypted(let payload) = PrivateMessaging.kind(of: content),
               let key = loadIfNeeded() else { return nil }
         let fromMe = authorID == store.me?.id
@@ -467,12 +519,12 @@ final class PrivateChatController {
         }
         var shown: Opened?
         if let result {
-            if let warning = replayWarning(result, id: id) { warnings.append(warning) }
+            if let warning = replayWarning(result, id: id, postedAt: postedAt ?? Self.date(of: id)) { warnings.append(warning) }
             let lines = warnings + (result.text.isEmpty ? [] : [result.text])
-            shown = Opened(text: lines.joined(separator: "\n"), files: result.files, trusted: isTrusted)
+            shown = Opened(text: lines.joined(separator: "\n"), original: result.text, files: result.files, trusted: isTrusted)
         }
         if opened.count > 2000 { opened = [:] }
-        opened[id] = shown
+        opened[id] = (content, shown)
         return shown
     }
 
@@ -480,7 +532,7 @@ final class PrivateChatController {
     private static let replayTolerance: TimeInterval = 10 * 60
 
     @available(macOS 14, *)
-    private func replayWarning(_ opened: PrivateCrypto.Opened, id: Snowflake) -> String? {
+    private func replayWarning(_ opened: PrivateCrypto.Opened, id: Snowflake, postedAt posted: Date) -> String? {
         if let first = firstWithSalt[opened.salt], first != id {
             if first.snowflakeValue < id.snowflakeValue {
                 return "⚠️ *A copy of an earlier private message. Discord may have resent it.*"
@@ -489,7 +541,6 @@ final class PrivateChatController {
             self.opened[first] = nil
         }
         firstWithSalt[opened.salt] = id
-        let posted = Self.date(of: id)
         if abs(posted.timeIntervalSince(opened.sentAt)) > Self.replayTolerance {
             return "⚠️ *Written \(ProfileText.clockFormatter.string(from: opened.sentAt)), not when it appeared. "
                 + "Discord may have resent it.*"
@@ -509,7 +560,8 @@ struct PrivateImage {
     /// Sent from an accepted key (or one of our approved Macs). Others' images aren't downloaded or decoded.
     let trusted: Bool
 
-    var cacheKey: String { "\(messageID)/\(index)" }
+    /// By its attachment, which is unique to this image: removing an earlier image shifts the positions.
+    var cacheKey: String { attachment.map { "attachment/\($0.id)" } ?? "\(messageID)/\(index)" }
     /// Stands for the image where the message list keys things by URL; never fetched.
-    var placeholderURL: URL { URL(string: "duhcord-private://image/\(messageID)/\(index)")! }
+    var placeholderURL: URL { URL(string: "duhcord-private://image/" + cacheKey)! }
 }

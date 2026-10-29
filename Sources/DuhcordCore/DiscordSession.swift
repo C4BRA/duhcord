@@ -184,8 +184,8 @@ public final class DiscordSession: GatewayClientDelegate {
         Task { try? await rest.sendTyping(channelID: channelID) }
     }
 
-    /// Sends a message, with `files` (encrypted images) as its attachments.
-    public func send(_ content: String, files: [Data] = [], to channelID: Snowflake, completion: @escaping (Error?) -> Void) {
+    /// Sends a message, with `files` as its attachments.
+    public func send(_ content: String, files: [UploadFile] = [], to channelID: Snowflake, completion: @escaping (Error?) -> Void) {
         // Sending ends our typing indicator on Discord's side; the next keystroke starts a fresh one.
         lastTypingSent[channelID] = nil
         // A snowflake-shaped nonce from the current time; clamped so a clock set before 2015 can't trap.
@@ -194,6 +194,32 @@ public final class DiscordSession: GatewayClientDelegate {
             do {
                 // The gateway echoes the message back as MESSAGE_CREATE, which adds it to the store.
                 try await rest.sendMessage(content, to: channelID, nonce: nonce, files: files)
+                completion(nil)
+            } catch {
+                reportIfUnreachable(error)
+                completion(error)
+            }
+        }
+    }
+
+    /// Edits one of our messages (see RESTClient.editMessage). The change comes back over the gateway.
+    public func edit(_ messageID: Snowflake, in channelID: Snowflake, content: String?, keepingAttachments: [Snowflake],
+                     completion: @escaping (Error?) -> Void) {
+        Task { @MainActor in
+            do {
+                try await rest.editMessage(messageID, in: channelID, content: content, keepingAttachments: keepingAttachments)
+                completion(nil)
+            } catch {
+                reportIfUnreachable(error)
+                completion(error)
+            }
+        }
+    }
+
+    public func delete(_ messageID: Snowflake, in channelID: Snowflake, completion: @escaping (Error?) -> Void) {
+        Task { @MainActor in
+            do {
+                try await rest.deleteMessage(messageID, in: channelID)
                 completion(nil)
             } catch {
                 reportIfUnreachable(error)

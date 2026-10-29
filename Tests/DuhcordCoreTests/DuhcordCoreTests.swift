@@ -1247,7 +1247,9 @@ final class PrivateMessagingTests: XCTestCase {
     }
 
     func testMultipartBody() throws {
-        let body = Multipart(json: Data(#"{"content":"x"}"#.utf8), files: [("encrypted.bin", Data([1, 2, 3]))], boundary: "B")
+        let body = Multipart(json: Data(#"{"content":"x"}"#.utf8),
+                             files: [UploadFile(name: "encrypted.bin", data: Data([1, 2, 3]), contentType: "application/octet-stream")],
+                             boundary: "B")
         XCTAssertEqual(body.contentType, "multipart/form-data; boundary=B")
         let text = String(decoding: body.body, as: UTF8.self)
         XCTAssertTrue(text.hasPrefix("--B\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"))

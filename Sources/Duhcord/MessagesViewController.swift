@@ -56,24 +56,46 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         return privateChat.mode(for: channelID) == .private
     }
 
-    /// In Private with the other person's key: images can be attached (they're encrypted too).
+    /// Images can be attached in any channel; in Private, once the other person's key is here (they're encrypted).
     private var canAttachImages: Bool {
-        guard isPrivate, let channelID, case .ready = privateChat?.status(for: channelID) else { return false }
-        return true
+        guard let channelID, store.channel(channelID) != nil, !isUploading else { return false }
+        if isPrivate, case .ready = privateChat?.status(for: channelID) { return true }
+        return !isPrivate
     }
 
-    // Images attached to the next private message (dropped or pasted), shown in a row above the message box.
+    // Images attached to the next message (dropped or pasted), shown in a row above the message box.
     // There's no Open panel: reading files you pick needs an entitlement Duhcord doesn't have.
     private let tray = NSStackView()
     private var trayHeight: NSLayoutConstraint!
     private var trayGap: NSLayoutConstraint!
-    private var attached: [PrivateImagePrep.Prepared] = []
+    private var attached: [ImagePrep.Prepared] = []
     /// Images still being re-encoded, shown as spinners.
     private var preparing = 0
     /// Bumped when the row is cleared, so images still being prepared for it are dropped.
     private var attachGeneration = 0
-    /// A message with images is uploading: the box waits until it's sent.
-    private var isUploading = false
+    /// Return was pressed while images were still being prepared: send once they're ready.
+    private var sendWhenReady = false
+
+    /// What the message box holds belongs to one conversation, and to Standard or Private in it. Switching either
+    /// puts it away and brings back that one's, so text written to be encrypted never ends up in a box that
+    /// sends it as it is (another channel, or the same DM in Standard).
+    private struct DraftKey: Hashable {
+        let channelID: Snowflake
+        let isPrivate: Bool
+    }
+
+    private struct Draft {
+        var text = ""
+        var images: [ImagePrep.Prepared] = []
+        var isEmpty: Bool { text.isEmpty && images.isEmpty }
+    }
+
+    private var drafts: [DraftKey: Draft] = [:]
+    /// Whose draft the box shows now.
+    private var draftKey: DraftKey?
+    /// Messages with images still uploading. Their box waits (the others don't).
+    private var uploading: Set<DraftKey> = []
+    private var isUploading: Bool { draftKey.map(uploading.contains) ?? false }
     private static let trayItemSize: CGFloat = 56
 
     private struct LayoutKey: Hashable {
@@ -140,19 +162,19 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         input.acceptsImages = { [weak self] in self?.canAttachImages ?? false }
         input.onImages = { [weak self] pasteboard in
             guard let self, self.canAttachImages else { return false }
-            let sources = PrivateImagePrep.sources(from: pasteboard)
+            let sources = ImagePrep.sources(from: pasteboard)
             if sources.isEmpty { NSSound.beep() }
             self.attach(sources)
             return true
         }
-        input.canSendEmpty = { [weak self] in !(self?.attached.isEmpty ?? true) }
+        input.canSendEmpty = { [weak self] in self.map { !$0.attached.isEmpty || $0.preparing > 0 } ?? false }
 
         // Images dropped anywhere on the messages attach too, not just on the box.
         root.registerForDraggedTypes([.fileURL, .png, .tiff])
         root.acceptsImages = { [weak self] pasteboard in
-            (self?.canAttachImages ?? false) && PrivateImagePrep.canRead(pasteboard)
+            (self?.canAttachImages ?? false) && ImagePrep.canRead(pasteboard)
         }
-        root.onDropImages = { [weak self] pasteboard in self?.attach(PrivateImagePrep.sources(from: pasteboard)) }
+        root.onDropImages = { [weak self] pasteboard in self?.attach(ImagePrep.sources(from: pasteboard)) }
         tray.orientation = .horizontal
         tray.alignment = .centerY
         tray.spacing = Theme.Spacing.tight
@@ -224,7 +246,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         self.channelID = channelID
         olderPagesForPrivate = 0
         layoutCache = [:]
-        clearAttachments()
+        swapDraftIfNeeded()
 
         refreshInput()
         refreshPrivateBar()
@@ -243,27 +265,54 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             if isPrivate {
                 let ready: Bool
                 if case .ready = privateChat?.status(for: channelID) { ready = true } else { ready = false }
-                input.placeholder = ready ? "Private message to @\(channel.displayName) (drop or paste images)"
-                    : "Waiting for @\(channel.displayName)…"
+                input.placeholder = ready ? "Private message to @\(channel.displayName)" : "Waiting for @\(channel.displayName)…"
                 input.isEnabled = ready && !isUploading
             } else {
                 var placeholder = channel.isPrivate ? "Message @\(channel.displayName)" : "Message #\(channel.displayName)"
                 if case .ready = privateChat?.status(for: channelID) { placeholder += " (not encrypted)" }
                 input.placeholder = placeholder
-                input.isEnabled = true
+                input.isEnabled = !isUploading
             }
         } else {
             input.placeholder = ""
             input.isEnabled = false
         }
-        refreshAttachControls()
     }
 
-    // MARK: - Attached images
+    // MARK: - Drafts and attached images
 
-    /// Attached images belong to Private: leaving it (or losing the other person's key) drops them.
-    private func refreshAttachControls() {
-        if !canAttachImages, !isUploading, !attached.isEmpty || preparing > 0 { clearAttachments() }
+    /// Puts the box's text and images away for the conversation (and mode) it was showing, and brings back the
+    /// ones for what's showing now.
+    private func swapDraftIfNeeded() {
+        let key = channelID.map { DraftKey(channelID: $0, isPrivate: isPrivate) }
+        guard key != draftKey else { return }
+        if let old = draftKey {
+            let draft = Draft(text: input.text, images: attached)
+            drafts[old] = draft.isEmpty ? nil : draft
+        }
+        clearAttachments()
+        let draft = key.flatMap { drafts.removeValue(forKey: $0) } ?? Draft()
+        draftKey = key
+        input.text = draft.text
+        attached = draft.images
+        refreshTray()
+    }
+
+    /// A message that wasn't sent goes back where it was written: into the box if that's still showing, otherwise
+    /// into that conversation's draft (never into whatever box is open now). Returns whether it's in the box.
+    @discardableResult
+    private func restoreUnsent(_ text: String, images: [ImagePrep.Prepared], to key: DraftKey) -> Bool {
+        if key == draftKey {
+            if input.text.isEmpty { input.text = text }
+            if attached.isEmpty { attached = images }
+            refreshTray()
+            return true
+        }
+        var draft = drafts[key] ?? Draft()
+        if draft.text.isEmpty { draft.text = text }
+        if draft.images.isEmpty { draft.images = images }
+        drafts[key] = draft.isEmpty ? nil : draft
+        return false
     }
 
     /// Re-encodes the images in the background, then adds them to the row (up to the most a message can carry).
@@ -276,7 +325,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             preparing += 1
             let job = Handoff(value: source)
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let prepared = Handoff(value: PrivateImagePrep.prepare(job.value.data, name: job.value.name))
+                let prepared = Handoff(value: ImagePrep.prepare(job.value.data, name: job.value.name))
                 DispatchQueue.main.async {
                     // The channel changed or the row was cleared meanwhile: it's no longer wanted.
                     guard let self, self.attachGeneration == generation else { return }
@@ -288,6 +337,11 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                                            detail: "It isn't an image Duhcord can read, or it's too large.")
                     }
                     self.refreshTray()
+                    // Return was pressed meanwhile: now everything's ready, send what's in the box.
+                    if self.preparing == 0, self.sendWhenReady {
+                        self.sendWhenReady = false
+                        self.send(self.input.text.trimmingCharacters(in: .whitespacesAndNewlines))
+                    }
                 }
             }
         }
@@ -298,6 +352,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         attachGeneration += 1
         attached = []
         preparing = 0
+        sendWhenReady = false
         refreshTray()
     }
 
@@ -314,8 +369,9 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             spinner.setAccessibilityLabel("Preparing image")
             tray.addArrangedSubview(spinner)
         }
-        if isUploading {
-            let label = NSTextField(labelWithString: "Encrypting and sending…")
+        if isUploading || sendWhenReady {
+            let status = isUploading ? (isPrivate ? "Encrypting and sending…" : "Sending…") : "Sends when the images are ready…"
+            let label = NSTextField(labelWithString: status)
             label.textColor = .secondaryLabelColor
             label.font = Theme.messageSmallFont
             tray.addArrangedSubview(label)
@@ -331,7 +387,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
-    private func trayItem(_ image: PrivateImagePrep.Prepared, index: Int) -> NSView {
+    private func trayItem(_ image: ImagePrep.Prepared, index: Int) -> NSView {
         let size = Self.trayItemSize
         let item = NSView()
         item.translatesAutoresizingMaskIntoConstraints = false
@@ -378,39 +434,61 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         if let window = view.window { alert.beginSheetModal(for: window) }
     }
 
-    /// Encrypts each image with a key of its own, puts the keys in the private message, and uploads the
-    /// encrypted images as its attachments. The row clears once Discord has the message.
+    /// Sends the attached images with the text. In Private, each image is encrypted with a key of its own, the
+    /// keys go in the private message, and the encrypted images are uploaded as its attachments; otherwise they're
+    /// uploaded as they were prepared. The row clears once Discord has the message.
     private func sendWithImages(_ text: String, in channelID: Snowflake) {
-        guard #available(macOS 14, *), let privateChat else { return }
+        guard let key = draftKey else { return }
         let images = attached
         let content: String
-        let sealed: [Data]
+        let files: [UploadFile]
         do {
-            let files = try images.map { try PrivateCrypto.sealFile($0.data, width: $0.width, height: $0.height, kind: $0.kind) }
-            sealed = files.map(\.sealed)
-            guard sealed.reduce(0, { $0 + $1.count }) <= PrivateMessaging.maxUploadBytes else {
+            if key.isPrivate {
+                guard #available(macOS 14, *), let privateChat else { return }
+                let sealed = try images.map { try PrivateCrypto.sealFile($0.data, width: $0.width, height: $0.height, kind: $0.kind) }
+                files = sealed.map { UploadFile(name: PrivateMessaging.fileName, data: $0.sealed, contentType: "application/octet-stream") }
+                content = try privateChat.seal(text, files: sealed.map(\.file), in: channelID)
+            } else {
+                files = images.map(\.upload)
+                content = text
+            }
+            guard files.reduce(0, { $0 + $1.data.count }) <= PrivateMessaging.maxUploadBytes else {
                 throw PrivateMessagingError.filesTooLarge
             }
-            content = try privateChat.seal(text, files: files.map(\.file), in: channelID)
         } catch {
-            showSendError("Private message not sent", detail: error.localizedDescription)
+            showSendError(key.isPrivate ? "Private message not sent" : "Message not sent", detail: error.localizedDescription)
             return
         }
         input.text = ""
-        isUploading = true
+        uploading.insert(key)
         refreshInput()
         refreshTray()
-        session.send(content, files: sealed, to: channelID) { [weak self] error in
+        session.send(content, files: files, to: channelID) { [weak self] error in
             guard let self else { return }
-            self.isUploading = false
-            if error == nil, self.channelID == channelID { self.attached = [] }
+            self.uploading.remove(key)
+            if error == nil {
+                // Sent: the images leave the row, or the draft they were put away in.
+                if key == self.draftKey { self.attached = [] } else { self.drafts[key]?.images = [] }
+                if self.drafts[key]?.isEmpty == true { self.drafts[key] = nil }
+            }
             self.refreshInput()
             self.refreshTray()
             guard let error else { return }
-            if self.input.text.isEmpty { self.input.text = text }
-            guard !DiscordSession.isConnectivityError(error) else { return }
-            self.showSendError("Message not sent", detail: error.localizedDescription)
+            self.reportUnsent(text, images: [], to: key, error: error)
         }
+    }
+
+    /// Puts an unsent message back where it was written and says why it wasn't sent.
+    private func reportUnsent(_ text: String, images: [ImagePrep.Prepared], to key: DraftKey, error: Error) {
+        let inBox = restoreUnsent(text, images: images, to: key)
+        // Connection problems lock the app instead; no separate alert.
+        guard !DiscordSession.isConnectivityError(error) else { return }
+        var detail = error.localizedDescription
+        if !inBox, let channel = store.channel(key.channelID) {
+            detail += "\n\nIt's back in the message box for \(channel.isPrivate ? "@" : "#")\(channel.displayName)"
+                + (key.isPrivate ? " in Private." : ".")
+        }
+        showSendError("Message not sent", detail: detail)
     }
 
     // MARK: - Private messaging
@@ -474,6 +552,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     /// A key arrived, the mode switched or a request came in: redraw for it.
     func privateChanged() {
+        swapDraftIfNeeded()
         olderPagesForPrivate = 0
         layoutCache = [:]
         rebuildRows()
@@ -559,8 +638,9 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 + "private messages. If either of you adds or removes a Mac, compare again."
             alert.addButton(withTitle: "Mark as Verified")
             alert.addButton(withTitle: "Cancel")
-            alert.beginSheetModal(for: window) { response in
-                if response == .alertFirstButtonReturn { privateChat.markVerified(in: channelID) }
+            alert.beginSheetModal(for: window) { [weak self] response in
+                guard response == .alertFirstButtonReturn else { return }
+                if !privateChat.markVerified(in: channelID, number: number) { self?.keysChangedWhileComparing() }
             }
         }
     }
@@ -568,8 +648,10 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     /// The other person has a key besides the accepted ones: compare the safety number it would make, then accept
     /// or reject it. Either way is confirmed with what it means.
     private func reviewNewKey(in channelID: Snowflake) {
-        guard let privateChat, let window = view.window,
-              let number = privateChat.safetyNumber(for: channelID, includingNew: true) else { return }
+        // Exactly these keys and this number: a key arriving while the sheet is open isn't accepted with them.
+        guard let privateChat, let window = view.window else { return }
+        let keys = privateChat.newKeys(in: channelID)
+        guard !keys.isEmpty, let number = privateChat.safetyNumber(for: channelID, accepting: keys) else { return }
         let name = privateChat.peer(in: channelID)?.displayName ?? "them"
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -584,13 +666,13 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         alert.beginSheetModal(for: window) { [weak self] response in
             switch response {
             case .alertFirstButtonReturn:
-                privateChat.acceptNewKeys(in: channelID, verified: true)
+                if !privateChat.acceptNewKeys(keys, in: channelID, comparedNumber: number) { self?.keysChangedWhileComparing() }
             case .alertSecondButtonReturn:
                 self?.confirm("Accept \(name)'s new key without comparing?",
                               detail: "Your private messages will go to it from now on. If it isn't really theirs, whoever "
                                 + "holds it can read them. You can compare safety numbers later with Verify.",
                               button: "Accept Key", destructive: false) {
-                    privateChat.acceptNewKeys(in: channelID, verified: false)
+                    privateChat.acceptNewKeys(keys, in: channelID, comparedNumber: nil)
                 }
             case .alertThirdButtonReturn:
                 self?.confirm("Reject \(name)'s new key?",
@@ -598,11 +680,25 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                                 + "If it's really a new Mac of theirs, it won't be able to read your messages. This can't be "
                                 + "undone; they'd need to set up private messaging again on that Mac.",
                               button: "Reject Key", destructive: true) {
-                    privateChat.rejectNewKeys(in: channelID)
+                    privateChat.rejectNewKeys(keys, in: channelID)
                 }
             default:
                 break
             }
+        }
+    }
+
+    /// The safety number changed while it was on screen (a key arrived or was approved): what was compared no
+    /// longer covers every key, so nothing was marked verified.
+    private func keysChangedWhileComparing() {
+        DispatchQueue.main.async { [weak self] in
+            guard let window = self?.view.window else { return }
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "The keys changed while you were comparing"
+            alert.informativeText = "A key was added on one side, so the safety number is different now and the chat isn't "
+                + "marked verified. Use Verify to compare the new number."
+            alert.beginSheetModal(for: window)
         }
     }
 
@@ -626,6 +722,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     /// Channels came, went or were renamed. If the one on screen only just became known (a DM opened a moment
     /// before Discord announced it), this switches its message box on.
     func channelsChanged() {
+        // A DM that only just became known can turn out to be in Private: its draft follows.
+        swapDraftIfNeeded()
         refreshInput()
         refreshPrivateBar()
     }
@@ -837,9 +935,15 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     // MARK: - Sending
 
     private func send(_ text: String) {
-        guard let channelID else { return }
+        guard let channelID, let key = draftKey, !isUploading else { return }
+        // Images still being prepared go with this message: it waits for them.
+        if preparing > 0 {
+            sendWhenReady = true
+            refreshTray()
+            return
+        }
         var content = text
-        if isPrivate, !attached.isEmpty {
+        if !attached.isEmpty {
             sendWithImages(text, in: channelID)
             return
         }
@@ -858,14 +962,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         input.text = ""
         session.send(content, to: channelID) { [weak self] error in
             guard let self, let error else { return }
-            // Put the text back so nothing is lost.
-            if self.input.text.isEmpty { self.input.text = text }
-            // Connection problems lock the app instead; no separate alert.
-            guard !DiscordSession.isConnectivityError(error) else { return }
-            let alert = NSAlert()
-            alert.messageText = "Message not sent"
-            alert.informativeText = error.localizedDescription
-            if let window = self.view.window { alert.beginSheetModal(for: window) }
+            self.reportUnsent(text, images: [], to: key, error: error)
         }
     }
 
@@ -920,9 +1017,15 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         return cell
     }
 
-    /// The right-click menu for a message, as in the official client: copy it, link to it, see who wrote it.
+    /// The right-click menu for a message, as in the official client: copy it, link to it, see who wrote it, and
+    /// for your own, remove an image (or other attachment) or delete it.
     private func menuItems(for message: Message, in cell: MessageCell) -> [NSMenuItem] {
         let guildID = store.channel(message.channelId)?.guildId
+        var own: [NSMenuItem] = []
+        if message.author.id == store.me?.id {
+            own = [NSMenuItem.separator()] + removalItems(for: message)
+            own.append(ActionMenuItem("Delete Message…") { [weak self] in self?.confirmDelete(message) })
+        }
         return [
             ActionMenuItem("Copy Text", enabled: !message.content.isEmpty) { [weak self] in
                 Pasteboard.copy(self?.displayed(message).content ?? message.content)
@@ -935,7 +1038,103 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 guard let cell else { return }
                 cell.onAuthorClicked?(cell.authorAnchor)
             },
-        ]
+        ] + own
+    }
+
+    // MARK: - Removing images and messages
+
+    /// "Remove Image…" for each image (or attachment) of one of our messages: one item, or a submenu for several.
+    /// A private message's images are only offered in Private, where they're shown.
+    private func removalItems(for message: Message) -> [NSMenuItem] {
+        let isEncrypted: Bool
+        if case .encrypted = PrivateMessaging.kind(of: message.content) { isEncrypted = true } else { isEncrypted = false }
+        var choices: [(title: String, index: Int)] = []
+        if isEncrypted {
+            guard isPrivate, let privateChat else { return [] }
+            let images = privateChat.images(of: message).filter { $0.attachment != nil }
+            choices = images.map { ("Image \($0.index + 1)", $0.index) }
+        } else {
+            choices = message.attachments.enumerated().map { index, attachment in (attachment.filename, index) }
+        }
+        guard !choices.isEmpty else { return [] }
+        let noun = isEncrypted || message.attachments.allSatisfy(\.isImage) ? "Image" : "Attachment"
+        if choices.count == 1 {
+            return [ActionMenuItem("Remove \(noun)…") { [weak self] in self?.confirmRemoval(of: choices[0].index, from: message) }]
+        }
+        let item = NSMenuItem(title: "Remove \(noun)", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for choice in choices {
+            submenu.addItem(ActionMenuItem(choice.title + "…") { [weak self] in self?.confirmRemoval(of: choice.index, from: message) })
+        }
+        item.submenu = submenu
+        return [item]
+    }
+
+    /// Takes one image out of a sent message, for everyone; deletes the message if nothing else is left.
+    private func confirmRemoval(of index: Int, from message: Message) {
+        guard let window = view.window, message.attachments.indices.contains(index) else { return }
+        let isEncrypted: Bool
+        if case .encrypted = PrivateMessaging.kind(of: message.content) { isEncrypted = true } else { isEncrypted = false }
+        let remaining = message.attachments.count - 1
+        let hasText = isEncrypted ? !(privateChat?.plaintext(content: message.content, id: message.id, authorID: message.author.id,
+                                                              channelID: message.channelId) ?? "").isEmpty
+            : !message.content.isEmpty
+        let deletes = remaining == 0 && !hasText
+        let alert = NSAlert()
+        alert.messageText = deletes ? "Remove the image and delete the message?" : "Remove this image from the message?"
+        alert.informativeText = (deletes ? "The message has nothing else in it, so it's deleted. " : "")
+            + "It's removed for everyone in the conversation. Anyone who already saw it may have kept a copy."
+        alert.addButton(withTitle: deletes ? "Delete Message" : "Remove Image").hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.remove(index, from: message)
+        }
+    }
+
+    private func remove(_ index: Int, from message: Message) {
+        let keep = message.attachments.enumerated().filter { $0.offset != index }.map(\.element.id)
+        var content: String?
+        if case .encrypted = PrivateMessaging.kind(of: message.content) {
+            // The image's key is in the message too: seal the text again without it.
+            do {
+                guard let privateChat else { return }
+                content = try privateChat.content(of: message, removingImage: index)
+            } catch {
+                showSendError("Image not removed", detail: error.localizedDescription)
+                return
+            }
+            if content == nil {
+                delete(message)
+                return
+            }
+        } else if keep.isEmpty, message.content.isEmpty {
+            delete(message)
+            return
+        }
+        session.edit(message.id, in: message.channelId, content: content, keepingAttachments: keep) { [weak self] error in
+            guard let error, !DiscordSession.isConnectivityError(error) else { return }
+            self?.showSendError("Image not removed", detail: error.localizedDescription)
+        }
+    }
+
+    private func confirmDelete(_ message: Message) {
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete this message?"
+        alert.informativeText = "It's deleted for everyone in the conversation, with its images."
+        alert.addButton(withTitle: "Delete").hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertFirstButtonReturn { self?.delete(message) }
+        }
+    }
+
+    private func delete(_ message: Message) {
+        session.delete(message.id, in: message.channelId) { [weak self] error in
+            guard let error, !DiscordSession.isConnectivityError(error) else { return }
+            self?.showSendError("Message not deleted", detail: error.localizedDescription)
+        }
     }
 
     /// What VoiceOver reads for a message: who, when, and what.

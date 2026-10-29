@@ -49,7 +49,8 @@ final class PrivateImageLoader {
                 return
             }
             let bytes = Handoff(value: data)
-            DispatchQueue.global(qos: .utility).async {
+            // The same two-at-a-time queue as other images, so scrolling past many large photos stays light.
+            MediaLoader.shared.decodeQueue.addOperation {
                 let decoded = Handoff(value: MediaLoader.decode(bytes.value, maxPixel: maxPixel, pointSize: pointSize,
                                                                 allowedTypes: allowed))
                 DispatchQueue.main.async {
@@ -128,10 +129,10 @@ final class PrivateImageLoader {
     }
 }
 
-/// Turns a picture the user attached into what's encrypted and sent: re-encoded from its pixels, so nothing else
-/// in the file (location, camera, edits, other frames) goes with it, turned upright, and made small enough that
-/// the most images a message can carry fit Discord's upload limit together.
-enum PrivateImagePrep {
+/// Turns a picture the user attached into what's sent (encrypted in Private, as it is otherwise): re-encoded from
+/// its pixels, so nothing else in the file (location, camera, edits, other frames) goes with it, turned upright,
+/// and made small enough that the most images a message can carry fit Discord's upload limit together.
+enum ImagePrep {
     struct Prepared {
         let data: Data
         let width: Int
@@ -140,6 +141,12 @@ enum PrivateImagePrep {
         /// For the row of attached images above the message box.
         let thumbnail: NSImage
         let name: String
+
+        /// The file as uploaded outside Private: a plain name, so the original's doesn't go to Discord either.
+        var upload: UploadFile {
+            kind == .png ? UploadFile(name: "image.png", data: data, contentType: "image/png")
+                : UploadFile(name: "image.jpg", data: data, contentType: "image/jpeg")
+        }
     }
 
     /// Each image's share of the upload limit, leaving room for padding.

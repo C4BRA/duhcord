@@ -39,17 +39,29 @@ public final class RESTClient {
     }
 
     /// The sent message comes back over the gateway, so the response isn't decoded. `files` are uploaded with it
-    /// as attachments, in order, all named `PrivateMessaging.fileName` (only encrypted images are ever sent).
-    public func sendMessage(_ content: String, to channelID: Snowflake, nonce: String, files: [Data] = []) async throws {
+    /// as attachments, in order.
+    public func sendMessage(_ content: String, to channelID: Snowflake, nonce: String, files: [UploadFile] = []) async throws {
         var body: [String: Any] = ["content": content, "nonce": nonce, "tts": false, "flags": 0]
         guard !files.isEmpty else {
             _ = try await request("POST", "/channels/\(channelID)/messages", body: body)
             return
         }
-        body["attachments"] = files.indices.map { ["id": $0, "filename": PrivateMessaging.fileName] as [String: Any] }
-        let multipart = Multipart(json: try JSONSerialization.data(withJSONObject: body),
-                                  files: files.map { (PrivateMessaging.fileName, $0) })
+        body["attachments"] = files.enumerated().map { ["id": $0.offset, "filename": $0.element.name] as [String: Any] }
+        let multipart = Multipart(json: try JSONSerialization.data(withJSONObject: body), files: files)
         _ = try await request("POST", "/channels/\(channelID)/messages", raw: (data: multipart.body, contentType: multipart.contentType))
+    }
+
+    /// Edits one of our messages: new text (nil leaves it), keeping only the attachments listed (the rest are
+    /// deleted from Discord).
+    public func editMessage(_ messageID: Snowflake, in channelID: Snowflake, content: String?,
+                            keepingAttachments attachmentIDs: [Snowflake]) async throws {
+        var body: [String: Any] = ["attachments": attachmentIDs.map { ["id": $0] }]
+        if let content { body["content"] = content }
+        _ = try await request("PATCH", "/channels/\(channelID)/messages/\(messageID)", body: body)
+    }
+
+    public func deleteMessage(_ messageID: Snowflake, in channelID: Snowflake) async throws {
+        _ = try await request("DELETE", "/channels/\(channelID)/messages/\(messageID)")
     }
 
     /// Fresh links for attachments whose signed links have expired (Discord's links last about a day).
@@ -196,12 +208,25 @@ public final class RESTClient {
     }
 }
 
+/// A file uploaded with a message.
+public struct UploadFile {
+    public let name: String
+    public let data: Data
+    public let contentType: String
+
+    public init(name: String, data: Data, contentType: String) {
+        self.name = name
+        self.data = data
+        self.contentType = contentType
+    }
+}
+
 /// A multipart/form-data body: the message as `payload_json`, then the files as `files[0]`, `files[1]`…
 struct Multipart {
     let body: Data
     let contentType: String
 
-    init(json: Data, files: [(name: String, data: Data)], boundary: String = "duhcord-" + UUID().uuidString) {
+    init(json: Data, files: [UploadFile], boundary: String = "duhcord-" + UUID().uuidString) {
         var body = Data()
         func line(_ text: String) { body.append(Data((text + "\r\n").utf8)) }
         line("--" + boundary)
@@ -213,7 +238,7 @@ struct Multipart {
         for (index, file) in files.enumerated() {
             line("--" + boundary)
             line("Content-Disposition: form-data; name=\"files[\(index)]\"; filename=\"\(file.name)\"")
-            line("Content-Type: application/octet-stream")
+            line("Content-Type: " + file.contentType)
             line("")
             body.append(file.data)
             line("")
