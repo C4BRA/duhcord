@@ -31,6 +31,7 @@ public final class DiscordSession: GatewayClientDelegate {
     private var lastTypingSent: [Snowflake: Date] = [:]
 
     private let gateway: GatewayClient
+    private var lastGatewayState: GatewayClient.State = .disconnected
     private var loading: Set<Snowflake> = []
     private var subscribedGuilds: Set<Snowflake> = []
     /// "guild/user" pairs already asked for, so a name Discord can't give isn't asked for again and again.
@@ -149,7 +150,7 @@ public final class DiscordSession: GatewayClientDelegate {
     }
 
     private func reportIfUnreachable(_ error: Error) {
-        guard Self.isConnectivityError(error) else { return }
+        guard Self.isConnectivityError(error), lastGatewayState != .connected else { return }
         delegate?.session(self, didChangeState: .unreachable)
     }
 
@@ -309,6 +310,7 @@ public final class DiscordSession: GatewayClientDelegate {
     }
 
     public func gateway(_ gateway: GatewayClient, didChangeState state: GatewayClient.State) {
+        lastGatewayState = state
         delegate?.session(self, didChangeState: state)
     }
 }

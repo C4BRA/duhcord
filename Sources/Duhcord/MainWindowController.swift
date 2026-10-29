@@ -32,6 +32,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// The info bar under the toolbar, for things that need attention (like Safari's and Mail's).
     private let banner = BannerView()
     private let bannerAccessory = NSTitlebarAccessoryViewController()
+    private struct BannerContent {
+        let text: String
+        let tone: BannerView.Tone
+        let action: String?
+        let handler: (() -> Void)?
+    }
+    private var bannerContent: BannerContent?
+    private var offlineRetry: (() -> Void)?
     private var status: String?
     private var updateHandler: (() -> Void)?
 
@@ -192,12 +200,31 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
 
     /// Shows the info bar under the toolbar, or hides it when `text` is nil.
     func showBanner(_ text: String?, tone: BannerView.Tone = .info, action: String? = nil, handler: (() -> Void)? = nil) {
-        guard let text else {
+        bannerContent = text.map { BannerContent(text: $0, tone: tone, action: action, handler: handler) }
+        if offlineRetry == nil { showBannerContent() }
+    }
+
+    func setOffline(_ retry: (() -> Void)?) {
+        if offlineRetry == nil, retry != nil { voice.leave() }
+        offlineRetry = retry
+        guard let retry else {
+            showBannerContent()
+            return
+        }
+        setStatus("Offline")
+        banner.show("Can't reach Discord. Duhcord will reconnect automatically.", tone: .warning, action: "Try Now")
+        banner.onAction = retry
+        bannerAccessory.isHidden = false
+    }
+
+    private func showBannerContent() {
+        guard let content = bannerContent else {
+            banner.onAction = nil
             bannerAccessory.isHidden = true
             return
         }
-        banner.show(text, tone: tone, action: action)
-        banner.onAction = handler
+        banner.show(content.text, tone: content.tone, action: content.action)
+        banner.onAction = content.handler
         bannerAccessory.isHidden = false
     }
 
