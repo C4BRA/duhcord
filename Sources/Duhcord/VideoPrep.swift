@@ -495,10 +495,10 @@ final class VideoPrep: @unchecked Sendable {
         videoOutput.alwaysCopiesSampleData = false
         guard reader.canAdd(videoOutput) else { throw Failure.failed }
         reader.add(videoOutput)
-        let sound = audio.isEmpty ? nil : Self.audioPair(audio, bitrate: audioBitrate)
+        let sound = audio.isEmpty ? nil : Self.audioReader(audio, bitrate: audioBitrate)
         if let sound {
-            guard reader.canAdd(sound.readerOutput) else { throw Failure.failed }
-            reader.add(sound.readerOutput)
+            guard reader.canAdd(sound) else { throw Failure.failed }
+            reader.add(sound)
         }
 
         let session = try Self.compressionSession(size: size, fps: fps, bitrate: videoBitrate)
@@ -521,7 +521,7 @@ final class VideoPrep: @unchecked Sendable {
 
         // Sound is pulled alongside the picture. Leaving it queued stalls the reader on a long clip.
         let audioGroup = DispatchGroup()
-        if let audioOutput = sound?.readerOutput {
+        if let audioOutput = sound {
             audioGroup.enter()
             let pump = OutputPump(output: audioOutput, frames: audioFrames, state: state, origin: origin)
             DispatchQueue.global(qos: .userInitiated).async {
@@ -562,24 +562,32 @@ final class VideoPrep: @unchecked Sendable {
         if cancelled { throw CancellationError() }
         guard !encodeFailed, complete == noErr, frames.status == noErr, !frames.samples.isEmpty,
               reader.status == .completed else { throw Failure.failed }
-        return try await mux(reader: reader, video: frames.samples, audio: audioFrames.samples, audioInput: sound?.input,
-                             progress: progress)
+        return try await mux(reader: reader, video: frames.samples, audio: audioFrames.samples,
+                             audioBitrate: audioBitrate, progress: progress)
     }
 
     /// Puts the already-capped H.264 pictures, and AAC for the sound, into the same fragmented MP4 as a remux.
-    private func mux(reader: AVAssetReader, video: [CMSampleBuffer], audio: [CMSampleBuffer], audioInput: AVAssetWriterInput?,
+    private func mux(reader: AVAssetReader, video: [CMSampleBuffer], audio: [CMSampleBuffer], audioBitrate: Double,
                      progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
         guard let hint = CMSampleBufferGetFormatDescription(video[0]) else { throw Failure.failed }
+        // The writer can pass both tracks through, or encode both. It cannot encode the sound while the
+        // picture is already H.264, so the sound becomes AAC here.
+        let sound = try Self.aacPackets(audio, bitrate: audioBitrate)
         let collected = MemoryOutput()
-        let writer = makeWriter(collected)
+        // A timed fragment cannot carry picture and sound together. One fragment at the end can.
+        let writer = makeWriter(collected, segmentInterval: .indefinite)
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: hint)
         videoInput.expectsMediaDataInRealTime = false
         guard writer.canAdd(videoInput) else { throw Failure.failed }
         writer.add(videoInput)
-        let includeAudio = !audio.isEmpty
-        if includeAudio, let audioInput {
-            guard writer.canAdd(audioInput) else { throw Failure.failed }
-            writer.add(audioInput)
+        let includeAudio = !sound.isEmpty
+        var audioInput: AVAssetWriterInput?
+        if includeAudio, let audioHint = CMSampleBufferGetFormatDescription(sound[0]) {
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: audioHint)
+            input.expectsMediaDataInRealTime = false
+            guard writer.canAdd(input) else { throw Failure.failed }
+            writer.add(input)
+            audioInput = input
         }
         let writing = ActiveMedia(reader: reader, writer: writer)
         guard state.withLock({ state -> Bool in
@@ -600,7 +608,7 @@ final class VideoPrep: @unchecked Sendable {
             input.requestMediaDataWhenReady(on: queue) { pump.step { group.leave() } }
         }
         feed(videoInput, video, report: true)
-        if includeAudio, let audioInput { feed(audioInput, audio, report: false) }
+        if includeAudio, let audioInput { feed(audioInput, sound, report: false) }
         await Self.wait(group)
         if cancelled {
             writer.cancelWriting()
@@ -624,8 +632,8 @@ final class VideoPrep: @unchecked Sendable {
         }
     }
 
-    /// The sound mixed down and encoded as AAC; mono at the lowest bitrates.
-    private static func audioPair(_ tracks: [AVAssetTrack], bitrate: Double) -> TrackPair {
+    /// The sound mixed down to PCM; mono at the lowest bitrates. AAC is made later, once the picture is already H.264.
+    private static func audioReader(_ tracks: [AVAssetTrack], bitrate: Double) -> AVAssetReaderAudioMixOutput {
         let channels = bitrate <= VideoEncode.minAudioBitrate ? 1 : 2
         let output = AVAssetReaderAudioMixOutput(audioTracks: tracks, audioSettings: [
             AVFormatIDKey: kAudioFormatLinearPCM,
@@ -637,14 +645,115 @@ final class VideoPrep: @unchecked Sendable {
             AVLinearPCMIsNonInterleaved: false,
         ])
         output.alwaysCopiesSampleData = false
-        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 44_100,
-            AVNumberOfChannelsKey: channels,
-            AVEncoderBitRateKey: Int(bitrate),
-        ])
-        input.expectsMediaDataInRealTime = false
-        return TrackPair(readerOutput: output, input: input)
+        return output
+    }
+
+    /// AAC packets starting at the first sample's time. Empty when there is nothing to encode.
+    private static func aacPackets(_ samples: [CMSampleBuffer], bitrate: Double) throws -> [CMSampleBuffer] {
+        guard let first = samples.first else { return [] }
+        guard let sourceDescription = CMSampleBufferGetFormatDescription(first),
+              let basic = CMAudioFormatDescriptionGetStreamBasicDescription(sourceDescription) else { throw Failure.failed }
+        guard let source = AVAudioFormat(streamDescription: basic),
+              let destination = AVAudioFormat(settings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: basic.pointee.mSampleRate,
+                AVNumberOfChannelsKey: basic.pointee.mChannelsPerFrame,
+                AVEncoderBitRateKey: Int(bitrate),
+              ]),
+              let converter = AVAudioConverter(from: source, to: destination) else { throw Failure.failed }
+        let sourceBuffers = PCMSource(samples: samples, format: source)
+        var encoded: [CMSampleBuffer] = []
+        var failure: NSError?
+        let packetDuration = CMTime(value: Int64(max(1, destination.streamDescription.pointee.mFramesPerPacket)),
+                                    timescale: CMTimeScale(basic.pointee.mSampleRate))
+        var cursor = CMSampleBufferGetPresentationTimeStamp(first)
+        while true {
+            let packet = AVAudioCompressedBuffer(format: destination, packetCapacity: 8,
+                                                 maximumPacketSize: converter.maximumOutputPacketSize)
+            let status = converter.convert(to: packet, error: &failure) { _, outStatus in
+                sourceBuffers.next(outStatus)
+            }
+            if packet.packetCount > 0, let sample = compressedAudioSample(packet, at: cursor, packetDuration: packetDuration) {
+                cursor = CMTimeAdd(cursor, CMSampleBufferGetDuration(sample))
+                encoded.append(sample)
+            }
+            if status == .endOfStream || status == .error || (status == .inputRanDry && packet.packetCount == 0) { break }
+            if failure != nil { break }
+        }
+        if failure != nil || encoded.isEmpty { throw Failure.failed }
+        return encoded
+    }
+
+    /// One compressed buffer may hold several AAC packets. Their times walk forward from `time`.
+    private static func compressedAudioSample(_ buffer: AVAudioCompressedBuffer, at time: CMTime,
+                                              packetDuration: CMTime) -> CMSampleBuffer? {
+        let packetCount = CMItemCount(buffer.packetCount)
+        guard packetCount > 0 else { return nil }
+        let format = buffer.format.formatDescription
+        let dataLength = Int(buffer.byteLength)
+        var block: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(allocator: nil, memoryBlock: nil, blockLength: dataLength,
+                                                  blockAllocator: nil, customBlockSource: nil, offsetToData: 0,
+                                                  dataLength: dataLength, flags: 0, blockBufferOut: &block) == noErr,
+              let block else { return nil }
+        guard CMBlockBufferReplaceDataBytes(with: buffer.data, blockBuffer: block, offsetIntoDestination: 0,
+                                            dataLength: dataLength) == noErr else { return nil }
+        var cursor = time
+        var timings = [CMSampleTimingInfo]()
+        var sizes = [Int]()
+        let descriptions = buffer.packetDescriptions
+        for index in 0..<packetCount {
+            timings.append(CMSampleTimingInfo(duration: packetDuration, presentationTimeStamp: cursor, decodeTimeStamp: .invalid))
+            cursor = CMTimeAdd(cursor, packetDuration)
+            let size = descriptions.map { Int($0[index].mDataByteSize) } ?? dataLength / Int(packetCount)
+            sizes.append(size)
+        }
+        var sample: CMSampleBuffer?
+        let status = timings.withUnsafeMutableBufferPointer { timingBuffer in
+            sizes.withUnsafeMutableBufferPointer { sizeBuffer in
+                CMSampleBufferCreate(allocator: nil, dataBuffer: block, dataReady: true, makeDataReadyCallback: nil,
+                                     refcon: nil, formatDescription: format, sampleCount: packetCount,
+                                     sampleTimingEntryCount: packetCount, sampleTimingArray: timingBuffer.baseAddress,
+                                     sampleSizeEntryCount: packetCount, sampleSizeArray: sizeBuffer.baseAddress,
+                                     sampleBufferOut: &sample)
+            }
+        }
+        guard status == noErr else { return nil }
+        return sample
+    }
+
+    /// PCM samples handed to the AAC converter one buffer at a time.
+    private final class PCMSource: @unchecked Sendable {
+        let samples: [CMSampleBuffer]
+        let format: AVAudioFormat
+        var index = 0
+
+        init(samples: [CMSampleBuffer], format: AVAudioFormat) {
+            self.samples = samples
+            self.format = format
+        }
+
+        func next(_ outStatus: UnsafeMutablePointer<AVAudioConverterInputStatus>) -> AVAudioBuffer? {
+            guard index < samples.count else {
+                outStatus.pointee = .endOfStream
+                return nil
+            }
+            let sample = samples[index]
+            index += 1
+            let frames = AVAudioFrameCount(CMSampleBufferGetNumSamples(sample))
+            guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            pcm.frameLength = frames
+            guard CMSampleBufferCopyPCMDataIntoAudioBufferList(sample, at: 0, frameCount: Int32(frames),
+                                                               into: pcm.mutableAudioBufferList) == noErr else {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            outStatus.pointee = .haveData
+            return pcm
+        }
     }
 
     /// Moves every sample from the reader to the writer, each track on its own queue, then finishes the file.
