@@ -244,6 +244,250 @@ private final class PlayerView: NSView {
     override func makeBackingLayer() -> CALayer { AVPlayerLayer() }
 }
 
+/// Play, pause, a place in the video, and volume. Drawn on the dark bar along the bottom of a playing video.
+@MainActor
+private final class VideoControls: NSView {
+    static let barHeight: CGFloat = 32
+    /// Kept for the next video this session. A call's speaker volume is a different setting.
+    private static var volume: Float = 1
+    private static var unmuted: Float = 1
+
+    private let play = NSButton()
+    private let elapsed = NSTextField(labelWithString: "0:00")
+    private let duration = NSTextField(labelWithString: "0:00")
+    private let scrubber = TrackingSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let speaker = NSButton()
+    private let volumeSlider = NSSlider(value: 1, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private weak var player: AVPlayer?
+    private var timeObserver: Any?
+    private var statusObserver: NSKeyValueObservation?
+    private var durationObserver: NSKeyValueObservation?
+    private var scrubbing = false
+    private var seekID = 0
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        appearance = NSAppearance(named: .darkAqua)
+        layer?.backgroundColor = NSColor.black.withAlphaComponent(0.62).cgColor
+
+        play.isBordered = false
+        play.imagePosition = .imageOnly
+        play.target = self
+        play.action = #selector(togglePlay)
+        play.setAccessibilityLabel("Pause")
+
+        speaker.isBordered = false
+        speaker.imagePosition = .imageOnly
+        speaker.target = self
+        speaker.action = #selector(toggleMute)
+        speaker.toolTip = "Mute"
+
+        for label in [elapsed, duration] {
+            label.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+            label.textColor = .white
+            label.alignment = label === elapsed ? .left : .right
+        }
+        elapsed.setAccessibilityLabel("Elapsed")
+        duration.setAccessibilityLabel("Duration")
+
+        scrubber.controlSize = .small
+        scrubber.isContinuous = true
+        scrubber.isEnabled = false
+        scrubber.target = self
+        scrubber.action = #selector(scrubbed)
+        scrubber.setAccessibilityLabel("Position")
+        scrubber.tracking = { [weak self] active in
+            guard let self else { return }
+            if active { self.scrubbing = true } else { self.finishScrub() }
+        }
+
+        volumeSlider.controlSize = .small
+        volumeSlider.isContinuous = true
+        volumeSlider.target = self
+        volumeSlider.action = #selector(volumeChanged)
+        volumeSlider.setAccessibilityLabel("Volume")
+        volumeSlider.doubleValue = Double(Self.volume)
+
+        [play, elapsed, scrubber, duration, speaker, volumeSlider].forEach(addSubview)
+        showPlaySymbol(paused: false)
+        showSpeaker()
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func attach(_ player: AVPlayer) {
+        self.player = player
+        player.volume = Self.volume
+        let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
+        timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            let seconds = time.seconds
+            Task { @MainActor in self?.note(seconds) }
+        }
+        statusObserver = player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] player, _ in
+            let paused = player.timeControlStatus == .paused
+            Task { @MainActor in self?.showPlaySymbol(paused: paused) }
+        }
+        if let item = player.currentItem {
+            durationObserver = item.observe(\.duration, options: [.initial, .new]) { [weak self] item, _ in
+                let seconds = item.duration.seconds
+                Task { @MainActor in self?.noteDuration(seconds) }
+            }
+        }
+    }
+
+    func detach() {
+        if let timeObserver { player?.removeTimeObserver(timeObserver) }
+        timeObserver = nil
+        statusObserver = nil
+        durationObserver = nil
+        player = nil
+    }
+
+    /// A click on the bar stays here. A click on the picture behind it pauses and resumes.
+    override func mouseDown(with event: NSEvent) {}
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .arrow)
+    }
+
+    override func layout() {
+        super.layout()
+        let h = bounds.height
+        let tight = bounds.width < 250
+        duration.isHidden = tight
+        volumeSlider.isHidden = bounds.width < 210
+        var x: CGFloat = 4
+        play.frame = NSRect(x: x, y: (h - 22) / 2, width: 22, height: 22)
+        x = play.frame.maxX + 4
+        elapsed.frame = NSRect(x: x, y: (h - 14) / 2, width: 52, height: 14)
+        x = elapsed.frame.maxX + 4
+
+        var right = bounds.width - 4
+        if !volumeSlider.isHidden {
+            volumeSlider.frame = NSRect(x: right - 48, y: (h - 16) / 2, width: 48, height: 16)
+            right = volumeSlider.frame.minX - 2
+        }
+        speaker.frame = NSRect(x: right - 20, y: (h - 20) / 2, width: 20, height: 20)
+        right = speaker.frame.minX - 4
+        if !duration.isHidden {
+            duration.frame = NSRect(x: right - 52, y: (h - 14) / 2, width: 52, height: 14)
+            right = duration.frame.minX - 4
+        }
+        scrubber.frame = NSRect(x: x, y: (h - 16) / 2, width: max(24, right - x), height: 16)
+    }
+
+    private func note(_ seconds: Double) {
+        if !scrubber.isEnabled { noteDuration(player?.currentItem?.duration.seconds ?? .nan) }
+        guard !scrubbing, seconds.isFinite, seconds >= 0 else { return }
+        elapsed.stringValue = Self.clock(seconds)
+        guard scrubber.isEnabled else { return }
+        scrubber.doubleValue = min(scrubber.maxValue, seconds)
+    }
+
+    private func noteDuration(_ seconds: Double) {
+        guard seconds.isFinite, seconds > 0 else { return }
+        duration.stringValue = Self.clock(seconds)
+        scrubber.maxValue = seconds
+        scrubber.isEnabled = true
+    }
+
+    private func showPlaySymbol(paused: Bool) {
+        let name = paused ? "play.fill" : "pause.fill"
+        let label = paused ? "Play" : "Pause"
+        play.image = Self.symbol(name, label: label)
+        play.toolTip = label
+        play.setAccessibilityLabel(label)
+    }
+
+    private func showSpeaker() {
+        let silent = Self.volume <= 0.001
+        speaker.image = Self.symbol(silent ? "speaker.slash.fill" : "speaker.wave.2.fill", label: silent ? "Unmute" : "Mute")
+        speaker.toolTip = silent ? "Unmute" : "Mute"
+        speaker.setAccessibilityLabel(silent ? "Unmute" : "Mute")
+    }
+
+    @objc private func togglePlay() {
+        guard let player else { return }
+        if player.timeControlStatus == .paused { player.play() } else { player.pause() }
+    }
+
+    @objc private func scrubbed() {
+        seek(to: scrubber.doubleValue, releaseWhenLanded: false)
+    }
+
+    /// The last seek of a drag holds the playhead still until it lands, so a time update can't pull it backwards.
+    private func finishScrub() {
+        scrubbing = true
+        seek(to: scrubber.doubleValue, releaseWhenLanded: true)
+    }
+
+    private func seek(to seconds: Double, releaseWhenLanded: Bool) {
+        guard scrubber.isEnabled, let player else {
+            scrubbing = false
+            return
+        }
+        let seconds = min(max(0, seconds), scrubber.maxValue)
+        elapsed.stringValue = Self.clock(seconds)
+        let time = CMTime(seconds: seconds, preferredTimescale: 600)
+        let tolerance = CMTime(seconds: 0.25, preferredTimescale: 600)
+        seekID += 1
+        let seekID = seekID
+        player.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
+            guard releaseWhenLanded else { return }
+            Task { @MainActor in
+                guard let self, seekID == self.seekID else { return }
+                self.scrubbing = false
+            }
+        }
+    }
+
+    @objc private func toggleMute() {
+        if volumeSlider.doubleValue > 0.001 {
+            Self.unmuted = Float(volumeSlider.doubleValue)
+            volumeSlider.doubleValue = 0
+        } else {
+            volumeSlider.doubleValue = Double(max(Self.unmuted, 0.2))
+        }
+        volumeChanged()
+    }
+
+    @objc private func volumeChanged() {
+        let value = Float(min(1, max(0, volumeSlider.doubleValue)))
+        if value > 0.001 { Self.unmuted = value }
+        Self.volume = value
+        player?.volume = value
+        showSpeaker()
+    }
+
+    private static func clock(_ seconds: Double) -> String {
+        let total = Int(seconds.rounded(.down))
+        let s = total % 60
+        let m = (total / 60) % 60
+        let h = total / 3600
+        if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
+        return String(format: "%d:%02d", m, s)
+    }
+
+    private static func symbol(_ name: String, label: String) -> NSImage {
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: label) ?? NSImage()
+        let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+        return image.withSymbolConfiguration(config) ?? image
+    }
+}
+
+/// Reports the start and end of a drag, so the playhead isn't pulled back while it's being moved.
+@MainActor
+private final class TrackingSlider: NSSlider {
+    var tracking: ((Bool) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        tracking?(true)
+        super.mouseDown(with: event)
+        tracking?(false)
+    }
+}
+
 /// One image, GIF or video in a message. Shows a placeholder at the final size until the still arrives,
 /// so nothing moves; GIFs animate on hover (or when visible), videos play on click.
 @MainActor
@@ -264,6 +508,7 @@ final class MediaView: NSView, Playable {
     // Playback state; all torn down by stopPlayback().
     private var animator: GIFAnimator?
     private var playerView: PlayerView?
+    private var controls: VideoControls?
     private var player: AVPlayer?
     private var looper: AVPlayerLooper?
     private var loader: StreamingLoader?
@@ -532,6 +777,13 @@ final class MediaView: NSView, Playable {
         playerView = view
         self.player = player
         self.loader = loader
+        if !looping {
+            let bar = VideoControls(frame: NSRect(x: 0, y: bounds.height - VideoControls.barHeight,
+                                                  width: bounds.width, height: VideoControls.barHeight))
+            bar.attach(player)
+            addSubview(bar, positioned: .above, relativeTo: view)
+            controls = bar
+        }
         player.play()
     }
 
@@ -552,6 +804,9 @@ final class MediaView: NSView, Playable {
         }
         animator?.cancel()
         animator = nil
+        controls?.detach()
+        controls?.removeFromSuperview()
+        controls = nil
         player?.pause()
         looper?.disableLooping()
         player?.replaceCurrentItem(with: nil)
@@ -633,6 +888,8 @@ final class MediaView: NSView, Playable {
         super.layout()
         imageView.frame = bounds
         playerView?.frame = bounds
+        controls?.frame = NSRect(x: 0, y: bounds.height - VideoControls.barHeight,
+                                 width: bounds.width, height: VideoControls.barHeight)
         layoutLabel()
         badge.sizeToFit()
         badge.frame.origin = NSPoint(x: 6, y: bounds.height - badge.frame.height - 6)
@@ -673,7 +930,7 @@ final class MediaView: NSView, Playable {
             if token == nil { load(request) }
             refreshOverlays()
         } else if isVideo {
-            // Click plays; while playing, click pauses and resumes.
+            // Click plays. While it plays, a click on the picture pauses and resumes; the bar seeks and sets volume.
             if let player {
                 if player.timeControlStatus == .paused { player.play() } else { player.pause() }
             } else {
