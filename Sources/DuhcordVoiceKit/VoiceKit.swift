@@ -19,9 +19,11 @@ public struct VoiceJoinRequest: Codable, Equatable, Sendable {
     public var endpoint: String
     public var muted: Bool
     public var deafened: Bool
+    /// Which devices to use, and the app's own volume. Empty device IDs mean the system default.
+    public var audio: VoiceAudioSettings
 
     public init(guildID: String, channelID: String, userID: String, sessionID: String, token: String, endpoint: String,
-                muted: Bool, deafened: Bool) {
+                muted: Bool, deafened: Bool, audio: VoiceAudioSettings = VoiceAudioSettings()) {
         self.guildID = guildID
         self.channelID = channelID
         self.userID = userID
@@ -30,6 +32,62 @@ public struct VoiceJoinRequest: Codable, Equatable, Sendable {
         self.endpoint = endpoint
         self.muted = muted
         self.deafened = deafened
+        self.audio = audio
+    }
+}
+
+/// Microphone and speaker choice for one call. Volume is the app's own gain: 1 is unchanged, and it never
+/// turns the Mac's volume up. Device IDs are the short ASCII names Core Audio gives a device, or nil for the
+/// system default.
+public struct VoiceAudioSettings: Codable, Equatable, Sendable {
+    public var inputDeviceUID: String?
+    public var outputDeviceUID: String?
+    public var inputVolume: Float
+    public var outputVolume: Float
+
+    public init(inputDeviceUID: String? = nil, outputDeviceUID: String? = nil, inputVolume: Float = 1, outputVolume: Float = 1) {
+        self.inputDeviceUID = Self.uid(inputDeviceUID)
+        self.outputDeviceUID = Self.uid(outputDeviceUID)
+        self.inputVolume = Self.volume(inputVolume)
+        self.outputVolume = Self.volume(outputVolume)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(inputDeviceUID: try container.decodeIfPresent(String.self, forKey: .inputDeviceUID),
+                  outputDeviceUID: try container.decodeIfPresent(String.self, forKey: .outputDeviceUID),
+                  inputVolume: try container.decodeIfPresent(Float.self, forKey: .inputVolume) ?? 1,
+                  outputVolume: try container.decodeIfPresent(Float.self, forKey: .outputVolume) ?? 1)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case inputDeviceUID, outputDeviceUID, inputVolume, outputVolume
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(inputDeviceUID, forKey: .inputDeviceUID)
+        try container.encodeIfPresent(outputDeviceUID, forKey: .outputDeviceUID)
+        try container.encode(inputVolume, forKey: .inputVolume)
+        try container.encode(outputVolume, forKey: .outputVolume)
+    }
+
+    /// A device ID Core Audio would actually return: short, printable ASCII, with no path characters.
+    public static func uid(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1 ... 256).contains(trimmed.count) else { return nil }
+        let printable = trimmed.unicodeScalars.allSatisfy { scalar in
+            let value = scalar.value
+            return value >= 0x20 && value < 0x7F && scalar != "/" && scalar != "\\"
+        }
+        return printable ? trimmed : nil
+    }
+
+    /// Unity is as loud as the call already is. Nothing here amplifies past that, and a bad number stays at unity.
+    public static func volume(_ raw: Float) -> Float {
+        guard raw.isFinite else { return 1 }
+        return min(1, max(0, raw))
     }
 }
 
@@ -126,6 +184,8 @@ public enum PrivacyCode {
 @objc public protocol DuhcordVoiceProtocol {
     func join(_ request: Data)
     func setMuted(_ muted: Bool, deafened: Bool)
+    /// Device and volume for the call that's already running. Volume does not restart the microphone.
+    func setAudio(_ settings: Data)
     func leave()
     /// Whether to send `VoiceEvent.stats`: only while the details panel is open.
     func setStatsWanted(_ wanted: Bool)

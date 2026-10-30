@@ -145,6 +145,27 @@ public actor RESTClient {
         ]]])
     }
 
+    /// The account's status as Discord stores it: online, idle, dnd or invisible. Anything else counts as online.
+    public func accountStatus() async throws -> String {
+        struct Body: Decodable { let status: String? }
+        let data = try await request("GET", "/users/@me/settings")
+        let status = (try? decoder.decode(Body.self, from: data))?.status
+        return Self.knownAccountStatus(status) ?? "online"
+    }
+
+    /// Sets only the status. The body is that one field, so the rest of the account's settings stay as they are.
+    public func setAccountStatus(_ status: String) async throws {
+        guard let status = Self.knownAccountStatus(status) else { return }
+        _ = try await request("PATCH", "/users/@me/settings", body: ["status": status])
+    }
+
+    private static func knownAccountStatus(_ status: String?) -> String? {
+        switch status {
+        case "online", "idle", "dnd", "invisible": return status
+        default: return nil
+        }
+    }
+
     /// Invalidates the token on Discord's side, so a copy of it is useless afterwards.
     public func logout() async throws {
         _ = try await request("POST", "/auth/logout", body: ["provider": NSNull(), "voip_provider": NSNull()])

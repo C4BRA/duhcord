@@ -1,5 +1,7 @@
 import AVFoundation
+import AudioToolbox
 import CoreAudio
+import DuhcordVoiceKit
 import os
 
 /// Mixes everyone's decoded audio for the speakers.
@@ -104,10 +106,20 @@ final class AudioIO {
     private var engine: AVAudioEngine?
     private var capturing = false
     private var pending: [Float] = []
+    /// The call's speaker volume. 1 leaves the samples as they are; this never changes the Mac's volume.
+    private var outputVolume: Float = 1
 
-    func run(capture: Bool, playback: Bool) throws {
+    func setOutputVolume(_ volume: Float) {
+        outputVolume = VoiceAudioSettings.volume(volume)
+        engine?.mainMixerNode.outputVolume = outputVolume
+    }
+
+    /// `inputUID` and `outputUID` nil keep the system default. A device that can't be opened is skipped, and the
+    /// call stays on the default, so a missing microphone doesn't end it.
+    func run(capture: Bool, playback: Bool, inputUID: String?, outputUID: String?, outputVolume: Float) throws {
         stop()
         guard capture || playback else { return }
+        setOutputVolume(outputVolume)
         let engine = AVAudioEngine()
 
         if capture {
@@ -117,6 +129,7 @@ final class AudioIO {
                 // Voice processing lowers other apps' audio by default; keep that to a minimum.
                 input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: true, duckingLevel: .min)
             }
+            select(inputUID, on: input)
             let format = input.outputFormat(forBus: 0)
             let converter = format.sampleRate == Opus.sampleRate ? nil : AVAudioConverter(
                 from: AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: format.sampleRate, channels: 1, interleaved: false)!,
@@ -129,6 +142,7 @@ final class AudioIO {
         }
 
         if playback {
+            select(outputUID, on: engine.outputNode)
             let mixer = self.mixer
             let source = AVAudioSourceNode(format: Self.stereo) { _, _, frameCount, bufferList -> OSStatus in
                 mixer.render(frames: Int(frameCount), into: UnsafeMutableAudioBufferListPointer(bufferList))
@@ -139,8 +153,21 @@ final class AudioIO {
         }
 
         engine.prepare()
+        engine.mainMixerNode.outputVolume = self.outputVolume
         try engine.start()
         self.engine = engine
+    }
+
+    /// Opens one device on an input or output node. Failure leaves the system default in place.
+    private func select(_ uid: String?, on node: AVAudioNode) {
+        guard let device = AudioDevices.deviceID(forUID: uid) else { return }
+        guard let unit = (node as? AVAudioIONode)?.audioUnit else { return }
+        var id = device
+        let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                                          &id, UInt32(MemoryLayout<AudioDeviceID>.size))
+        if status != noErr {
+            voiceLog.error("audio device unavailable, using the system default")
+        }
     }
 
     func stop() {
@@ -198,26 +225,5 @@ private final class ConverterInput: @unchecked Sendable {
         }
         status.pointee = shouldSupply ? .haveData : .noDataNow
         return shouldSupply ? buffer : nil
-    }
-}
-
-/// The names of the system's default microphone and speakers, for the connection details panel.
-enum AudioDevices {
-    static var defaultInputName: String? { name(of: kAudioHardwarePropertyDefaultInputDevice) }
-    static var defaultOutputName: String? { name(of: kAudioHardwarePropertyDefaultOutputDevice) }
-
-    private static func name(of selector: AudioObjectPropertySelector) -> String? {
-        var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal,
-                                                 mElement: kAudioObjectPropertyElementMain)
-        var device = AudioObjectID(kAudioObjectUnknown)
-        var size = UInt32(MemoryLayout<AudioObjectID>.size)
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &device) == noErr,
-              device != kAudioObjectUnknown else { return nil }
-        address.mSelector = kAudioObjectPropertyName
-        var name: Unmanaged<CFString>?
-        size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
-        let status = withUnsafeMutablePointer(to: &name) { AudioObjectGetPropertyData(device, &address, 0, nil, &size, $0) }
-        guard status == noErr, let name else { return nil }
-        return name.takeRetainedValue() as String
     }
 }

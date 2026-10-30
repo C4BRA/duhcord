@@ -33,6 +33,11 @@ final class VoiceService: NSObject, DuhcordVoiceProtocol, @unchecked Sendable {
         queue.async { [self] in call?.setMuted(muted, deafened: deafened) }
     }
 
+    func setAudio(_ settings: Data) {
+        guard let settings = try? JSONDecoder().decode(VoiceAudioSettings.self, from: settings) else { return }
+        queue.async { [self] in call?.setAudio(settings) }
+    }
+
     func leave() {
         queue.async { [self] in
             call?.stop(reason: nil)

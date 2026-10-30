@@ -1,4 +1,5 @@
 import AppKit
+import DuhcordVoiceKit
 
 /// User preferences, stored in UserDefaults. Posts `Settings.didChange` when one actually changes, with the
 /// changed key under `keyInfo` in userInfo.
@@ -62,6 +63,10 @@ enum Settings {
         static let sendTyping = "sendTypingIndicator"
         static let limitDiscordData = "limitDiscordData"
         static let compressVideos = "compressVideos"
+        static let inputDevice = "inputDeviceUID"
+        static let outputDevice = "outputDeviceUID"
+        static let inputVolume = "inputVolume"
+        static let outputVolume = "outputVolume"
     }
 
     static func registerDefaults() {
@@ -76,6 +81,8 @@ enum Settings {
             Key.sendTyping: true,
             Key.limitDiscordData: true,
             Key.compressVideos: true,
+            Key.inputVolume: 1.0,
+            Key.outputVolume: 1.0,
         ])
     }
 
@@ -136,8 +143,47 @@ enum Settings {
         set { set(newValue, for: Key.checkForUpdates) }
     }
 
+    /// Core Audio device ID for the microphone, or nil for the system default.
+    static var inputDeviceUID: String? {
+        get { VoiceAudioSettings.uid(defaults.string(forKey: Key.inputDevice)) }
+        set { setOptional(VoiceAudioSettings.uid(newValue), for: Key.inputDevice) }
+    }
+
+    /// Core Audio device ID for the speakers, or nil for the system default.
+    static var outputDeviceUID: String? {
+        get { VoiceAudioSettings.uid(defaults.string(forKey: Key.outputDevice)) }
+        set { setOptional(VoiceAudioSettings.uid(newValue), for: Key.outputDevice) }
+    }
+
+    /// Microphone gain inside a call. 1 leaves the audio as it is; nothing here goes louder than that.
+    static var inputVolume: Double {
+        get { volume(Key.inputVolume) }
+        set { set(min(1, max(0, newValue)), for: Key.inputVolume) }
+    }
+
+    /// Speaker gain inside a call. This is not the Mac's volume.
+    static var outputVolume: Double {
+        get { volume(Key.outputVolume) }
+        set { set(min(1, max(0, newValue)), for: Key.outputVolume) }
+    }
+
     /// Settings that change how messages are laid out.
     static let messageLayoutKeys: Set<String> = [Key.compact, Key.mediaPreviews, Key.animateGIFs]
+
+    /// Settings the voice helper needs to hear about.
+    static let audioKeys: Set<String> = [Key.inputDevice, Key.outputDevice, Key.inputVolume, Key.outputVolume]
+
+    private static func volume(_ key: String) -> Double {
+        guard defaults.object(forKey: key) != nil else { return 1 }
+        return min(1, max(0, defaults.double(forKey: key)))
+    }
+
+    private static func setOptional(_ value: String?, for key: String) {
+        let current = VoiceAudioSettings.uid(defaults.string(forKey: key))
+        guard current != value else { return }
+        if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
+        NotificationCenter.default.post(name: didChange, object: nil, userInfo: [keyInfo: key])
+    }
 
     private static func set<T: Equatable>(_ value: T, for key: String) {
         guard defaults.object(forKey: key) as? T != value else { return }

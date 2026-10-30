@@ -32,6 +32,10 @@ enum Theme {
         static let sidebar: CGFloat = 18
         /// Profile pictures in lists.
         static let listAvatar: CGFloat = 20
+        /// Profile pictures on direct-message rows.
+        static let dmAvatar: CGFloat = 28
+        /// The account picture at the bottom of the channel list.
+        static let accountAvatar: CGFloat = 32
     }
 
     // Apple's text styles. macOS has no app-level text size, so these follow the system: the same sizes and

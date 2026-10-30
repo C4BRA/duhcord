@@ -3,7 +3,7 @@ import DuhcordCore
 
 /// The parts of a profile shown both on the card and in the full profile.
 @MainActor
-private enum ProfileParts {
+enum ProfileParts {
     /// Display name, then "username · pronouns", then badges.
     static func identity(user: User, profile: UserProfile?, nameFont: NSFont) -> [NSView] {
         let name = NSTextField.profileText(profile?.displayName ?? user.displayName, font: nameFont)

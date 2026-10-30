@@ -20,6 +20,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private var switcher: QuickSwitcher?
     private var voiceDetails: VoiceDetailsWindowController?
     private let profiles: ProfileController
+    private let ownStatus: OwnStatus
+    private var accountPopover: NSPopover?
     let privateChat: PrivateChatController
     /// Standard / Private, for the DM on screen.
     private var privateModeItem: NSToolbarItemGroup?
@@ -53,6 +55,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         channelList = ChannelListViewController(store: session.store, voice: voice)
         messages = MessagesViewController(session: session)
         profiles = ProfileController(session: session)
+        ownStatus = OwnStatus(session: session)
         privateChat = PrivateChatController(session: session)
 
         let split = NSSplitViewController()
@@ -98,6 +101,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         channelList.onShowProfile = { [weak self] userID, guildID, rect, view in
             self?.profiles.showCard(userID: userID, guildID: guildID, relativeTo: rect, of: view)
         }
+        channelList.onShowAccount = { [weak self] anchor in self?.showAccountCard(from: anchor) }
+        ownStatus.onChange = { [weak self] in self?.refreshAccount() }
         messages.onShowProfile = { [weak self] userID, guildID, rect, view in
             self?.profiles.showCard(userID: userID, guildID: guildID, relativeTo: rect, of: view)
         }
@@ -137,6 +142,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         voice.onProblem = { [weak self] title, detail in self?.showVoiceProblem(title: title, detail: detail) }
         session.store.onChange = { [weak self] change in self?.handle(change) }
         NotificationCenter.default.addObserver(self, selector: #selector(updateDockBadge), name: Settings.didChange, object: nil)
+        refreshAccount()
+        ownStatus.refresh()
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -145,6 +152,39 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         guildList.reload()
         select(place: place)
         updateDockBadge()
+        ownStatus.refresh()
+        refreshAccount()
+    }
+
+    /// The account bar, and the profile card when it's open. The card redraws on the next turn so a status
+    /// change doesn't rebuild the menu while it's still handling the click.
+    private func refreshAccount() {
+        channelList.updateAccount(user: session.store.me, choice: ownStatus.choice)
+        guard accountPopover?.isShown == true,
+              let card = accountPopover?.contentViewController as? AccountCardViewController else { return }
+        DispatchQueue.main.async { card.render() }
+    }
+
+    private func showAccountCard(from anchor: NSView) {
+        channelList.closePopovers()
+        let card: AccountCardViewController
+        if let existing = accountPopover?.contentViewController as? AccountCardViewController {
+            card = existing
+        } else {
+            let created = AccountCardViewController(session: session, status: ownStatus, profiles: profiles)
+            created.onOpenProfile = { [weak self] in
+                self?.accountPopover?.close()
+                guard let id = self?.session.store.me?.id else { return }
+                self?.profiles.showFullProfile(userID: id, guildID: nil)
+            }
+            let popover = NSPopover()
+            popover.behavior = .transient
+            popover.contentViewController = created
+            accountPopover = popover
+            card = created
+        }
+        card.render()
+        accountPopover?.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
     }
 
     var isLocked: Bool { connectionLock.isShown }
@@ -154,6 +194,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         switcher = nil
         // Nothing stays usable while locked: profiles (and their message boxes) and the call details close too.
         profiles.closeAll()
+        accountPopover?.close()
+        channelList.closePopovers()
         voiceDetails?.close()
         // Decrypted images don't stay on screen while the rest of the app is out of reach.
         PrivateImagePreview.closeAll()
@@ -168,6 +210,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     func closeAll() {
         switcher = nil
         profiles.closeAll()
+        accountPopover?.close()
+        channelList.closePopovers()
         voiceDetails?.close()
         voice.leave()
         connectionLock.hide()
@@ -177,8 +221,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         close()
     }
 
-    /// Keyboard shortcuts are off while locked; voice commands only work in a call, and their titles follow
-    /// the current state.
+    /// Keyboard shortcuts are off while locked. Mute and deafen follow the account bar, including outside a
+    /// call. Leave only works in a call.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         guard !isLocked else { return false }
         switch menuItem.action {
@@ -190,10 +234,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
             return privateChat.status(for: channelID) != .unavailable
         case #selector(toggleMute(_:)):
             menuItem.title = voice.muted ? "Unmute" : "Mute"
-            return voice.isInCall
+            return true
         case #selector(toggleDeafen(_:)):
             menuItem.title = voice.deafened ? "Undeafen" : "Deafen"
-            return voice.isInCall
+            return true
         case #selector(leaveVoice(_:)):
             return voice.isInCall
         default:
@@ -286,6 +330,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         switch change {
         case .guilds:
             guildList.reload()
+            refreshAccount()
         case .channels(let guildID):
             messages.channelsChanged()
             // nil means "everything" (READY) or a DM channel changed.
@@ -293,10 +338,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
                 channelList.reload()
                 updateTitle()
             }
+            refreshAccount()
         case .voice(let guildID):
             if place == .guild(guildID) { channelList.voiceMembersChanged() }
         case .presence(let userID):
             profiles.presenceChanged(userID)
+            if userID == session.store.me?.id {
+                refreshAccount()
+            } else {
+                channelList.refreshPresence(userID)
+            }
         case .messages(let channelID):
             // Handshakes in a DM set up private chat; read them before showing the messages.
             privateChat.scan(channelID: channelID)

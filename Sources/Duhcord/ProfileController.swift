@@ -283,15 +283,17 @@ final class ProfileHeaderView: NSView {
     }
 
     /// `bannerURL` nil shows the accent colour, in a shorter strip, as the official client does.
-    func configure(bannerURL: URL?, accentColor: Int?, avatarURL: URL?, status: Presence.Status, avatarHint: String?) {
+    func configure(bannerURL: URL?, accentColor: Int?, avatarURL: URL?, status: Presence.Status, avatarHint: String?,
+                   statusTitle: String? = nil) {
         accent = accentColor
         self.status = status
         bannerHeight.constant = bannerURL == nil ? round(fullBannerHeight * 0.6) : fullBannerHeight
         let width = max(bounds.width, 300)
         banner.setImage(bannerURL, pointSize: NSSize(width: width, height: width / 2.5))
         avatar.setImage(avatarURL, pointSize: NSSize(width: avatarSize, height: avatarSize))
-        statusDot.toolTip = ProfileText.status(status)
-        statusDot.setAccessibilityLabel(ProfileText.status(status))
+        let title = statusTitle ?? ProfileText.status(status)
+        statusDot.toolTip = title
+        statusDot.setAccessibilityLabel(title)
         avatar.toolTip = avatarHint
         avatar.setAccessibilityLabel(avatarHint ?? "Profile picture")
         updateColors()

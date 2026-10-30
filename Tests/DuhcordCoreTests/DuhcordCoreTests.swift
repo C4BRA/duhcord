@@ -1505,3 +1505,35 @@ final class VideoEncodeTests: XCTestCase {
         XCTAssertEqual(VideoEncode.audioBitrate(budget: 200_000, hasAudio: false), 0)
     }
 }
+
+final class VoiceAudioSettingsTests: XCTestCase {
+    func testRejectsUnsafeDeviceIDs() {
+        XCTAssertNil(VoiceAudioSettings.uid(nil))
+        XCTAssertNil(VoiceAudioSettings.uid(""))
+        XCTAssertNil(VoiceAudioSettings.uid(" "))
+        XCTAssertNil(VoiceAudioSettings.uid(String(repeating: "a", count: 257)))
+        XCTAssertNil(VoiceAudioSettings.uid("Built-in/Mic"))
+        XCTAssertNil(VoiceAudioSettings.uid("..\\mic"))
+        XCTAssertNil(VoiceAudioSettings.uid("mic\nname"))
+        XCTAssertNil(VoiceAudioSettings.uid("mïc"))
+        XCTAssertEqual(VoiceAudioSettings.uid(" Built-in Microphone "), "Built-in Microphone")
+    }
+
+    func testVolumeStaysWithinUnity() {
+        let loud = VoiceAudioSettings(inputVolume: 4, outputVolume: .infinity)
+        XCTAssertEqual(loud.inputVolume, 1)
+        XCTAssertEqual(loud.outputVolume, 1)
+        let quiet = VoiceAudioSettings(inputVolume: -2, outputVolume: .nan)
+        XCTAssertEqual(quiet.inputVolume, 0)
+        XCTAssertEqual(quiet.outputVolume, 1)
+    }
+
+    func testDecodedSettingsAreClamped() throws {
+        let json = #"{"inputDeviceUID":"../x","outputDeviceUID":"Speaker","inputVolume":9,"outputVolume":-1}"#.data(using: .utf8)!
+        let settings = try JSONDecoder().decode(VoiceAudioSettings.self, from: json)
+        XCTAssertNil(settings.inputDeviceUID)
+        XCTAssertEqual(settings.outputDeviceUID, "Speaker")
+        XCTAssertEqual(settings.inputVolume, 1)
+        XCTAssertEqual(settings.outputVolume, 0)
+    }
+}

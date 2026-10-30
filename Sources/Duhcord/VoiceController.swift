@@ -48,6 +48,8 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
     private var voiceSessionID: String?
     private var server: VoiceServerUpdate?
     private var joinTimer: Timer?
+    /// One audio update per turn, so dragging a volume slider doesn't send a message for every pixel.
+    private var audioPushScheduled = false
     /// Discord doesn't answer a join it won't allow (no permission, channel full), so give up after this.
     private static let joinTimeout: TimeInterval = 15
 
@@ -56,6 +58,11 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
         super.init()
         session.onOwnVoiceState = { [weak self] state in self?.ownVoiceStateChanged(state) }
         session.onVoiceServer = { [weak self] update in self?.voiceServerChanged(update) }
+        NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged(_:)), name: Settings.didChange, object: nil)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     var isInCall: Bool { status != .idle }
@@ -129,6 +136,28 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
         helper?.setMuted(effectiveMuted, deafened: effectiveDeafened)
     }
 
+    @objc private func settingsChanged(_ notification: Notification) {
+        guard let key = notification.userInfo?[Settings.keyInfo] as? String, Settings.audioKeys.contains(key) else { return }
+        guard !audioPushScheduled else { return }
+        audioPushScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.audioPushScheduled = false
+            self.pushAudioSettings()
+        }
+    }
+
+    /// The helper is only started for a call, so a device change while idle is saved and used on the next join.
+    private func pushAudioSettings() {
+        guard connection != nil, let data = try? JSONEncoder().encode(currentAudioSettings()) else { return }
+        helper?.setAudio(data)
+    }
+
+    private func currentAudioSettings() -> VoiceAudioSettings {
+        VoiceAudioSettings(inputDeviceUID: Settings.inputDeviceUID, outputDeviceUID: Settings.outputDeviceUID,
+                           inputVolume: Float(Settings.inputVolume), outputVolume: Float(Settings.outputVolume))
+    }
+
     // MARK: - Main gateway
 
     private func ownVoiceStateChanged(_ state: VoiceState) {
@@ -178,7 +207,8 @@ final class VoiceController: NSObject, DuhcordVoiceClientProtocol {
         joinTimer?.invalidate()
         joinTimer = nil
         let request = VoiceJoinRequest(guildID: guildID, channelID: channelID, userID: me.id, sessionID: voiceSessionID,
-                                       token: server.token, endpoint: endpoint, muted: effectiveMuted, deafened: effectiveDeafened)
+                                       token: server.token, endpoint: endpoint, muted: effectiveMuted, deafened: effectiveDeafened,
+                                       audio: currentAudioSettings())
         guard let data = try? JSONEncoder().encode(request) else { return }
         status = .connecting
         onChange?()

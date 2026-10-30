@@ -54,7 +54,16 @@ final class VoiceCall: @unchecked Sendable {
     private var talking = false
     private var quietFrames = 0
     private var microphoneAllowed = false
-    private var audioConfiguration: (capture: Bool, playback: Bool)?
+    /// Capture, playback and the devices. Volume is not part of it: a volume change must not restart the engine.
+    private var audioRun: AudioRun?
+    private var audioSettings: VoiceAudioSettings
+
+    private struct AudioRun: Equatable {
+        var capture: Bool
+        var playback: Bool
+        var inputUID: String?
+        var outputUID: String?
+    }
 
     // Diagnostics: counts only, logged every 10 seconds while they change.
     private struct Stats: Equatable {
@@ -78,6 +87,7 @@ final class VoiceCall: @unchecked Sendable {
         self.queue = queue
         muted = request.muted
         deafened = request.deafened
+        audioSettings = request.audio
         audio.onFrame = { [weak self] frame in
             guard let self else { return }
             self.queue.async { self.captured(frame) }
@@ -107,6 +117,17 @@ final class VoiceCall: @unchecked Sendable {
         self.muted = muted
         self.deafened = deafened
         if talking, muted || deafened { stopTalking() }
+        runAudio()
+    }
+
+    /// A new device rebuilds the engine. Volume is applied in place, on the samples and the mixer.
+    func setAudio(_ settings: VoiceAudioSettings) {
+        let devicesChanged = settings.inputDeviceUID != audioSettings.inputDeviceUID
+            || settings.outputDeviceUID != audioSettings.outputDeviceUID
+        audioSettings = settings
+        audio.setOutputVolume(settings.outputVolume)
+        guard devicesChanged else { return }
+        audioRun = nil
         runAudio()
     }
 
@@ -477,15 +498,29 @@ final class VoiceCall: @unchecked Sendable {
         guard connected, !stopped else { return }
         let capture = microphoneAllowed && !muted && !deafened
         let playback = !deafened
-        if let current = audioConfiguration, current.capture == capture, current.playback == playback { return }
-        audioConfiguration = (capture, playback)
+        let next = AudioRun(capture: capture, playback: playback, inputUID: audioSettings.inputDeviceUID,
+                            outputUID: audioSettings.outputDeviceUID)
+        if audioRun == next { return }
+        audioRun = next
         voiceLog.notice("audio: microphone \(capture, privacy: .public), speakers \(playback, privacy: .public)")
+        let volume = audioSettings.outputVolume
         do {
-            try audio.run(capture: capture, playback: playback)
+            try audio.run(capture: capture, playback: playback, inputUID: next.inputUID, outputUID: next.outputUID,
+                          outputVolume: volume)
         } catch {
             voiceLog.error("audio engine failed: \(error.localizedDescription, privacy: .public)")
-            // Keep hearing others even if the microphone side won't start.
-            if capture { try? audio.run(capture: false, playback: playback) }
+            // Keep hearing others even if the microphone side won't start. Remember what actually started, so the
+            // next mute or device change tries the microphone again instead of assuming this one succeeded.
+            if capture, (try? audio.run(capture: false, playback: playback, inputUID: next.inputUID,
+                                        outputUID: next.outputUID, outputVolume: volume)) != nil {
+                audioRun?.capture = false
+                return
+            }
+            if (try? audio.run(capture: false, playback: playback, inputUID: nil, outputUID: nil, outputVolume: volume)) != nil {
+                audioRun = AudioRun(capture: false, playback: playback, inputUID: nil, outputUID: nil)
+            } else {
+                audioRun = nil
+            }
         }
     }
 
@@ -495,7 +530,12 @@ final class VoiceCall: @unchecked Sendable {
         defer { sendTimestamp &+= UInt32(Opus.frameSize) }
         guard !muted, !deafened, cipher != nil else { return }
 
-        let level = (frame.reduce(0) { $0 + $1 * $1 } / Float(frame.count)).squareRoot()
+        var samples = frame
+        let gain = audioSettings.inputVolume
+        if gain != 1 {
+            for index in samples.indices { samples[index] *= gain }
+        }
+        let level = (samples.reduce(0) { $0 + $1 * $1 } / Float(max(samples.count, 1))).squareRoot()
         if level > Self.talkThreshold {
             quietFrames = 0
             if !talking {
@@ -509,7 +549,7 @@ final class VoiceCall: @unchecked Sendable {
                 return
             }
         }
-        guard talking, let opus = encoder?.encode(frame) else { return }
+        guard talking, let opus = encoder?.encode(samples) else { return }
         stats.spoken += 1
         sendAudio(opus)
     }
@@ -592,7 +632,8 @@ final class VoiceCall: @unchecked Sendable {
             packetsReceived: stats.received - stats.unreadable, packetsLost: stats.lost, packetsSent: stats.sent,
             unreadable: stats.unreadable, undecryptable: stats.undecryptable, endToEndEncrypted: encrypted,
             transport: transport, daveProtocolVersion: Int(dave?.protocolVersion ?? 0), privacyCode: dave?.privacyCode,
-            microphone: AudioDevices.defaultInputName, output: AudioDevices.defaultOutputName)))
+            microphone: AudioDevices.name(forUID: audioSettings.inputDeviceUID) ?? AudioDevices.defaultInputName,
+            output: AudioDevices.name(forUID: audioSettings.outputDeviceUID) ?? AudioDevices.defaultOutputName)))
     }
 
     private func startSpeakingReports() {

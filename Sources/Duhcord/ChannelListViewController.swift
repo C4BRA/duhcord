@@ -2,7 +2,7 @@ import AppKit
 import DuhcordCore
 
 /// The middle column: text and voice channels under their categories, or the DM list. Who's in each voice
-/// channel is listed under it, and the voice bar at the bottom shows the call we're in.
+/// channel is listed under it. A call shows the voice bar, and the account bar stays under that.
 @MainActor
 final class ChannelListViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onSelect: ((Snowflake) -> Void)?
@@ -15,6 +15,8 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
     var onShowProfile: ((_ userID: Snowflake, _ guildID: Snowflake?, _ rect: NSRect, _ view: NSView) -> Void)?
     /// "Voice Connected" in the voice bar was clicked.
     var onShowVoiceDetails: (() -> Void)?
+    /// The account bar's name or picture was clicked.
+    var onShowAccount: ((NSView) -> Void)?
     /// People in voice channels whose names we don't know yet.
     var onMissingNames: ((Snowflake, [Snowflake]) -> Void)?
 
@@ -38,11 +40,13 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
     private let table = KeyTableView()
     private let emptyLabel = NSTextField(labelWithString: "")
     private let voiceBar = VoiceBar()
+    private let accountBar = AccountBar()
+    private var audioPopover: NSPopover?
     private var place: Place = .directMessages
     private var items: [ChannelListItem] = []
     private var rows: [Row] = []
     private var suppressSelection = false
-    private var listToBottom: NSLayoutConstraint!
+    private var listToAccount: NSLayoutConstraint!
     private var listToBar: NSLayoutConstraint!
 
     /// Text channel IDs in display order, for keyboard navigation.
@@ -91,6 +95,14 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         voiceBar.onDeafen = { [weak self] in self?.voice.toggleDeafen() }
         voiceBar.onLeave = { [weak self] in self?.voice.leave() }
         voiceBar.onShowDetails = { [weak self] in self?.onShowVoiceDetails?() }
+        accountBar.onMute = { [weak self] in self?.voice.toggleMute() }
+        accountBar.onDeafen = { [weak self] in self?.voice.toggleDeafen() }
+        accountBar.onShowAccount = { [weak self] anchor in
+            self?.audioPopover?.close()
+            self?.onShowAccount?(anchor)
+        }
+        accountBar.onInputOptions = { [weak self] anchor in self?.showAudioOptions(input: true, from: anchor) }
+        accountBar.onOutputOptions = { [weak self] anchor in self?.showAudioOptions(input: false, from: anchor) }
 
         let container = NSVisualEffectView()
         container.material = .sidebar
@@ -98,13 +110,13 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         emptyLabel.textColor = .secondaryLabelColor
         emptyLabel.alignment = .center
         emptyLabel.isHidden = true
-        [titleLabel, scroll, voiceBar, emptyLabel].forEach {
+        [titleLabel, scroll, voiceBar, accountBar, emptyLabel].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview($0)
         }
-        // The bar is always laid out at full width along the bottom; while it's hidden the list simply runs over
-        // its space. (A stack view here left the bar half-width until the window was resized.)
-        listToBottom = scroll.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        // Both bars are always laid out at full width. While the voice bar is hidden the list runs over its
+        // space and stops at the account bar. (A stack view here left a bar half-width until the window was resized.)
+        listToAccount = scroll.bottomAnchor.constraint(equalTo: accountBar.topAnchor)
         listToBar = scroll.bottomAnchor.constraint(equalTo: voiceBar.topAnchor)
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor, constant: Theme.Spacing.group),
@@ -115,11 +127,14 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
             scroll.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             voiceBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             voiceBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            voiceBar.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            voiceBar.bottomAnchor.constraint(equalTo: accountBar.topAnchor),
+            accountBar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            accountBar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            accountBar.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             emptyLabel.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
             emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor, constant: -2 * Theme.Spacing.edge),
-            listToBottom,
+            listToAccount,
         ])
         view = container
         NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged), name: Settings.didChange, object: nil)
@@ -203,7 +218,27 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
     func voiceChanged() {
         refreshVisibleRows()
         refreshVoiceBar()
+        refreshAccountControls()
     }
+
+    /// The signed-in account's picture and status line.
+    func updateAccount(user: User?, choice: OwnStatus.Choice) {
+        accountBar.update(user: user, choice: choice)
+        refreshAccountControls()
+    }
+
+    /// A friend's status changed. Only the direct-message rows on screen are redrawn.
+    func refreshPresence(_ userID: Snowflake) {
+        guard place == .directMessages else { return }
+        table.enumerateAvailableRowViews { rowView, row in
+            guard row < rows.count, case .item(.channel(let channel)) = rows[row], channel.kind == .dm,
+                  channel.recipients?.contains(where: { $0.id == userID }) == true,
+                  let cell = rowView.view(atColumn: 0) as? ChannelCell else { return }
+            configure(cell, rows[row])
+        }
+    }
+
+    func closePopovers() { audioPopover?.close() }
 
     func select(_ channelID: Snowflake, scroll: Bool = true) {
         guard let row = rows.firstIndex(where: { if case .item(.channel(let c)) = $0 { return c.id == channelID } else { return false } })
@@ -237,8 +272,22 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
     private func showVoiceBar(_ show: Bool) {
         guard voiceBar.isHidden == show else { return }
         voiceBar.isHidden = !show
-        listToBottom.isActive = !show
+        listToAccount.isActive = !show
         listToBar.isActive = show
+    }
+
+    private func refreshAccountControls() {
+        accountBar.updateAudio(muted: voice.muted, deafened: voice.deafened,
+                               serverMuted: voice.serverMuted, serverDeafened: voice.serverDeafened)
+    }
+
+    private func showAudioOptions(input: Bool, from anchor: NSView) {
+        audioPopover?.close()
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = AudioOptionsViewController(input: input)
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxY)
+        audioPopover = popover
     }
 
     private func knownName(of state: VoiceState, in guildID: Snowflake) -> String? {
@@ -366,10 +415,16 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
         return cell
     }
 
-    /// Rows take the system's height for the sidebar size; members get at least enough for their pictures.
+    /// Rows take the system's height for the sidebar size. Pictures need a little more than a text row.
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if case .member = rows[row] { return max(tableView.rowHeight, Theme.IconSize.listAvatar + Theme.Spacing.related) }
-        return tableView.rowHeight
+        switch rows[row] {
+        case .member:
+            return max(tableView.rowHeight, Theme.IconSize.listAvatar + Theme.Spacing.related)
+        case .item(.channel(let channel)) where channel.isPrivate:
+            return max(tableView.rowHeight, Theme.IconSize.dmAvatar + Theme.Spacing.related)
+        default:
+            return tableView.rowHeight
+        }
     }
 
     func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
@@ -395,13 +450,14 @@ final class ChannelListViewController: NSViewController, NSTableViewDataSource, 
 @MainActor
 private final class ChannelCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("ChannelCell")
-    static let avatarSize = Theme.IconSize.listAvatar
 
     /// What sits in front of the name.
-    private enum Leading { case none, icon, avatar }
+    private enum Leading { case none, icon, avatar, cluster }
 
     private let icon = NSImageView()
     private let avatar = RemoteImageView()
+    private let cluster = AvatarClusterView()
+    private let statusDot = NSView()
     private let label = NSTextField(labelWithString: "")
     private let badge = BadgeView()
     /// Mute and deafen, in white when the person chose it, in red when a moderator did.
@@ -411,6 +467,12 @@ private final class ChannelCell: NSTableCellView {
     private var labelAtStart: NSLayoutConstraint!
     private var labelAfterIcon: NSLayoutConstraint!
     private var labelAfterAvatar: NSLayoutConstraint!
+    private var labelAfterCluster: NSLayoutConstraint!
+    private var avatarLeadingFlush: NSLayoutConstraint!
+    private var avatarLeadingIndented: NSLayoutConstraint!
+    private var avatarWidth: NSLayoutConstraint!
+    private var avatarHeight: NSLayoutConstraint!
+    private var rowEmphasized = false
 
     init() {
         super.init(frame: .zero)
@@ -423,9 +485,12 @@ private final class ChannelCell: NSTableCellView {
         }
         voiceIcons.spacing = Theme.Spacing.tight
         voiceIcons.setHuggingPriority(.required, for: .horizontal)
-        avatar.cornerRadius = Self.avatarSize / 2
         avatar.layer?.borderColor = NSColor.systemGreen.cgColor
-        [icon, avatar, label, badge, voiceIcons].forEach {
+        statusDot.wantsLayer = true
+        statusDot.layer?.cornerRadius = 4.5
+        statusDot.layer?.borderWidth = 1.5
+        statusDot.setAccessibilityElement(false)
+        [icon, avatar, cluster, statusDot, label, badge, voiceIcons].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             addSubview($0)
         }
@@ -435,15 +500,26 @@ private final class ChannelCell: NSTableCellView {
         labelAtStart = label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.tight)
         labelAfterIcon = label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: Theme.Spacing.related)
         labelAfterAvatar = label.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: Theme.Spacing.related)
+        labelAfterCluster = label.leadingAnchor.constraint(equalTo: cluster.trailingAnchor, constant: Theme.Spacing.related)
+        avatarLeadingFlush = avatar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.tight)
+        // Members sit under their channel's name, lined up with it.
+        avatarLeadingIndented = avatar.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: Theme.Spacing.related)
+        avatarWidth = avatar.widthAnchor.constraint(equalToConstant: Theme.IconSize.listAvatar)
+        avatarHeight = avatar.heightAnchor.constraint(equalToConstant: Theme.IconSize.listAvatar)
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.tight),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: Theme.IconSize.sidebar),
-            // Members sit under their channel's name, lined up with it.
-            avatar.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: Theme.Spacing.related),
             avatar.centerYAnchor.constraint(equalTo: centerYAnchor),
-            avatar.widthAnchor.constraint(equalToConstant: Self.avatarSize),
-            avatar.heightAnchor.constraint(equalToConstant: Self.avatarSize),
+            avatarWidth, avatarHeight,
+            cluster.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Theme.Spacing.tight),
+            cluster.centerYAnchor.constraint(equalTo: centerYAnchor),
+            cluster.widthAnchor.constraint(equalToConstant: Theme.IconSize.dmAvatar),
+            cluster.heightAnchor.constraint(equalToConstant: Theme.IconSize.dmAvatar),
+            statusDot.trailingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: 1),
+            statusDot.bottomAnchor.constraint(equalTo: avatar.bottomAnchor, constant: 1),
+            statusDot.widthAnchor.constraint(equalToConstant: 9),
+            statusDot.heightAnchor.constraint(equalToConstant: 9),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             badge.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: Theme.Spacing.tight),
             badge.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.related),
@@ -452,17 +528,63 @@ private final class ChannelCell: NSTableCellView {
             voiceIcons.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.related),
             voiceIcons.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        updateCutout()
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    private func use(_ leading: Leading) {
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet {
+            rowEmphasized = backgroundStyle == .emphasized
+            updateCutout()
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            avatar.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+        }
+        updateCutout()
+    }
+
+    private func updateCutout() {
+        let color: NSColor = rowEmphasized ? .selectedContentBackgroundColor : .windowBackgroundColor
+        statusDot.layer?.borderColor = color.cgColor
+        cluster.setCutout(color)
+    }
+
+    private func use(_ leading: Leading, avatarSize: CGFloat = Theme.IconSize.listAvatar, indented: Bool = false) {
         icon.isHidden = leading != .icon
         avatar.isHidden = leading != .avatar
+        cluster.isHidden = leading != .cluster
+        statusDot.isHidden = true
         labelAtStart.isActive = leading == .none
         labelAfterIcon.isActive = leading == .icon
         labelAfterAvatar.isActive = leading == .avatar
-        if leading != .avatar { avatar.setImage(nil, pointSize: .zero) }
+        labelAfterCluster.isActive = leading == .cluster
+        avatarLeadingFlush.isActive = !(leading == .avatar && indented)
+        avatarLeadingIndented.isActive = leading == .avatar && indented
+        avatarWidth.constant = avatarSize
+        avatarHeight.constant = avatarSize
+        avatar.cornerRadius = avatarSize / 2
+        if leading != .avatar {
+            avatar.setImage(nil, pointSize: .zero)
+            avatar.layer?.borderWidth = 0
+        }
+        if leading != .cluster { cluster.clear() }
+    }
+
+    private func showAvatar(_ user: User, side: CGFloat) {
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        avatar.setImage(MediaRequest.avatarURL(for: user, pixels: Int(side * scale)),
+                        pointSize: NSSize(width: side, height: side))
+    }
+
+    private func showStatus(_ status: Presence.Status) {
+        statusDot.isHidden = false
+        statusDot.layer?.backgroundColor = ProfileText.statusColor(status).cgColor
+        updateCutout()
     }
 
     func configure(_ item: ChannelListItem, store: Store, inCall: Bool, size: NSTableView.RowSizeStyle) {
@@ -478,7 +600,16 @@ private final class ChannelCell: NSTableCellView {
             badge.count = 0
         case .channel(let c):
             let unread = store.isUnread(c.id)
-            if c.isPrivate {
+            if c.kind == .groupDM, let people = c.recipients, !people.isEmpty {
+                use(.cluster)
+                cluster.show(people)
+            } else if c.kind == .dm {
+                use(.avatar, avatarSize: Theme.IconSize.dmAvatar)
+                if let user = c.recipients?.first {
+                    showAvatar(user, side: Theme.IconSize.dmAvatar)
+                    showStatus(store.presence(of: user.id)?.status ?? .offline)
+                }
+            } else if c.isPrivate {
                 use(.none)
             } else {
                 use(.icon)
@@ -490,7 +621,17 @@ private final class ChannelCell: NSTableCellView {
             label.font = Theme.listFont(for: size, bold: unread)
             label.textColor = unread ? .labelColor : .secondaryLabelColor
             badge.count = store.mentionCount(c.id)
-            var spoken = c.displayName + (c.isPrivate ? "" : ", text channel")
+            var spoken = c.displayName
+            if c.kind == .groupDM {
+                spoken += ", group direct message"
+            } else if c.kind == .dm {
+                spoken += ", direct message"
+                if let user = c.recipients?.first {
+                    spoken += ", " + ProfileText.status(store.presence(of: user.id)?.status ?? .offline)
+                }
+            } else {
+                spoken += ", text channel"
+            }
             if badge.count > 0 { spoken += ", \(badge.count) mention\(badge.count == 1 ? "" : "s")" } else if unread { spoken += ", unread" }
             setAccessibilityLabel(spoken)
         case .voiceChannel(let c):
@@ -507,10 +648,9 @@ private final class ChannelCell: NSTableCellView {
 
     /// Someone in a voice channel: picture (ringed in green while they talk), name, and mute/deafen.
     func configureMember(name: String, user: User, size: NSTableView.RowSizeStyle, speaking: Bool, state: VoiceState) {
-        use(.avatar)
-        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
-        avatar.setImage(MediaRequest.avatarURL(for: user, pixels: Int(Self.avatarSize * scale)),
-                        pointSize: NSSize(width: Self.avatarSize, height: Self.avatarSize))
+        let side = Theme.IconSize.listAvatar
+        use(.avatar, avatarSize: side, indented: true)
+        showAvatar(user, side: side)
         avatar.layer?.borderWidth = speaking ? 2 : 0
         label.stringValue = name
         label.font = Theme.listFont(for: size)
@@ -530,6 +670,92 @@ private final class ChannelCell: NSTableCellView {
         if deafened { spoken += state.deaf ? ", deafened by a moderator" : ", deafened" }
         if muted { spoken += state.mute ? ", muted by a moderator" : ", muted" }
         setAccessibilityLabel(spoken)
+    }
+}
+
+/// Up to three profile pictures in one direct-message slot. One person fills it; two sit side by side; three
+/// are two over one.
+@MainActor
+private final class AvatarClusterView: NSView {
+    private let images = (0..<3).map { _ in RemoteImageView() }
+    private var users: [User] = []
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        for image in images {
+            // Frames are set in layout(). No constraints, so Auto Layout leaves them alone.
+            image.translatesAutoresizingMaskIntoConstraints = false
+            image.setAccessibilityElement(false)
+            addSubview(image)
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func show(_ users: [User]) {
+        self.users = Array(users.prefix(3))
+        needsLayout = true
+    }
+
+    func clear() {
+        users = []
+        for image in images {
+            image.isHidden = true
+            image.setImage(nil, pointSize: .zero)
+        }
+    }
+
+    func setCutout(_ color: NSColor) {
+        let width: CGFloat = users.count > 1 ? 1.5 : 0
+        for image in images {
+            image.layer?.borderWidth = width
+            image.layer?.borderColor = color.cgColor
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        let frames = Self.frames(count: users.count, side: bounds.width)
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+        for (index, image) in images.enumerated() {
+            guard index < users.count, index < frames.count, frames[index].width > 1 else {
+                image.isHidden = true
+                image.setImage(nil, pointSize: .zero)
+                continue
+            }
+            image.isHidden = false
+            image.frame = frames[index]
+            image.cornerRadius = frames[index].width / 2
+            let pixels = max(Int(frames[index].width * scale), 1)
+            image.setImage(MediaRequest.avatarURL(for: users[index], pixels: pixels), pointSize: frames[index].size)
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let color = NSColor.quaternaryLabelColor.cgColor
+            for image in images { image.layer?.backgroundColor = color }
+        }
+    }
+
+    private static func frames(count: Int, side: CGFloat) -> [NSRect] {
+        switch count {
+        case 1:
+            return [NSRect(x: 0, y: 0, width: side, height: side)]
+        case 2:
+            let width = (side * 0.72).rounded()
+            let y = ((side - width) / 2).rounded()
+            return [NSRect(x: 0, y: y, width: width, height: width),
+                    NSRect(x: side - width, y: y, width: width, height: width)]
+        case 3...:
+            let width = (side * 0.62).rounded()
+            return [NSRect(x: 0, y: side - width, width: width, height: width),
+                    NSRect(x: side - width, y: side - width, width: width, height: width),
+                    NSRect(x: ((side - width) / 2).rounded(), y: 0, width: width, height: width)]
+        default:
+            return []
+        }
     }
 }
 
