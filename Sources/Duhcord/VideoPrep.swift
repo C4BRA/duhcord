@@ -664,15 +664,17 @@ final class VideoPrep: @unchecked Sendable {
         let sourceBuffers = PCMSource(samples: samples, format: source)
         var encoded: [CMSampleBuffer] = []
         var failure: NSError?
-        let packetDuration = CMTime(value: Int64(max(1, destination.streamDescription.pointee.mFramesPerPacket)),
-                                    timescale: CMTimeScale(basic.pointee.mSampleRate))
+        let sampleRate = basic.pointee.mSampleRate
         var cursor = CMSampleBufferGetPresentationTimeStamp(first)
         while true {
             let packet = AVAudioCompressedBuffer(format: destination, packetCapacity: 8,
                                                  maximumPacketSize: converter.maximumOutputPacketSize)
-            let status = converter.convert(to: packet, error: &failure) { _, outStatus in
-                sourceBuffers.next(outStatus)
+            let status = converter.convert(to: packet, error: &failure) { requested, outStatus in
+                sourceBuffers.next(outStatus, packets: requested)
             }
+            // The AAC format leaves the packet size unset. Treating that as one sample runs the song about a
+            // thousand times too fast.
+            let packetDuration = Self.aacFrameDuration(packet, sampleRate: sampleRate)
             if packet.packetCount > 0, let sample = compressedAudioSample(packet, at: cursor, packetDuration: packetDuration) {
                 cursor = CMTimeAdd(cursor, CMSampleBufferGetDuration(sample))
                 encoded.append(sample)
@@ -682,6 +684,13 @@ final class VideoPrep: @unchecked Sendable {
         }
         if failure != nil || encoded.isEmpty { throw Failure.failed }
         return encoded
+    }
+
+    /// AAC-LC packets hold 1024 frames. A reported count of 0 or 1 is the unset format, not the real size.
+    private static func aacFrameDuration(_ buffer: AVAudioCompressedBuffer, sampleRate: Float64) -> CMTime {
+        let reported = buffer.format.streamDescription.pointee.mFramesPerPacket
+        let frames: UInt32 = reported > 1 ? reported : 1024
+        return CMTime(value: CMTimeValue(frames), timescale: CMTimeScale(sampleRate.rounded()))
     }
 
     /// One compressed buffer may hold several AAC packets. Their times walk forward from `time`.
@@ -722,37 +731,53 @@ final class VideoPrep: @unchecked Sendable {
         return sample
     }
 
-    /// PCM samples handed to the AAC converter one buffer at a time.
+    /// PCM handed over in the pieces the converter asked for. A whole read is longer than that, and the rest of it
+    /// has to wait for the next request.
     private final class PCMSource: @unchecked Sendable {
         let samples: [CMSampleBuffer]
         let format: AVAudioFormat
         var index = 0
+        var offset = 0
 
         init(samples: [CMSampleBuffer], format: AVAudioFormat) {
             self.samples = samples
             self.format = format
         }
 
-        func next(_ outStatus: UnsafeMutablePointer<AVAudioConverterInputStatus>) -> AVAudioBuffer? {
-            guard index < samples.count else {
-                outStatus.pointee = .endOfStream
-                return nil
-            }
-            let sample = samples[index]
-            index += 1
-            let frames = AVAudioFrameCount(CMSampleBufferGetNumSamples(sample))
-            guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else {
+        func next(_ outStatus: UnsafeMutablePointer<AVAudioConverterInputStatus>, packets requested: AVAudioPacketCount) -> AVAudioBuffer? {
+            let wanted = Int(requested)
+            guard wanted > 0 else {
                 outStatus.pointee = .noDataNow
                 return nil
             }
-            pcm.frameLength = frames
-            guard CMSampleBufferCopyPCMDataIntoAudioBufferList(sample, at: 0, frameCount: Int32(frames),
-                                                               into: pcm.mutableAudioBufferList) == noErr else {
-                outStatus.pointee = .noDataNow
-                return nil
+            while index < samples.count {
+                let available = CMSampleBufferGetNumSamples(samples[index]) - offset
+                if available <= 0 {
+                    index += 1
+                    offset = 0
+                    continue
+                }
+                let frames = min(wanted, available)
+                guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                pcm.frameLength = AVAudioFrameCount(frames)
+                guard CMSampleBufferCopyPCMDataIntoAudioBufferList(samples[index], at: Int32(offset), frameCount: Int32(frames),
+                                                                   into: pcm.mutableAudioBufferList) == noErr else {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                offset += frames
+                if offset >= CMSampleBufferGetNumSamples(samples[index]) {
+                    index += 1
+                    offset = 0
+                }
+                outStatus.pointee = .haveData
+                return pcm
             }
-            outStatus.pointee = .haveData
-            return pcm
+            outStatus.pointee = .endOfStream
+            return nil
         }
     }
 
