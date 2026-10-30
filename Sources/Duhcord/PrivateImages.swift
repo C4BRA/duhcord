@@ -85,6 +85,11 @@ final class PrivateImageLoader {
         return token
     }
 
+    /// Drops a decrypted video so the next piece is the one held in memory.
+    func discard(_ image: PrivateImage) {
+        decrypted.removeObject(forKey: image.cacheKey as NSString)
+    }
+
     func cancel(_ token: Token, for image: PrivateImage) {
         let key = image.cacheKey
         waiters[key]?[token] = nil
@@ -136,6 +141,8 @@ struct PreparedAttachment {
     let name: String
     /// Videos: how long, for the row.
     var duration: Double = 0
+    /// Set when a private video is too long for one file and will be split when the message is sent.
+    var sourceURL: URL? = nil
 
     /// The file as uploaded outside Private: a plain name, so the original's doesn't go to Discord either.
     var upload: UploadFile {

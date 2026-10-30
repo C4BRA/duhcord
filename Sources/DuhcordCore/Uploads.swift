@@ -13,12 +13,19 @@ public enum UploadLimit {
         switch premiumType ?? 0 {
         case 2: return 500 * 1024 * 1024
         case 1, 3: return 50 * 1024 * 1024
-        default: return 10 * 1024 * 1024
+        default: return 20 * 1024 * 1024
         }
     }
 
     /// What a message's files may add up to, leaving room for the rest of the request.
     public static func bytes(premiumType: Int?) -> Int {
         min(discordLimit(premiumType: premiumType), duhcordCap) - overhead
+    }
+
+    /// How large one private video piece may be before it is sealed. One message holds up to four, and together
+    /// they stay inside what Duhcord will keep in memory. Each sealed attachment stays inside Discord's file cap.
+    public static func privatePiecePlaintext(premiumType: Int?) -> Int {
+        let perFile = min(discordLimit(premiumType: premiumType), duhcordCap / PrivateMessaging.maxFiles)
+        return PrivateMessaging.largestPlaintext(sealingWithin: perFile)
     }
 }

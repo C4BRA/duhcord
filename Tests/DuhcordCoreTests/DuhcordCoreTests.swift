@@ -1283,12 +1283,50 @@ final class PrivateMessagingTests: XCTestCase {
     }
 
     func testUploadLimits() {
-        XCTAssertEqual(UploadLimit.discordLimit(premiumType: nil), 10 * 1024 * 1024)
+        XCTAssertEqual(UploadLimit.discordLimit(premiumType: nil), 20 * 1024 * 1024)
         XCTAssertEqual(UploadLimit.discordLimit(premiumType: 3), 50 * 1024 * 1024)
         XCTAssertEqual(UploadLimit.discordLimit(premiumType: 2), 500 * 1024 * 1024)
-        XCTAssertLessThan(UploadLimit.bytes(premiumType: 0), 10 * 1024 * 1024)
+        XCTAssertLessThan(UploadLimit.bytes(premiumType: 0), 20 * 1024 * 1024)
+        XCTAssertEqual(PrivateMessaging.maxUploadBytes, 20 * 1024 * 1024 - 64 * 1024)
         // Never more than Duhcord holds in memory for one message.
         XCTAssertLessThanOrEqual(UploadLimit.bytes(premiumType: 2), UploadLimit.duhcordCap)
+    }
+
+    func testFilmNote() {
+        let film = PrivateFilm(id: Data((0..<16).map { UInt8($0) }), start: 4)
+        let text = PrivateFilmNote.text(caption: "hello\nthere", film: film)
+        let parsed = PrivateFilmNote.parse(text)
+        XCTAssertEqual(parsed?.film, film)
+        XCTAssertEqual(parsed?.caption, "hello\nthere")
+        XCTAssertNil(PrivateFilmNote.parse("hello"))
+        XCTAssertNil(PrivateFilmNote.parse(text.replacingOccurrences(of: "\n", with: "")))
+        XCTAssertNil(PrivateFilmNote.parse(text.replacingOccurrences(of: "0a", with: "0A")))
+        XCTAssertNil(PrivateFilmNote.parse(PrivateFilmNote.text(caption: "", film: PrivateFilm(id: film.id, start: -1))))
+        XCTAssertEqual(PrivateFilmNote.newID().count, 16)
+    }
+
+    func testLargestPlaintextSealsInsideTheFileCap() {
+        let budget = 20 * 1024 * 1024
+        let plain = PrivateMessaging.largestPlaintext(sealingWithin: budget)
+        XCTAssertGreaterThan(plain, 0)
+        XCTAssertLessThanOrEqual(PrivateMessaging.sealedLength(forFileOf: plain), budget)
+        XCTAssertGreaterThan(PrivateMessaging.sealedLength(forFileOf: plain + 1), budget)
+        let piece = UploadLimit.privatePiecePlaintext(premiumType: nil)
+        XCTAssertLessThanOrEqual(PrivateMessaging.sealedLength(forFileOf: piece), UploadLimit.discordLimit(premiumType: nil))
+        XCTAssertLessThanOrEqual(PrivateMessaging.sealedLength(forFileOf: piece) * PrivateMessaging.maxFiles, UploadLimit.duhcordCap)
+    }
+
+    func testFilmNoteSurvivesSealing() throws {
+        guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
+        let alice = Curve25519.KeyAgreement.PrivateKey(), bob = Curve25519.KeyAgreement.PrivateKey()
+        let film = PrivateFilm(id: PrivateFilmNote.newID(), start: 8)
+        let text = PrivateFilmNote.text(caption: "clip", film: film)
+        let content = try PrivateCrypto.seal(text, channelID: "5", sender: alice, recipients: [bob.publicKey])
+        guard case .encrypted(let payload) = PrivateMessaging.kind(of: content) else { return XCTFail("not encrypted") }
+        let opened = PrivateCrypto.open(payload, channelID: "5", recipient: bob, senders: [alice.publicKey], fromSelf: false)
+        XCTAssertEqual(opened?.text, text)
+        XCTAssertEqual(PrivateFilmNote.parse(opened?.text ?? "")?.film, film)
+        XCTAssertEqual(PrivateFilmNote.parse(opened?.text ?? "")?.caption, "clip")
     }
 
     func testVideoFileKind() throws {
@@ -1411,5 +1449,59 @@ final class PrivateMessagingTests: XCTestCase {
         let a = try PrivateCrypto.seal("ok", channelID: "1", sender: alice, recipients: [bob.publicKey])
         let b = try PrivateCrypto.seal(randomText(90), channelID: "1", sender: alice, recipients: [bob.publicKey])
         XCTAssertEqual(a.utf16.count, b.utf16.count)
+    }
+}
+
+final class VideoEncodeTests: XCTestCase {
+    func testHighBitrateStaysFullSizeAt30fps() {
+        let picture = VideoEncode.picture(width: 1920, height: 1080, videoBitrate: 5_000_000, sourceFPS: 30, hevc: false)
+        XCTAssertEqual(picture.longest, 1920)
+        XCTAssertEqual(picture.fps, 30)
+    }
+
+    func test200kbpsKeeps480pAt30fps() {
+        let picture = VideoEncode.picture(width: 1920, height: 1080, videoBitrate: 200_000, sourceFPS: 30, hevc: false)
+        XCTAssertEqual(picture.longest, 480)
+        XCTAssertEqual(picture.fps, 30)
+    }
+
+    func testFrameRateDropsBeforeThePictureShrinksPast480() {
+        let picture = VideoEncode.picture(width: 1920, height: 1080, videoBitrate: 130_000, sourceFPS: 60, hevc: false)
+        XCTAssertEqual(picture.longest, 480)
+        XCTAssertEqual(picture.fps, 15)
+    }
+
+    func testFloorStaysAt480p15ForWidescreen() {
+        let picture = VideoEncode.picture(width: 1920, height: 1080, videoBitrate: VideoEncode.minVideoBitrate,
+                                          sourceFPS: 30, hevc: false)
+        XCTAssertEqual(picture.longest, 480)
+        XCTAssertEqual(picture.fps, 15)
+    }
+
+    func testSourceRateAndSizeAreNotRaised() {
+        let slow = VideoEncode.picture(width: 1920, height: 1080, videoBitrate: 5_000_000, sourceFPS: 24, hevc: false)
+        XCTAssertEqual(slow.fps, 24)
+        XCTAssertEqual(slow.longest, 1920)
+        let small = VideoEncode.picture(width: 320, height: 180, videoBitrate: 5_000_000, sourceFPS: 30, hevc: false)
+        XCTAssertEqual(small.width, 320)
+        XCTAssertEqual(small.height, 180)
+        XCTAssertEqual(small.fps, 30)
+    }
+
+    func testHEVCHoldsAHigherFrameRateAtTheFloor() {
+        let h264 = VideoEncode.picture(width: 1920, height: 1080, videoBitrate: VideoEncode.minVideoBitrate,
+                                       sourceFPS: 30, hevc: false)
+        let hevc = VideoEncode.picture(width: 1920, height: 1080, videoBitrate: VideoEncode.minVideoBitrate,
+                                       sourceFPS: 30, hevc: true)
+        XCTAssertEqual(h264.fps, 15)
+        XCTAssertEqual(hevc.fps, 24)
+        XCTAssertGreaterThanOrEqual(hevc.longest, h264.longest)
+    }
+
+    func testAudioFloor() {
+        XCTAssertEqual(VideoEncode.audioBitrate(budget: 2_000_000, hasAudio: true), 128_000)
+        XCTAssertEqual(VideoEncode.audioBitrate(budget: 700_000, hasAudio: true), 96_000)
+        XCTAssertEqual(VideoEncode.audioBitrate(budget: 200_000, hasAudio: true), 32_000)
+        XCTAssertEqual(VideoEncode.audioBitrate(budget: 200_000, hasAudio: false), 0)
     }
 }

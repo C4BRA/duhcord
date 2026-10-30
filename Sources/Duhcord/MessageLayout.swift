@@ -115,6 +115,8 @@ enum MessageLayoutBuilder {
         // Encrypted images: their size comes inside the message, so space is reserved before they're decrypted.
         // They're the only way to see the picture, so with previews off they wait for a click instead of hiding.
         for image in privateImages {
+            // Later pieces of a split video play from the first one. They aren't a second player.
+            if image.filmID != nil, image.filmPart > 0 { continue }
             let size = fit(image.file.width, image.file.height, max: box)
             y += 6
             let available = image.trusted && image.attachment != nil
@@ -269,6 +271,13 @@ final class MediaView: NSView, Playable {
     private var memoryLoader: MemoryAssetLoader?
     /// Waiting for a private video to download and decrypt.
     private var videoToken: PrivateImageLoader.Token?
+    /// A split private video: part 0, then each later piece, played one at a time. Empty for anything else.
+    private var filmQueue: [PrivateImage] = []
+    private var filmAt = 0
+    /// The part the row shows, so a callback from a later piece is dropped if the row was reused.
+    private var filmAnchor: String?
+    /// Rebuilds a film from the messages loaded now. Nil when this row has no film.
+    var filmResolver: ((PrivateImage) -> [PrivateImage])?
     private var statusObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
     private var isPlaying: Bool { animator != nil || player != nil }
@@ -316,8 +325,6 @@ final class MediaView: NSView, Playable {
 
     /// Called when the row is reused or scrolled away: stops downloads and playback.
     func cancel() {
-        if let videoToken, case .privateVideo(let video)? = item?.kind { PrivateImageLoader.shared.cancel(videoToken, for: video) }
-        videoToken = nil
         if let token, case .privateImage(let image)? = item?.kind {
             PrivateImageLoader.shared.cancel(token, for: image)
         } else if let token, let request = item?.request {
@@ -411,14 +418,36 @@ final class MediaView: NSView, Playable {
     /// frame stays as the still afterwards.
     private func startPrivateVideo(_ video: PrivateImage) {
         guard video.trusted, video.attachment != nil, videoToken == nil else { return }
-        label.stringValue = "Decrypting…"
+        if video.filmID != nil {
+            guard let fresh = filmResolver?(video), fresh.first?.attachment != nil else { return }
+            filmQueue = fresh
+        } else {
+            filmQueue = [video]
+        }
+        filmAt = 0
+        filmAnchor = video.cacheKey
+        playCurrentPart()
+    }
+
+    /// Decrypts the piece at `filmAt` and plays it. The previous piece's bytes are already released.
+    private func playCurrentPart() {
+        guard filmQueue.indices.contains(filmAt) else {
+            stopPlayback()
+            return
+        }
+        let video = filmQueue[filmAt]
+        let anchor = filmAnchor
+        guard video.trusted, video.attachment != nil else {
+            showFailure()
+            return
+        }
+        label.stringValue = filmQueue.count > 1 ? "Decrypting part \(filmAt + 1) of \(filmQueue.count)…" : "Decrypting…"
         layoutLabel()
         videoToken = PrivateImageLoader.shared.data(for: video) { [weak self] data in
-            guard let self, case .privateVideo(let current)? = self.item?.kind, current.cacheKey == video.cacheKey else { return }
+            guard let self, case .privateVideo(let current)? = self.item?.kind, current.cacheKey == anchor else { return }
             self.videoToken = nil
             guard let data else {
-                self.loadFailed = true
-                self.refreshOverlays()
+                self.showFailure()
                 return
             }
             let loader = MemoryAssetLoader(data: data)
@@ -427,6 +456,7 @@ final class MediaView: NSView, Playable {
             self.memoryLoader = loader
             PlaybackCoordinator.shared.startVideo(self)
             self.refreshOverlays()
+            guard self.filmAt == 0 else { return }
             let generator = AVAssetImageGenerator(asset: asset)
             generator.appliesPreferredTrackTransform = true
             generator.maximumSize = self.bounds.size.applying(CGAffineTransform(scaleX: 2, y: 2))
@@ -434,11 +464,34 @@ final class MediaView: NSView, Playable {
                 guard let image else { return }
                 let still = Handoff(value: image)
                 Task { @MainActor [weak self] in
-                    guard let self, case .privateVideo(let current)? = self.item?.kind, current.cacheKey == video.cacheKey else { return }
+                    guard let self, case .privateVideo(let current)? = self.item?.kind, current.cacheKey == anchor else { return }
                     self.still = NSImage(cgImage: still.value, size: self.bounds.size)
                     if !self.isPlaying { self.imageView.image = self.still }
                 }
             }
+        }
+    }
+
+    /// The piece ended. The chain is read again, so a piece that arrived while this one played can follow.
+    /// A missing index still stops playback.
+    private func finishedPart() {
+        let played = filmQueue.indices.contains(filmAt) ? filmQueue[filmAt] : nil
+        if let played { PrivateImageLoader.shared.discard(played) }
+        let anchor = filmQueue.first
+        let fresh: [PrivateImage]
+        if let anchor, anchor.filmID != nil, let resolved = filmResolver?(anchor) {
+            fresh = resolved
+        } else {
+            fresh = filmQueue
+        }
+        let next = filmAt + 1
+        if fresh.indices.contains(next), fresh[next].attachment != nil {
+            filmQueue = fresh
+            filmAt = next
+            endPlayback(advancing: true)
+            playCurrentPart()
+        } else {
+            stopPlayback()
         }
     }
 
@@ -463,7 +516,7 @@ final class MediaView: NSView, Playable {
         } else {
             player = AVPlayer(playerItem: playerItem)
             endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: playerItem, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.stopPlayback() }
+                Task { @MainActor in self?.finishedPart() }
             }
         }
         player.isMuted = muted
@@ -483,6 +536,20 @@ final class MediaView: NSView, Playable {
     }
 
     func stopPlayback() {
+        endPlayback(advancing: false)
+    }
+
+    /// `advancing` keeps the film queue so the next piece can start. The piece that just played is released.
+    private func endPlayback(advancing: Bool) {
+        if let videoToken {
+            let video = filmQueue.indices.contains(filmAt) ? filmQueue[filmAt] : nil
+            if let video {
+                PrivateImageLoader.shared.cancel(videoToken, for: video)
+            } else if case .privateVideo(let video)? = item?.kind {
+                PrivateImageLoader.shared.cancel(videoToken, for: video)
+            }
+            self.videoToken = nil
+        }
         animator?.cancel()
         animator = nil
         player?.pause()
@@ -498,6 +565,12 @@ final class MediaView: NSView, Playable {
         player = nil
         looper = nil
         loader = nil
+        if !advancing {
+            if filmQueue.indices.contains(filmAt) { PrivateImageLoader.shared.discard(filmQueue[filmAt]) }
+            filmQueue = []
+            filmAt = 0
+            filmAnchor = nil
+        }
         imageView.image = still
         PlaybackCoordinator.shared.stopped(self)
         refreshOverlays()

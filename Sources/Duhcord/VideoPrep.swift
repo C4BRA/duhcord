@@ -10,17 +10,19 @@ import os
 /// touches the disk:
 /// - Only the picture and sound are copied, so location, camera details and other metadata stay behind.
 /// - With "Compress videos" on (the default), a video that's too large is re-encoded with the Mac's hardware
-///   encoder at a bitrate worked out from its length and the account's upload limit, at a resolution that suits
-///   that bitrate, capped at 30 fps. A video that already fits is only repackaged, which keeps its quality.
-/// - H.264 outside Private, which every Discord app plays; HEVC in Private (only Duhcord decrypts those, and
-///   every Mac it runs on plays HEVC), for better quality at the same size.
+///   encoder at a bitrate worked out from its length and the account's upload limit. Frame rate drops from 30
+///   to 24 to 15 before the picture shrinks past 480, and nothing under 120 kbps of video is encoded. The
+///   encoder is held to that bitrate for every second, so a busy picture cannot blow past the upload limit.
+///   A video that already fits is only repackaged, which keeps its quality.
+/// - H.264, which plays on every Discord app and on any operating system. A private video that already fits
+///   and is HEVC is sent unchanged.
 // Active reader and writer references are protected by the cancellation-state lock.
 final class VideoPrep: @unchecked Sendable {
     struct Options: Sendable {
         /// What the file may come to.
         let limit: Int
         let compress: Bool
-        /// Private: HEVC, and nothing it can't play.
+        /// Private: an already-small HEVC file can be sent unchanged. Anything re-encoded is H.264.
         let forPrivate: Bool
     }
 
@@ -46,15 +48,13 @@ final class VideoPrep: @unchecked Sendable {
         }
     }
 
-    /// Below this the picture falls apart, so the video is refused instead.
-    private static let minVideoBitrate = 200_000.0
     /// Leaves room for the container and for the encoder landing a little over its target.
     private static let headroom = 0.92
 
     // The lock protects these active references while cancellation may arrive from another thread.
     private struct ActiveMedia: @unchecked Sendable {
         let reader: AVAssetReader
-        let writer: AVAssetWriter
+        let writer: AVAssetWriter?
     }
 
     private struct State: Sendable {
@@ -72,17 +72,21 @@ final class VideoPrep: @unchecked Sendable {
             return state.activeMedia
         }
         activeMedia?.reader.cancelReading()
-        activeMedia?.writer.cancelWriting()
+        activeMedia?.writer?.cancelWriting()
     }
 
     private var cancelled: Bool { state.withLock { $0.isCancelled } }
+    /// Set once the user stops the job, including during the pause between chained messages.
+    var isCancelled: Bool { cancelled }
 
     /// Off the main thread. `progress` (0...1) is called from a background queue.
-    func prepare(_ url: URL, name: String, options: Options,
+    /// `clip` encodes only that stretch, used when a private video is split into pieces.
+    func prepare(_ url: URL, name: String, options: Options, clip: Range<Double>? = nil,
                  progress: @escaping @Sendable (Double) -> Void) async throws -> PreparedAttachment {
         let asset = AVURLAsset(url: url)
-        let duration = try await asset.load(.duration).seconds
-        guard duration.isFinite, duration > 0.1,
+        let fullDuration = try await asset.load(.duration).seconds
+        let duration = clip.map { $0.upperBound - $0.lowerBound } ?? fullDuration
+        guard fullDuration.isFinite, fullDuration > 0.1, duration.isFinite, duration > 0.05,
               let video = try await asset.loadTracks(withMediaType: .video).first else { throw Failure.unreadable }
         let audio = try await asset.loadTracks(withMediaType: .audio)
         let (natural, transform, frameRate, formats) = try await video.load(.naturalSize, .preferredTransform,
@@ -98,10 +102,10 @@ final class VideoPrep: @unchecked Sendable {
                                thumbnail: thumbnail, name: name, duration: duration)
         }
 
-        // Already small enough, in a format the recipients can play: only repackaged.
+        // Already small enough, in a format the recipients can play: only repackaged. A clip has to be encoded.
         let codec = formats.first.map(CMFormatDescriptionGetMediaSubType)
         let playable = codec == kCMVideoCodecType_H264 || (options.forPrivate && codec == kCMVideoCodecType_HEVC)
-        if playable, fileSize <= options.limit || !options.compress,
+        if clip == nil, playable, fileSize <= options.limit || !options.compress,
            let data = try? await remux(asset, video: video, audio: audio, transform: transform, progress: progress),
            data.count <= options.limit {
             return finish(data, size: display)
@@ -113,44 +117,77 @@ final class VideoPrep: @unchecked Sendable {
 
         // Bits per second the file can afford, less the sound.
         let budget = Double(options.limit) * Self.headroom * 8 / duration
-        let audioBitrate: Double = audio.isEmpty ? 0 : (budget > 1_500_000 ? 128_000 : budget > 600_000 ? 96_000 : 48_000)
+        let audioBitrate = VideoEncode.audioBitrate(budget: budget, hasAudio: !audio.isEmpty)
         var videoBitrate = budget - audioBitrate
-        guard videoBitrate >= Self.minVideoBitrate else {
-            let maxSeconds = Double(options.limit) * Self.headroom * 8 / (Self.minVideoBitrate + 48_000)
+        guard videoBitrate >= VideoEncode.minVideoBitrate else {
+            let floor = VideoEncode.minVideoBitrate + (audio.isEmpty ? 0 : VideoEncode.minAudioBitrate)
+            let maxSeconds = Double(options.limit) * Self.headroom * 8 / floor
             throw Failure.tooLong(maxMinutes: Int(maxSeconds / 60))
         }
-        // Unknown (0) counts as 30.
-        let fps: Int32 = frameRate > 0 ? Int32(min(30, max(1, frameRate.rounded()))) : 30
         // Up to three tries: if the encoder overshoots, the next aims lower by as much as it went over.
+        // Each try picks size and frame rate again, so a lower target can drop to 15 fps instead of blocking.
         for attempt in 0..<3 {
-            let size = Self.outputSize(display, bitrate: videoBitrate, hevc: options.forPrivate)
-            let data = try await encode(asset, video: video, audio: audio, size: size, transform: transform, fps: fps,
-                                        videoBitrate: videoBitrate, audioBitrate: audioBitrate, hevc: options.forPrivate,
-                                        duration: duration) { fraction in
+            let plan = VideoEncode.picture(width: Double(display.width), height: Double(display.height), videoBitrate: videoBitrate,
+                                           sourceFPS: Double(frameRate), hevc: false)
+            let size = CGSize(width: plan.width, height: plan.height)
+            let data = try await encode(asset, video: video, audio: audio, size: size, transform: transform,
+                                        fps: Int32(plan.fps), videoBitrate: videoBitrate, audioBitrate: audioBitrate,
+                                        duration: duration, clip: clip) { fraction in
                 progress((Double(attempt) + fraction) / Double(attempt + 1))
             }
-            if data.count <= options.limit { return finish(data, size: size) }
+            if data.count <= options.limit {
+                if clip != nil {
+                    let played = await Self.playedDuration(data)
+                    guard Self.durationMatches(played, span: duration) else {
+                        throw Failure.tooLong(maxMinutes: max(1, Int(duration / 60)))
+                    }
+                }
+                return finish(data, size: size)
+            }
             videoBitrate *= Double(options.limit) * Self.headroom / Double(data.count)
-            guard videoBitrate >= Self.minVideoBitrate else { break }
+            guard videoBitrate >= VideoEncode.minVideoBitrate else { break }
         }
         throw Failure.tooLong(maxMinutes: Int(duration / 60 * 0.75))
     }
 
-    /// The largest size the bitrate can carry well, never larger than the original, in even numbers of pixels.
-    static func outputSize(_ display: CGSize, bitrate: Double, hevc: Bool) -> CGSize {
-        // HEVC needs about 70% of H.264's bitrate for the same picture.
-        let effective = hevc ? bitrate / 0.7 : bitrate
-        let longest: Double
-        switch effective {
-        case 4_500_000...: longest = 1920
-        case 2_000_000...: longest = 1280
-        case 1_000_000...: longest = 960
-        case 500_000...: longest = 720
-        default: longest = 640
+    /// Encodes `url` into pieces that each fit `options.limit`. One piece when the whole video fits; otherwise
+    /// successive stretches, handed over one at a time so a long film is never all in memory.
+    func preparePieces(_ url: URL, name: String, options: Options,
+                       progress: @escaping @Sendable (Double) -> Void,
+                       piece: @escaping (PreparedAttachment) async throws -> Void) async throws {
+        do {
+            try await piece(try await prepare(url, name: name, options: options, progress: progress))
+            return
+        } catch Failure.tooLong {
         }
-        let scale = min(1, longest / Double(max(display.width, display.height)))
-        func even(_ value: Double) -> CGFloat { CGFloat(max(2, Int((value * scale / 2).rounded()) * 2)) }
-        return CGSize(width: even(display.width), height: even(display.height))
+        let asset = AVURLAsset(url: url)
+        let duration = try await asset.load(.duration).seconds
+        guard duration.isFinite, duration > 0.1 else { throw Failure.unreadable }
+        let hasAudio = try await asset.loadTracks(withMediaType: .audio).isEmpty == false
+        let floor = VideoEncode.minVideoBitrate + (hasAudio ? VideoEncode.minAudioBitrate : 0)
+        var slice = max(1, Double(options.limit) * Self.headroom * 8 / floor * 0.85)
+        var start = 0.0
+        var count = 0
+        while start < duration - 0.05 {
+            if cancelled { throw CancellationError() }
+            if count >= 48 {
+                throw Failure.tooLong(maxMinutes: max(1, Int(start / 60)))
+            }
+            let end = min(duration, start + slice)
+            let sliceStart = start
+            do {
+                let made = try await prepare(url, name: name, options: options, clip: sliceStart..<end) { fraction in
+                    progress(min(1, (sliceStart + fraction * (end - sliceStart)) / duration))
+                }
+                try await piece(made)
+                start = end
+                count += 1
+            } catch Failure.tooLong {
+                let shorter = (end - start) / 2
+                guard shorter >= 1 else { throw Failure.tooLong(maxMinutes: max(1, Int(start / 60))) }
+                slice = shorter
+            }
+        }
     }
 
     /// Which way a track's transform turns it, for the quarter turns phones record with.
@@ -231,14 +268,207 @@ final class VideoPrep: @unchecked Sendable {
         return try await run(reader: reader, writer: writer, output: output, pairs: pairs, duration: duration, progress: progress)
     }
 
+    /// Compressed pictures, in the order the encoder handed them over.
+    private final class SampleBufferList: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [CMSampleBuffer] = []
+        private var failure: OSStatus = noErr
+
+        func add(_ sample: CMSampleBuffer) {
+            lock.lock()
+            stored.append(sample)
+            lock.unlock()
+        }
+
+        func fail(_ status: OSStatus) {
+            lock.lock()
+            if failure == noErr { failure = status }
+            lock.unlock()
+        }
+
+        var samples: [CMSampleBuffer] {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+
+        var status: OSStatus {
+            lock.lock()
+            defer { lock.unlock() }
+            return failure
+        }
+    }
+
+    /// Pulls one reader output onto a background queue without the queue closure touching the reader itself.
+    private final class OutputPump: @unchecked Sendable {
+        let output: AVAssetReaderOutput
+        let frames: SampleBufferList
+        let state: OSAllocatedUnfairLock<State>
+
+        let origin: CMTime
+
+        init(output: AVAssetReaderOutput, frames: SampleBufferList, state: OSAllocatedUnfairLock<State>, origin: CMTime) {
+            self.output = output
+            self.frames = frames
+            self.state = state
+            self.origin = origin
+        }
+
+        func run() {
+            while !state.withLock({ $0.isCancelled }), let sample = output.copyNextSampleBuffer() {
+                frames.add(VideoPrep.shifted(sample, from: origin))
+            }
+        }
+    }
+
+    /// Writes already-read samples. The ready-callback only sees this object, which is safe to pass across queues.
+    private final class InputPump: @unchecked Sendable {
+        let input: AVAssetWriterInput
+        let samples: [CMSampleBuffer]
+        let report: Bool
+        let progress: @Sendable (Double) -> Void
+        let state: OSAllocatedUnfairLock<State>
+        let failed: OSAllocatedUnfairLock<Bool>
+        private let done = OSAllocatedUnfairLock(initialState: false)
+        private let index = OSAllocatedUnfairLock(initialState: 0)
+
+        init(input: AVAssetWriterInput, samples: [CMSampleBuffer], report: Bool,
+             progress: @escaping @Sendable (Double) -> Void, state: OSAllocatedUnfairLock<State>,
+             failed: OSAllocatedUnfairLock<Bool>) {
+            self.input = input
+            self.samples = samples
+            self.report = report
+            self.progress = progress
+            self.state = state
+            self.failed = failed
+        }
+
+        func step(finish: @escaping @Sendable () -> Void) {
+            while input.isReadyForMoreMediaData, !done.withLock({ $0 }) {
+                let next = index.withLock { value -> Int? in
+                    guard value < samples.count else { return nil }
+                    let current = value
+                    value += 1
+                    return current
+                }
+                let stop: Bool
+                if state.withLock({ $0.isCancelled }) || failed.withLock({ $0 }) || next == nil {
+                    stop = true
+                } else if let next {
+                    if report, !samples.isEmpty {
+                        progress(min(1, 0.9 + 0.1 * Double(next + 1) / Double(samples.count)))
+                    }
+                    let appended = input.append(samples[next])
+                    if !appended { failed.withLock { $0 = true } }
+                    stop = !appended
+                } else {
+                    stop = true
+                }
+                if stop {
+                    let finished = done.withLock { finished in
+                        guard !finished else { return false }
+                        finished = true
+                        return true
+                    }
+                    if finished { 
+                        input.markAsFinished()
+                        finish()
+                    }
+                }
+            }
+        }
+    }
+
+    /// H.264, with a hard cap of `bitrate` bits in any one second. The average is the same number; the cap is what
+    /// stops a busy stretch from coming out several times larger than the upload allows.
+    private static func compressionSession(size: CGSize, fps: Int32, bitrate: Double) throws -> VTCompressionSession {
+        var session: VTCompressionSession?
+        let created = VTCompressionSessionCreate(allocator: nil, width: Int32(size.width), height: Int32(size.height),
+                                                 codecType: kCMVideoCodecType_H264, encoderSpecification: nil,
+                                                 imageBufferAttributes: nil, compressedDataAllocator: nil,
+                                                 outputCallback: nil, refcon: nil, compressionSessionOut: &session)
+        guard created == noErr, let session else { throw Failure.failed }
+        func set(_ key: CFString, _ value: CFTypeRef) -> OSStatus {
+            VTSessionSetProperty(session, key: key, value: value)
+        }
+        var rate = Int32(min(Double(Int32.max), max(1, bitrate.rounded())))
+        var frameRate = fps
+        var interval = fps * 2
+        guard set(kVTCompressionPropertyKey_AverageBitRate, CFNumberCreate(nil, .sInt32Type, &rate)) == noErr,
+              set(kVTCompressionPropertyKey_ExpectedFrameRate, CFNumberCreate(nil, .sInt32Type, &frameRate)) == noErr,
+              set(kVTCompressionPropertyKey_MaxKeyFrameInterval, CFNumberCreate(nil, .sInt32Type, &interval)) == noErr,
+              set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel) == noErr else {
+            VTCompressionSessionInvalidate(session)
+            throw Failure.failed
+        }
+        _ = set(kVTCompressionPropertyKey_ColorPrimaries, AVVideoColorPrimaries_ITU_R_709_2 as CFString)
+        _ = set(kVTCompressionPropertyKey_TransferFunction, AVVideoTransferFunction_ITU_R_709_2 as CFString)
+        _ = set(kVTCompressionPropertyKey_YCbCrMatrix, AVVideoYCbCrMatrix_ITU_R_709_2 as CFString)
+        guard VTCompressionSessionPrepareToEncodeFrames(session) == noErr else {
+            VTCompressionSessionInvalidate(session)
+            throw Failure.failed
+        }
+        // Set after prepare: doing it earlier makes the encoder undershoot the average.
+        let bytesPerSecond = max(1, Int(bitrate / 8))
+        let limits = [NSNumber(value: bytesPerSecond), NSNumber(value: 1)] as CFArray
+        guard set(kVTCompressionPropertyKey_DataRateLimits, limits) == noErr else {
+            VTCompressionSessionInvalidate(session)
+            throw Failure.failed
+        }
+        return session
+    }
+
+    /// A clip keeps the source timeline, so every sample in the slice moves back by the same start.
+    private static func shiftedTime(_ time: CMTime, from origin: CMTime) -> CMTime {
+        guard origin.isNumeric, origin.seconds > 0.05, time.isNumeric else { return time }
+        return CMTimeSubtract(time, origin)
+    }
+
+    /// How long the file that was just written actually plays.
+    private static func playedDuration(_ data: Data) async -> Double {
+        let loader = MemoryAssetLoader(data: data)
+        let asset = loader.makeAsset()
+        return (try? await asset.load(.duration).seconds) ?? 0
+    }
+
+    /// Close enough to the slice that was asked for. A file that starts at the wrong place fails this.
+    private static func durationMatches(_ played: Double, span: Double) -> Bool {
+        guard played.isFinite, span.isFinite, played > 0.2 else { return false }
+        let slack = max(1.0, span * 0.02)
+        return played >= span - slack && played <= span + slack
+    }
+
+    /// Moves a sample's timestamps back by `origin`, so a later piece of a film starts at zero.
+    private static func shifted(_ sample: CMSampleBuffer, from origin: CMTime) -> CMSampleBuffer {
+        guard origin.isNumeric, origin.seconds > 0 else { return sample }
+        let count = CMSampleBufferGetNumSamples(sample)
+        guard count > 0 else { return sample }
+        var info = Array(repeating: CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: .invalid,
+                                                       decodeTimeStamp: .invalid), count: count)
+        guard CMSampleBufferGetSampleTimingInfoArray(sample, entryCount: count, arrayToFill: &info, entriesNeededOut: nil) == noErr
+        else { return sample }
+        for index in info.indices {
+            info[index].presentationTimeStamp = shiftedTime(info[index].presentationTimeStamp, from: origin)
+            if info[index].decodeTimeStamp.isNumeric {
+                info[index].decodeTimeStamp = shiftedTime(info[index].decodeTimeStamp, from: origin)
+            }
+        }
+        var copy: CMSampleBuffer?
+        let made = info.withUnsafeMutableBufferPointer { buffer -> OSStatus in
+            guard let base = buffer.baseAddress else { return kCMSampleBufferError_RequiredParameterMissing }
+            return CMSampleBufferCreateCopyWithNewTiming(allocator: nil, sampleBuffer: sample,
+                                                         sampleTimingEntryCount: info.count, sampleTimingArray: base,
+                                                         sampleBufferOut: &copy)
+        }
+        guard made == noErr, let copy else { return sample }
+        return copy
+    }
+
     private func encode(_ asset: AVAsset, video: AVAssetTrack, audio: [AVAssetTrack], size: CGSize,
                         transform: CGAffineTransform, fps: Int32,
-                        videoBitrate: Double, audioBitrate: Double, hevc: Bool, duration: Double,
+                        videoBitrate: Double, audioBitrate: Double, duration: Double, clip: Range<Double>?,
                         progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
         let reader = try AVAssetReader(asset: asset)
-        let output = MemoryOutput()
-        let writer = makeWriter(output)
-
         // Turned upright, scaled down and brought to standard (SDR) colour by the composition, at most 30 fps.
         let turn = Self.orientation(of: transform)
         let composition = try await AVMutableVideoComposition.videoComposition(with: asset) { request in
@@ -262,42 +492,140 @@ final class VideoPrep: @unchecked Sendable {
         ])
         videoOutput.videoComposition = composition
         videoOutput.alwaysCopiesSampleData = false
-        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: hevc ? AVVideoCodecType.hevc : AVVideoCodecType.h264,
-            AVVideoWidthKey: Int(size.width),
-            AVVideoHeightKey: Int(size.height),
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: Int(videoBitrate),
-                AVVideoExpectedSourceFrameRateKey: Int(fps),
-                AVVideoMaxKeyFrameIntervalKey: Int(fps) * 2,
-                AVVideoProfileLevelKey: hevc ? (kVTProfileLevel_HEVC_Main_AutoLevel as String) : AVVideoProfileLevelH264HighAutoLevel,
-            ],
-            AVVideoColorPropertiesKey: [
-                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
-                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
-                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
-            ],
-        ])
-        videoInput.expectsMediaDataInRealTime = false
-        guard reader.canAdd(videoOutput), writer.canAdd(videoInput) else { throw Failure.failed }
+        guard reader.canAdd(videoOutput) else { throw Failure.failed }
         reader.add(videoOutput)
-        writer.add(videoInput)
-        var pairs = [TrackPair(readerOutput: videoOutput, input: videoInput)]
+        let sound = audio.isEmpty ? nil : Self.audioPair(audio, bitrate: audioBitrate)
+        if let sound {
+            guard reader.canAdd(sound.readerOutput) else { throw Failure.failed }
+            reader.add(sound.readerOutput)
+        }
 
-        if !audio.isEmpty {
-            let sound = Self.audioPair(audio, bitrate: audioBitrate)
-            if reader.canAdd(sound.readerOutput), writer.canAdd(sound.input) {
-                reader.add(sound.readerOutput)
-                writer.add(sound.input)
-                pairs.append(sound)
+        let session = try Self.compressionSession(size: size, fps: fps, bitrate: videoBitrate)
+        defer { VTCompressionSessionInvalidate(session) }
+        let frames = SampleBufferList()
+        let audioFrames = SampleBufferList()
+        let reading = ActiveMedia(reader: reader, writer: nil)
+        guard state.withLock({ state in
+            guard !state.isCancelled else { return false }
+            state.activeMedia = reading
+            return true
+        }) else { throw CancellationError() }
+        defer { state.withLock { $0.activeMedia = nil } }
+        let origin = CMTime(seconds: clip?.lowerBound ?? 0, preferredTimescale: 600)
+        if let clip {
+            reader.timeRange = CMTimeRange(start: origin, duration: CMTime(seconds: clip.upperBound - clip.lowerBound,
+                                                                           preferredTimescale: 600))
+        }
+        guard reader.startReading() else { throw Failure.failed }
+
+        // Sound is pulled alongside the picture. Leaving it queued stalls the reader on a long clip.
+        let audioGroup = DispatchGroup()
+        if let audioOutput = sound?.readerOutput {
+            audioGroup.enter()
+            let pump = OutputPump(output: audioOutput, frames: audioFrames, state: state, origin: origin)
+            DispatchQueue.global(qos: .userInitiated).async {
+                pump.run()
+                audioGroup.leave()
             }
         }
-        return try await run(reader: reader, writer: writer, output: output, pairs: pairs, duration: duration, progress: progress)
+
+        let frameDuration = CMTime(value: 1, timescale: fps)
+        var encodeFailed = false
+        while !cancelled {
+            guard let sample = videoOutput.copyNextSampleBuffer() else { break }
+            guard let image = CMSampleBufferGetImageBuffer(sample) else { continue }
+            let raw = CMSampleBufferGetPresentationTimeStamp(sample)
+            let pts = Self.shiftedTime(raw, from: origin)
+            if duration > 0 { progress(min(0.9, max(0, pts.seconds / duration))) }
+            var sampleDuration = CMSampleBufferGetDuration(sample)
+            if !sampleDuration.isValid || sampleDuration.isIndefinite { sampleDuration = frameDuration }
+            let status = VTCompressionSessionEncodeFrame(
+                session, imageBuffer: image, presentationTimeStamp: pts, duration: sampleDuration,
+                frameProperties: nil, infoFlagsOut: nil, outputHandler: { status, _, compressed in
+                    if status != noErr {
+                        frames.fail(status)
+                        return
+                    }
+                    if let compressed { frames.add(compressed) }
+                })
+            if status != noErr {
+                encodeFailed = true
+                break
+            }
+        }
+        if cancelled || encodeFailed { reader.cancelReading() }
+        let complete = cancelled || encodeFailed
+            ? noErr
+            : VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
+        await Self.wait(audioGroup)
+        if cancelled { throw CancellationError() }
+        guard !encodeFailed, complete == noErr, frames.status == noErr, !frames.samples.isEmpty,
+              reader.status == .completed else { throw Failure.failed }
+        return try await mux(reader: reader, video: frames.samples, audio: audioFrames.samples, audioInput: sound?.input,
+                             progress: progress)
+    }
+
+    /// Puts the already-capped H.264 pictures, and AAC for the sound, into the same fragmented MP4 as a remux.
+    private func mux(reader: AVAssetReader, video: [CMSampleBuffer], audio: [CMSampleBuffer], audioInput: AVAssetWriterInput?,
+                     progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
+        guard let hint = CMSampleBufferGetFormatDescription(video[0]) else { throw Failure.failed }
+        let collected = MemoryOutput()
+        let writer = makeWriter(collected)
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: nil, sourceFormatHint: hint)
+        videoInput.expectsMediaDataInRealTime = false
+        guard writer.canAdd(videoInput) else { throw Failure.failed }
+        writer.add(videoInput)
+        let includeAudio = !audio.isEmpty
+        if includeAudio, let audioInput {
+            guard writer.canAdd(audioInput) else { throw Failure.failed }
+            writer.add(audioInput)
+        }
+        let writing = ActiveMedia(reader: reader, writer: writer)
+        guard state.withLock({ state -> Bool in
+            guard !state.isCancelled else { return false }
+            state.activeMedia = writing
+            return true
+        }) else { throw CancellationError() }
+        guard writer.startWriting() else { throw Failure.failed }
+        writer.startSession(atSourceTime: .zero)
+
+        let group = DispatchGroup()
+        let failed = OSAllocatedUnfairLock(initialState: false)
+        let state = self.state
+        func feed(_ input: AVAssetWriterInput, _ samples: [CMSampleBuffer], report: Bool) {
+            let queue = DispatchQueue(label: report ? "duhcord.video.mux" : "duhcord.video.mux-audio", qos: .userInitiated)
+            group.enter()
+            let pump = InputPump(input: input, samples: samples, report: report, progress: progress, state: state, failed: failed)
+            input.requestMediaDataWhenReady(on: queue) { pump.step { group.leave() } }
+        }
+        feed(videoInput, video, report: true)
+        if includeAudio, let audioInput { feed(audioInput, audio, report: false) }
+        await Self.wait(group)
+        if cancelled {
+            writer.cancelWriting()
+            throw CancellationError()
+        }
+        if failed.withLock({ $0 }) {
+            writer.cancelWriting()
+            throw Failure.failed
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            writer.finishWriting { continuation.resume() }
+        }
+        guard writer.status == .completed else { throw Failure.failed }
+        progress(1)
+        return collected.collected
+    }
+
+    private static func wait(_ group: DispatchGroup) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            group.notify(queue: .global()) { continuation.resume() }
+        }
     }
 
     /// The sound mixed down and encoded as AAC; mono at the lowest bitrates.
     private static func audioPair(_ tracks: [AVAssetTrack], bitrate: Double) -> TrackPair {
-        let channels = bitrate <= 48_000 ? 1 : 2
+        let channels = bitrate <= VideoEncode.minAudioBitrate ? 1 : 2
         let output = AVAssetReaderAudioMixOutput(audioTracks: tracks, audioSettings: [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: 44_100,

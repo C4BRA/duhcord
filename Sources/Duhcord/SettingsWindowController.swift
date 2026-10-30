@@ -221,7 +221,7 @@ final class SettingsWindowController: NSWindowController {
             + "personalisation, screen reader tracking, game and platform account detection, contact and phone number "
             + "matching, and marketing emails. Applied once per account; change them back in Discord's app if you like."
         compressVideos.toolTip = "Videos are re-encoded with the Mac's hardware encoder so they fit Discord's upload limit "
-            + "for your account (10 MB without Nitro). One that already fits is sent at its own quality. Either way, its "
+            + "for your account (20 MB without Nitro). One that already fits is sent at its own quality. Either way, its "
             + "location and other details are left out."
         [sound, dockBadge, compact, checkForUpdates, sendTyping, limitData, compressVideos].forEach {
             $0.target = self

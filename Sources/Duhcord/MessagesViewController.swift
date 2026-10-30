@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import DuhcordCore
 import UniformTypeIdentifiers
 
@@ -373,6 +374,11 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     /// message can carry).
     private func attach(_ sources: [ImagePrep.Source]) {
         guard canAttachImages, !isUploading, !sources.isEmpty else { return }
+        // A video waiting to be split fills the message on its own.
+        if attached.contains(where: { $0.sourceURL != nil }) {
+            NSSound.beep()
+            return
+        }
         let room = PrivateMessaging.maxFiles - attached.count - preparing
         if sources.count > room { NSSound.beep() }
         for source in sources.prefix(max(0, room)) {
@@ -393,9 +399,15 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 let prep = VideoPrep()
                 jobs[id] = Job(progress: 0, video: prep)
                 // Room left in the message, and in Private, for the padding encryption adds (up to 12%).
+                // A private video on its own is sized to one Discord file. If it can't fit, it is split when sent.
                 let used = attached.reduce(0) { $0 + $1.data.count }
+                let alone = isPrivate && attached.isEmpty && jobs.count == 1
+                let premium = store.premiumType
                 var limit = store.uploadLimit - used
-                if isPrivate { limit = min(Int(Double(limit) / 1.13), PrivateMessaging.maxFileBytes) }
+                if isPrivate {
+                    limit = alone ? UploadLimit.privatePiecePlaintext(premiumType: premium)
+                        : min(Int(Double(limit) / 1.13), PrivateMessaging.maxFileBytes)
+                }
                 let options = VideoPrep.Options(limit: limit, compress: Settings.compressVideos, forPrivate: isPrivate)
                 let owner = WeakReference(self)
                 Task.detached(priority: .userInitiated) {
@@ -407,6 +419,13 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                         await MainActor.run { owner.object?.finishJob(id, result.value, failure: nil, name: name) }
                     } catch is CancellationError {
                         await MainActor.run { owner.object?.finishJob(id, nil, failure: nil, name: name) }
+                    } catch VideoPrep.Failure.tooLong where alone {
+                        let seconds = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0
+                        let icon = NSImage(systemSymbolName: "film", accessibilityDescription: "Video") ?? NSImage()
+                        let placeholder = PreparedAttachment(data: Data(), width: 16, height: 9, kind: .mp4,
+                                                            thumbnail: icon, name: name, duration: seconds, sourceURL: url)
+                        let result = Handoff(value: placeholder)
+                        await MainActor.run { owner.object?.finishJob(id, result.value, failure: nil, name: name) }
                     } catch {
                         let message = error.localizedDescription
                         await MainActor.run { owner.object?.finishJob(id, nil, failure: message, name: name) }
@@ -427,14 +446,20 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private func finishJob(_ id: UUID, _ prepared: PreparedAttachment?, failure: String?, name: String) {
         guard jobs.removeValue(forKey: id) != nil else { return }
         jobOrder.removeAll { $0 == id }
+        var rejectedSplit = false
         if let prepared {
-            attached.append(prepared)
+            if prepared.sourceURL != nil, !attached.isEmpty || !jobs.isEmpty {
+                rejectedSplit = true
+                showSendError("Couldn't attach “\(name)”", detail: "A video that has to be split is sent on its own.")
+            } else {
+                attached.append(prepared)
+            }
         } else if let failure {
             showSendError("Couldn't attach “\(name)”", detail: failure)
         }
         refreshTray()
         // Return was pressed meanwhile: now everything's ready, send what's in the box.
-        if preparing == 0, sendWhenReady {
+        if preparing == 0, sendWhenReady, !rejectedSplit {
             sendWhenReady = false
             send(input.text.trimmingCharacters(in: .whitespacesAndNewlines))
         }
@@ -589,6 +614,14 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private func sendWithImages(_ text: String, in channelID: Snowflake) {
         guard let key = draftKey else { return }
         let images = attached
+        if key.isPrivate, images.contains(where: { $0.sourceURL != nil }) {
+            guard images.count == 1, let url = images[0].sourceURL, #available(macOS 14, *) else {
+                showSendError("Private message not sent", detail: "A video that has to be split is sent on its own.")
+                return
+            }
+            sendFilm(url, caption: text, placeholder: images[0], in: channelID, key: key)
+            return
+        }
         let content: String
         let files: [UploadFile]
         do {
@@ -597,12 +630,18 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 let sealed = try images.map { try PrivateCrypto.sealFile($0.data, width: $0.width, height: $0.height, kind: $0.kind) }
                 files = sealed.map { UploadFile(name: PrivateMessaging.fileName, data: $0.sealed, contentType: "application/octet-stream") }
                 content = try privateChat.seal(text, files: sealed.map(\.file), in: channelID)
+                // Each sealed file has to fit Discord's cap for one attachment. Together they stay in memory.
+                let perFile = UploadLimit.discordLimit(premiumType: store.premiumType)
+                guard files.allSatisfy({ $0.data.count <= perFile }),
+                      files.reduce(0, { $0 + $1.data.count }) <= UploadLimit.duhcordCap else {
+                    throw PrivateMessagingError.filesTooLarge
+                }
             } else {
                 files = images.map(\.upload)
                 content = text
-            }
-            guard files.reduce(0, { $0 + $1.data.count }) <= store.uploadLimit else {
-                throw PrivateMessagingError.filesTooLarge
+                guard files.reduce(0, { $0 + $1.data.count }) <= store.uploadLimit else {
+                    throw PrivateMessagingError.filesTooLarge
+                }
             }
         } catch {
             showSendError(key.isPrivate ? "Private message not sent" : "Message not sent", detail: error.localizedDescription)
@@ -624,6 +663,123 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             self.refreshTray()
             guard let error else { return }
             self.reportUnsent(text, images: [], to: key, error: error)
+        }
+    }
+
+    /// Encodes a private video into sealed pieces and sends them, four to a message. A film that fits in one
+    /// piece is an ordinary private video. Each further message waits a second after the previous one was
+    /// accepted. Anything already sent is left in the channel if a later piece fails.
+    @available(macOS 14, *)
+    private func sendFilm(_ url: URL, caption: String, placeholder: PreparedAttachment,
+                          in channelID: Snowflake, key: DraftKey) {
+        let limit = UploadLimit.privatePiecePlaintext(premiumType: store.premiumType)
+        let options = VideoPrep.Options(limit: limit, compress: true, forPrivate: true)
+        let prep = VideoPrep()
+        let jobID = UUID()
+        jobOrder.append(jobID)
+        jobs[jobID] = Job(progress: 0, video: prep)
+        let held = Handoff(value: placeholder)
+        input.text = ""
+        attached = []
+        uploading.insert(key)
+        refreshInput()
+        refreshTray()
+        let filmID = PrivateFilmNote.newID()
+        let filmName = placeholder.name
+        let owner = WeakReference(self)
+        Task.detached(priority: .userInitiated) {
+            var pending: [PreparedAttachment] = []
+            var nextIndex = 0
+            var sentAny = false
+            func ship(_ items: inout [PreparedAttachment], moreComing: Bool) async throws {
+                if sentAny {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                    if prep.isCancelled { throw CancellationError() }
+                    guard let rest = await MainActor.run(body: { owner.object?.session.rest }) else {
+                        throw CancellationError()
+                    }
+                    try await rest.waitForMessageSlot(in: channelID)
+                    if prep.isCancelled { throw CancellationError() }
+                }
+                let index = nextIndex
+                let count = items.count
+                nextIndex += count
+                // Seal first and drop the plaintext, so the upload holds only the ciphertext.
+                let sealed = try items.map {
+                    try PrivateCrypto.sealFile($0.data, width: $0.width, height: $0.height, kind: $0.kind)
+                }
+                items = []
+                let uploads = sealed.map {
+                    UploadFile(name: PrivateMessaging.fileName, data: $0.sealed, contentType: "application/octet-stream")
+                }
+                let perFile = await MainActor.run { UploadLimit.discordLimit(premiumType: owner.object?.store.premiumType) }
+                guard uploads.allSatisfy({ $0.data.count <= perFile }),
+                      uploads.reduce(0, { $0 + $1.data.count }) <= UploadLimit.duhcordCap else {
+                    throw PrivateMessagingError.filesTooLarge
+                }
+                let single = count == 1 && !sentAny && !moreComing
+                let body = single ? caption
+                    : PrivateFilmNote.text(caption: sentAny ? "" : caption, film: PrivateFilm(id: filmID, start: index))
+                let content = try await MainActor.run { () -> String in
+                    guard let chat = owner.object?.privateChat else { throw CancellationError() }
+                    return try chat.seal(body, files: sealed.map(\.file), in: channelID)
+                }
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    Task { @MainActor in
+                        guard let session = owner.object?.session else {
+                            continuation.resume(throwing: CancellationError())
+                            return
+                        }
+                        session.send(content, files: uploads, to: channelID) { error in
+                            if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+                        }
+                    }
+                }
+                sentAny = true
+            }
+            do {
+                try await prep.preparePieces(url, name: filmName, options: options) { fraction in
+                    DispatchQueue.main.async { owner.object?.updateJob(jobID, progress: fraction) }
+                } piece: { made in
+                    pending.append(made)
+                    if pending.count == PrivateMessaging.maxFiles {
+                        var items = pending
+                        pending = []
+                        try await ship(&items, moreComing: true)
+                    }
+                }
+                if !pending.isEmpty { try await ship(&pending, moreComing: false) }
+                await MainActor.run {
+                    guard let self = owner.object else { return }
+                    self.jobs.removeValue(forKey: jobID)
+                    self.jobOrder.removeAll { $0 == jobID }
+                    self.uploading.remove(key)
+                    self.refreshInput()
+                    self.refreshTray()
+                }
+            } catch {
+                let sent = sentAny
+                await MainActor.run {
+                    guard let self = owner.object else { return }
+                    self.jobs.removeValue(forKey: jobID)
+                    self.jobOrder.removeAll { $0 == jobID }
+                    prep.cancel()
+                    self.uploading.remove(key)
+                    self.refreshInput()
+                    self.refreshTray()
+                    if sent {
+                        guard !(error is CancellationError) else {
+                            self.showSendError("The rest of the video didn't send", detail: "Sending stopped.")
+                            return
+                        }
+                        self.showSendError("The rest of the video didn't send", detail: error.localizedDescription)
+                    } else if error is CancellationError {
+                        _ = self.restoreUnsent(caption, images: [held.value], to: key)
+                    } else {
+                        self.reportUnsent(caption, images: [held.value], to: key, error: error)
+                    }
+                }
+            }
         }
     }
 
@@ -1182,8 +1338,12 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = tableView.makeView(withIdentifier: MessageCell.identifier, owner: nil) as? MessageCell ?? MessageCell()
         let cached = layout(for: rows[row])
-        cell.configure(cached.layout, header: cached.header)
         let message = rows[row].message
+        cell.filmResolver = { [weak self] video in
+            guard let self, let chat = self.privateChat else { return [] }
+            return chat.playbackQueue(forFilmOf: video, in: message.channelId)
+        }
+        cell.configure(cached.layout, header: cached.header)
         cell.setAccessibilityLabel(spokenText(for: message))
         cell.authorNameWidth = row < rows.count && !rows[row].grouped
             ? ceil((message.author.displayName as NSString).size(withAttributes: [.font: Theme.messageBoldFont]).width) : 0
@@ -1239,6 +1399,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         var choices: [(title: String, index: Int)] = []
         if isEncrypted {
             guard isPrivate, let privateChat else { return [] }
+            // A split video is one film. Deleting the message is how a part comes out.
+            if privateChat.isFilm(message) { return [] }
             let images = privateChat.images(of: message).filter { $0.attachment != nil }
             choices = images.map { ("Image \($0.index + 1)", $0.index) }
         } else {
@@ -1385,6 +1547,8 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
     private let bodyView = NSTextView()
     /// The author's picture or name was clicked; the rect is what was clicked, in this cell.
     var onAuthorClicked: ((NSRect) -> Void)?
+    /// Rebuilds a private film from the messages loaded now, for the video view in this row.
+    var filmResolver: ((PrivateImage) -> [PrivateImage])?
     /// The message's own items for the right-click menu.
     var contextItems: (() -> [NSMenuItem])?
     /// How much of the header line is the author's name, which opens their profile like the picture does.
@@ -1453,6 +1617,7 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
             if i < layout.media.count {
                 view.isHidden = false
                 view.frame = layout.media[i].frame
+                view.filmResolver = filmResolver
                 view.configure(layout.media[i])
             } else {
                 view.cancel()
@@ -1513,6 +1678,7 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
         super.prepareForReuse()
         cancelMedia()
         onAuthorClicked = nil
+        filmResolver = nil
         contextItems = nil
     }
 

@@ -34,7 +34,7 @@ public enum PrivateMessaging {
     public static let maxFiles = 4
     /// Discord's upload limit without Nitro, less room for the rest of the request: what images are sized for, so
     /// four of them fit whatever the account.
-    public static let maxUploadBytes = 10 * 1024 * 1024 - 64 * 1024
+    public static let maxUploadBytes = 20 * 1024 * 1024 - 64 * 1024
     /// One encrypted file at most. It's decrypted in memory, so it's capped whatever the account could upload.
     public static let maxFileBytes = 50 * 1024 * 1024
     /// What an encrypted image is called on Discord. It says nothing about what's inside.
@@ -80,6 +80,24 @@ public enum PrivateMessaging {
 
     /// The attachment's size for an image of `length` bytes: padded, plus the tag.
     static func sealedLength(forFileOf length: Int) -> Int { padme(length) + 16 }
+
+    /// The most plaintext whose padded, tagged attachment still fits in `budget` bytes, and in what we will decrypt.
+    public static func largestPlaintext(sealingWithin budget: Int) -> Int {
+        guard budget > 16 else { return 0 }
+        var low = 0
+        var high = min(maxFileBytes, budget - 16)
+        var best = 0
+        while low <= high {
+            let mid = (low + high) / 2
+            if sealedLength(forFileOf: mid) <= budget {
+                best = mid
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return best
+    }
 
     /// Padmé: rounds a length up so only about log log of it shows, at most 12% larger.
     static func padme(_ length: Int) -> Int {
@@ -187,6 +205,66 @@ public struct PrivateFile: Equatable, Sendable {
                   width: number(40..<42), height: number(42..<44), kind: kind)
         guard width > 0, height > 0, length <= PrivateMessaging.maxFileBytes,
               sealedLength == PrivateMessaging.sealedLength(forFileOf: length) else { return nil }
+    }
+}
+
+/// One stretch of a private video that was split so each attachment stays under Discord's file cap.
+/// The id and the index sit in the encrypted message, so they are authenticated with the text and the file keys.
+public struct PrivateFilm: Equatable, Sendable {
+    /// 16 random bytes, shared by every message of this film and by no other.
+    public var id: Data
+    /// The index of this message's first piece. The next piece is the next attachment.
+    public var start: Int
+
+    public init(id: Data, start: Int) {
+        self.id = id
+        self.start = start
+    }
+}
+
+/// The line a split video puts in front of its caption. It is inside the encrypted body, never in the clear.
+public enum PrivateFilmNote {
+    static let mark = "\u{1E}film/"
+
+    /// Whether `text` starts with a film note, well formed or not. A broken one is rejected, not shown.
+    public static func begins(_ text: String) -> Bool { text.hasPrefix(mark) }
+
+    public static func newID() -> Data {
+        SymmetricKey(size: SymmetricKeySize(bitCount: 128)).withUnsafeBytes { Data($0) }
+    }
+
+    public static func text(caption: String, film: PrivateFilm) -> String {
+        mark + film.id.map { String(format: "%02x", $0) }.joined() + "/\(film.start)\n" + caption
+    }
+
+    /// Nil unless `text` begins with a well-formed note. Anything else is left for the caller to reject.
+    public static func parse(_ text: String) -> (film: PrivateFilm, caption: String)? {
+        guard text.hasPrefix(mark) else { return nil }
+        let body = text.dropFirst(mark.count)
+        guard let slash = body.firstIndex(of: "/"),
+              let newline = body[body.index(after: slash)...].firstIndex(of: "\n") else { return nil }
+        let hex = body[..<slash]
+        let startText = body[body.index(after: slash)..<newline]
+        guard hex.count == 32, hex.allSatisfy(isHex), startText.allSatisfy(isDigit),
+              let start = Int(startText), (0...100_000).contains(start) else { return nil }
+        var id = Data()
+        var cursor = hex.startIndex
+        while cursor < hex.endIndex {
+            let next = hex.index(cursor, offsetBy: 2)
+            guard let byte = UInt8(hex[cursor..<next], radix: 16) else { return nil }
+            id.append(byte)
+            cursor = next
+        }
+        guard id.count == 16 else { return nil }
+        return (PrivateFilm(id: id, start: start), String(body[body.index(after: newline)...]))
+    }
+
+    private static func isDigit(_ character: Character) -> Bool {
+        character.isASCII && character.isNumber
+    }
+
+    private static func isHex(_ character: Character) -> Bool {
+        isDigit(character) || ("a"..."f").contains(character)
     }
 }
 

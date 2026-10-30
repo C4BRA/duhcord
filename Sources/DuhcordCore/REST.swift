@@ -159,7 +159,17 @@ public actor RESTClient {
 
     // MARK: - Plumbing
 
-    private struct RateLimited: Decodable { let retryAfter: Double }
+    private struct RateLimited: Decodable {
+        let retryAfter: Double
+        let global: Bool?
+    }
+    /// How many message sends this channel may still make, and when that count resets.
+    private struct MessageSlot {
+        var remaining: Int
+        var resetAt: Date
+    }
+    private var messageSlots: [Snowflake: MessageSlot] = [:]
+    private var globalResetAt: Date?
     private struct ErrorBody: Decodable {
         let message: String?
         let captchaKey: [String]?
@@ -186,6 +196,7 @@ public actor RESTClient {
 
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else { throw RESTError.invalidResponse }
+        if method == "POST" { rememberMessageSlot(http, path: path, body: data) }
 
         switch http.statusCode {
         case 200..<300:
@@ -204,6 +215,33 @@ public actor RESTClient {
             let body = try? decoder.decode(ErrorBody.self, from: data)
             if body?.captchaKey != nil { throw RESTError.captchaRequired }
             throw RESTError.http(status: http.statusCode, message: body?.message)
+        }
+    }
+
+    /// Waits out a message bucket that is already empty, and a global limit, before another send.
+    public func waitForMessageSlot(in channelID: Snowflake) async throws {
+        let channelWait = messageSlots[channelID].map { slot -> TimeInterval in
+            guard slot.remaining <= 0 else { return 0 }
+            return slot.resetAt.timeIntervalSinceNow
+        } ?? 0
+        let globalWait = globalResetAt?.timeIntervalSinceNow ?? 0
+        let wait = min(max(channelWait, globalWait, 0), 60)
+        guard wait > 0 else { return }
+        try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+    }
+
+    /// Discord's remaining-budget headers for POST /channels/{id}/messages. Other routes are left alone.
+    private func rememberMessageSlot(_ http: HTTPURLResponse, path: String, body: Data) {
+        let parts = path.split(separator: "/").map(String.init)
+        let now = Date()
+        if parts.count == 3, parts[0] == "channels", parts[2] == "messages",
+           let remaining = http.value(forHTTPHeaderField: "X-RateLimit-Remaining").flatMap(Int.init),
+           let resetAfter = http.value(forHTTPHeaderField: "X-RateLimit-Reset-After").flatMap(Double.init) {
+            messageSlots[parts[1]] = MessageSlot(remaining: remaining, resetAt: now.addingTimeInterval(resetAfter))
+        }
+        let limited = try? decoder.decode(RateLimited.self, from: body)
+        if limited?.global == true, let retry = limited?.retryAfter {
+            globalResetAt = now.addingTimeInterval(retry)
         }
     }
 }
