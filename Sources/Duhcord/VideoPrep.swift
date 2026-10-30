@@ -55,6 +55,8 @@ final class VideoPrep: @unchecked Sendable {
     private struct ActiveMedia: @unchecked Sendable {
         let reader: AVAssetReader
         let writer: AVAssetWriter?
+        /// A clip reads its sound with a second reader. One reader drops it.
+        var audioReader: AVAssetReader? = nil
     }
 
     private struct State: Sendable {
@@ -72,6 +74,7 @@ final class VideoPrep: @unchecked Sendable {
             return state.activeMedia
         }
         activeMedia?.reader.cancelReading()
+        activeMedia?.audioReader?.cancelReading()
         activeMedia?.writer?.cancelWriting()
     }
 
@@ -97,9 +100,9 @@ final class VideoPrep: @unchecked Sendable {
         let thumbnail = await Self.thumbnail(asset)
         let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? .max
 
-        func finish(_ data: Data, size: CGSize) -> PreparedAttachment {
+        func finish(_ data: Data, size: CGSize, length: Double) -> PreparedAttachment {
             PreparedAttachment(data: data, width: Int(size.width), height: Int(size.height), kind: .mp4,
-                               thumbnail: thumbnail, name: name, duration: duration)
+                               thumbnail: thumbnail, name: name, duration: length)
         }
 
         // Already small enough, in a format the recipients can play: only repackaged. A clip has to be encoded.
@@ -108,7 +111,7 @@ final class VideoPrep: @unchecked Sendable {
         if clip == nil, playable, fileSize <= options.limit || !options.compress,
            let data = try? await remux(asset, video: video, audio: audio, transform: transform, progress: progress),
            data.count <= options.limit {
-            return finish(data, size: display)
+            return finish(data, size: display, length: duration)
         }
         guard options.compress else {
             if cancelled { throw CancellationError() }
@@ -141,8 +144,10 @@ final class VideoPrep: @unchecked Sendable {
                     guard Self.durationMatches(played, span: duration) else {
                         throw Failure.tooLong(maxMinutes: max(1, Int(duration / 60)))
                     }
+                    // The bar uses this length, so it is what the file actually plays, not the slice that was asked for.
+                    return finish(data, size: size, length: played)
                 }
-                return finish(data, size: size)
+                return finish(data, size: size, length: duration)
             }
             videoBitrate *= Double(options.limit) * Self.headroom / Double(data.count)
             guard videoBitrate >= VideoEncode.minVideoBitrate else { break }
@@ -495,17 +500,27 @@ final class VideoPrep: @unchecked Sendable {
         videoOutput.alwaysCopiesSampleData = false
         guard reader.canAdd(videoOutput) else { throw Failure.failed }
         reader.add(videoOutput)
-        let sound = audio.isEmpty ? nil : Self.audioReader(audio, bitrate: audioBitrate)
-        if let sound {
-            guard reader.canAdd(sound) else { throw Failure.failed }
-            reader.add(sound)
+        // The sound has its own reader. Sharing one stalls a long clip, and pulling both outputs at once
+        // comes back with no sound while the picture still finishes.
+        let soundOutput: AVAssetReaderAudioMixOutput?
+        let soundReader: AVAssetReader?
+        if audio.isEmpty {
+            soundOutput = nil
+            soundReader = nil
+        } else {
+            let extra = try AVAssetReader(asset: asset)
+            let output = Self.audioReader(audio, bitrate: audioBitrate)
+            guard extra.canAdd(output) else { throw Failure.failed }
+            extra.add(output)
+            soundOutput = output
+            soundReader = extra
         }
 
         let session = try Self.compressionSession(size: size, fps: fps, bitrate: videoBitrate)
         defer { VTCompressionSessionInvalidate(session) }
         let frames = SampleBufferList()
         let audioFrames = SampleBufferList()
-        let reading = ActiveMedia(reader: reader, writer: nil)
+        let reading = ActiveMedia(reader: reader, writer: nil, audioReader: soundReader)
         guard state.withLock({ state in
             guard !state.isCancelled else { return false }
             state.activeMedia = reading
@@ -514,14 +529,18 @@ final class VideoPrep: @unchecked Sendable {
         defer { state.withLock { $0.activeMedia = nil } }
         let origin = CMTime(seconds: clip?.lowerBound ?? 0, preferredTimescale: 600)
         if let clip {
-            reader.timeRange = CMTimeRange(start: origin, duration: CMTime(seconds: clip.upperBound - clip.lowerBound,
-                                                                           preferredTimescale: 600))
+            let range = CMTimeRange(start: origin, duration: CMTime(seconds: clip.upperBound - clip.lowerBound,
+                                                                    preferredTimescale: 600))
+            reader.timeRange = range
+            soundReader?.timeRange = range
+        }
+        if let soundReader {
+            guard soundReader.startReading() else { throw Failure.failed }
         }
         guard reader.startReading() else { throw Failure.failed }
 
-        // Sound is pulled alongside the picture. Leaving it queued stalls the reader on a long clip.
         let audioGroup = DispatchGroup()
-        if let audioOutput = sound {
+        if let audioOutput = soundOutput {
             audioGroup.enter()
             let pump = OutputPump(output: audioOutput, frames: audioFrames, state: state, origin: origin)
             DispatchQueue.global(qos: .userInitiated).async {
@@ -554,12 +573,18 @@ final class VideoPrep: @unchecked Sendable {
                 break
             }
         }
-        if cancelled || encodeFailed { reader.cancelReading() }
+        if cancelled || encodeFailed {
+            reader.cancelReading()
+            soundReader?.cancelReading()
+        }
         let complete = cancelled || encodeFailed
             ? noErr
             : VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
         await Self.wait(audioGroup)
         if cancelled { throw CancellationError() }
+        if let soundReader, soundReader.status != .completed || audioFrames.samples.isEmpty {
+            throw Failure.failed
+        }
         guard !encodeFailed, complete == noErr, frames.status == noErr, !frames.samples.isEmpty,
               reader.status == .completed else { throw Failure.failed }
         return try await mux(reader: reader, video: frames.samples, audio: audioFrames.samples,
@@ -633,6 +658,7 @@ final class VideoPrep: @unchecked Sendable {
     }
 
     /// The sound mixed down to PCM; mono at the lowest bitrates. AAC is made later, once the picture is already H.264.
+    /// The bytes are copied: a long clip holds them until the picture is finished, and an uncopied buffer is gone by then.
     private static func audioReader(_ tracks: [AVAssetTrack], bitrate: Double) -> AVAssetReaderAudioMixOutput {
         let channels = bitrate <= VideoEncode.minAudioBitrate ? 1 : 2
         let output = AVAssetReaderAudioMixOutput(audioTracks: tracks, audioSettings: [
@@ -644,7 +670,7 @@ final class VideoPrep: @unchecked Sendable {
             AVLinearPCMIsBigEndianKey: false,
             AVLinearPCMIsNonInterleaved: false,
         ])
-        output.alwaysCopiesSampleData = false
+        output.alwaysCopiesSampleData = true
         return output
     }
 

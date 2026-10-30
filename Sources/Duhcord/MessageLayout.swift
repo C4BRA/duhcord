@@ -264,6 +264,13 @@ private final class VideoControls: NSView {
     private var durationObserver: NSKeyValueObservation?
     private var scrubbing = false
     private var seekID = 0
+    /// Where this piece sits in a split video, how long the piece is, and how long the whole video is.
+    /// A total of zero means the bar is this file alone.
+    private var filmOrigin: Double = 0
+    private var pieceLength: Double = 0
+    private var filmTotal: Double = 0
+    /// Called with a time in the whole video when a drag ends outside this piece.
+    var onFilmSeek: ((Double) -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -336,6 +343,25 @@ private final class VideoControls: NSView {
         }
     }
 
+    /// The scrubber covers the whole film. `total` of zero leaves the bar on this file alone.
+    func bindFilm(origin: Double, piece: Double, total: Double) {
+        filmOrigin = origin
+        pieceLength = piece
+        filmTotal = total
+        guard total > 0 else { return }
+        duration.stringValue = Self.clock(total)
+        scrubber.maxValue = total
+        scrubber.isEnabled = true
+        guard !scrubbing else { return }
+        elapsed.stringValue = Self.clock(origin)
+        scrubber.doubleValue = origin
+    }
+
+    /// A jump to another piece landed, so the playhead may follow the picture again.
+    func releaseScrub() {
+        scrubbing = false
+    }
+
     func detach() {
         if let timeObserver { player?.removeTimeObserver(timeObserver) }
         timeObserver = nil
@@ -378,15 +404,16 @@ private final class VideoControls: NSView {
     }
 
     private func note(_ seconds: Double) {
-        if !scrubber.isEnabled { noteDuration(player?.currentItem?.duration.seconds ?? .nan) }
+        if filmTotal <= 0, !scrubber.isEnabled { noteDuration(player?.currentItem?.duration.seconds ?? .nan) }
         guard !scrubbing, seconds.isFinite, seconds >= 0 else { return }
-        elapsed.stringValue = Self.clock(seconds)
+        let shown = filmTotal > 0 ? filmOrigin + seconds : seconds
+        elapsed.stringValue = Self.clock(shown)
         guard scrubber.isEnabled else { return }
-        scrubber.doubleValue = min(scrubber.maxValue, seconds)
+        scrubber.doubleValue = min(scrubber.maxValue, shown)
     }
 
     private func noteDuration(_ seconds: Double) {
-        guard seconds.isFinite, seconds > 0 else { return }
+        guard filmTotal <= 0, seconds.isFinite, seconds > 0 else { return }
         duration.stringValue = Self.clock(seconds)
         scrubber.maxValue = seconds
         scrubber.isEnabled = true
@@ -423,12 +450,30 @@ private final class VideoControls: NSView {
     }
 
     private func seek(to seconds: Double, releaseWhenLanded: Bool) {
-        guard scrubber.isEnabled, let player else {
+        guard scrubber.isEnabled, player != nil else {
             scrubbing = false
             return
         }
         let seconds = min(max(0, seconds), scrubber.maxValue)
         elapsed.stringValue = Self.clock(seconds)
+        if filmTotal > 0 {
+            let local = seconds - filmOrigin
+            let inside = local >= -0.05 && local <= pieceLength + 0.05
+            if !inside {
+                if releaseWhenLanded { onFilmSeek?(seconds) }
+                return
+            }
+            seekPlayer(to: min(max(0, local), pieceLength), releaseWhenLanded: releaseWhenLanded)
+            return
+        }
+        seekPlayer(to: seconds, releaseWhenLanded: releaseWhenLanded)
+    }
+
+    private func seekPlayer(to seconds: Double, releaseWhenLanded: Bool) {
+        guard let player else {
+            scrubbing = false
+            return
+        }
         let time = CMTime(seconds: seconds, preferredTimescale: 600)
         let tolerance = CMTime(seconds: 0.25, preferredTimescale: 600)
         seekID += 1
@@ -516,9 +561,19 @@ final class MediaView: NSView, Playable {
     private var memoryLoader: MemoryAssetLoader?
     /// Waiting for a private video to download and decrypt.
     private var videoToken: PrivateImageLoader.Token?
+    /// The piece `videoToken` belongs to, so a seek can cancel that download.
+    private var loadingPiece: PrivateImage?
     /// A split private video: part 0, then each later piece, played one at a time. Empty for anything else.
     private var filmQueue: [PrivateImage] = []
     private var filmAt = 0
+    /// Bumps every time a piece is asked for, so a slow download can't start after a seek moved on.
+    private var playGeneration = 0
+    /// Where to start inside the piece that's about to play, when a drag landed past the current one.
+    private var pendingSeek: Double = 0
+    /// The next piece, decrypted while this one plays, so the join doesn't wait.
+    private var heldNext: (part: Int, data: Data)?
+    private var nextToken: PrivateImageLoader.Token?
+    private var nextPiece: PrivateImage?
     /// The part the row shows, so a callback from a later piece is dropped if the row was reused.
     private var filmAnchor: String?
     /// Rebuilds a film from the messages loaded now. Nil when this row has no film.
@@ -675,6 +730,7 @@ final class MediaView: NSView, Playable {
     }
 
     /// Decrypts the piece at `filmAt` and plays it. The previous piece's bytes are already released.
+    /// A player that's already up keeps its picture until the next piece is ready.
     private func playCurrentPart() {
         guard filmQueue.indices.contains(filmAt) else {
             stopPlayback()
@@ -686,39 +742,172 @@ final class MediaView: NSView, Playable {
             showFailure()
             return
         }
+        if let loadingPiece, let videoToken {
+            PrivateImageLoader.shared.cancel(videoToken, for: loadingPiece)
+        }
+        self.videoToken = nil
+        loadingPiece = nil
+        playGeneration += 1
+        let generation = playGeneration
+        if let held = heldNext, held.part == filmAt {
+            heldNext = nil
+            beginPiece(held.data, generation: generation, anchor: anchor)
+            return
+        }
         label.stringValue = filmQueue.count > 1 ? "Decrypting part \(filmAt + 1) of \(filmQueue.count)…" : "Decrypting…"
+        addSubview(label)
+        if let controls { addSubview(controls) }
         layoutLabel()
+        loadingPiece = video
         videoToken = PrivateImageLoader.shared.data(for: video) { [weak self] data in
-            guard let self, case .privateVideo(let current)? = self.item?.kind, current.cacheKey == anchor else { return }
+            guard let self, self.playGeneration == generation,
+                  case .privateVideo(let current)? = self.item?.kind, current.cacheKey == anchor else { return }
             self.videoToken = nil
+            self.loadingPiece = nil
             guard let data else {
                 self.showFailure()
                 return
             }
-            let loader = MemoryAssetLoader(data: data)
-            let asset = loader.makeAsset()
-            self.startPlayer(asset: asset, retaining: nil, looping: false, muted: false)
-            self.memoryLoader = loader
-            PlaybackCoordinator.shared.startVideo(self)
-            self.refreshOverlays()
-            guard self.filmAt == 0 else { return }
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = self.bounds.size.applying(CGAffineTransform(scaleX: 2, y: 2))
-            generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: .zero)]) { [weak self] _, image, _, _, _ in
-                guard let image else { return }
-                let still = Handoff(value: image)
-                Task { @MainActor [weak self] in
-                    guard let self, case .privateVideo(let current)? = self.item?.kind, current.cacheKey == anchor else { return }
-                    self.still = NSImage(cgImage: still.value, size: self.bounds.size)
-                    if !self.isPlaying { self.imageView.image = self.still }
+            self.beginPiece(data, generation: generation, anchor: anchor)
+        }
+    }
+
+    /// Where `index` starts in the film, when every piece recorded its length.
+    private func filmOffset(_ index: Int) -> Double {
+        filmQueue.prefix(index).reduce(0) { $0 + $1.filmSpan }
+    }
+
+    /// The whole film, or zero when a piece was sent before lengths were kept.
+    private var filmLength: Double {
+        guard filmQueue.count > 1, filmQueue.allSatisfy({ $0.filmSpan > 0.05 }) else { return 0 }
+        return filmQueue.reduce(0) { $0 + $1.filmSpan }
+    }
+
+    private func filmIndex(at time: Double) -> Int? {
+        guard filmLength > 0 else { return nil }
+        var cursor = 0.0
+        for (index, video) in filmQueue.enumerated() {
+            if time < cursor + video.filmSpan - 0.001 || index == filmQueue.count - 1 { return index }
+            cursor += video.filmSpan
+        }
+        return nil
+    }
+
+    private func wireFilmControls() {
+        let total = filmLength
+        let piece = filmQueue.indices.contains(filmAt) ? filmQueue[filmAt].filmSpan : 0
+        controls?.onFilmSeek = total > 0 ? { [weak self] time in self?.jumpFilm(to: time) } : nil
+        controls?.bindFilm(origin: filmOffset(filmAt), piece: piece, total: total)
+    }
+
+    /// Starts this piece's bytes. The first piece builds the player; a later one keeps it and moves the clock.
+    private func beginPiece(_ data: Data, generation: Int, anchor: String?) {
+        guard playGeneration == generation else { return }
+        let loader = MemoryAssetLoader(data: data)
+        let asset = loader.makeAsset()
+        memoryLoader = loader
+        let startAt = pendingSeek
+        pendingSeek = 0
+        if player == nil {
+            startPlayer(asset: asset, retaining: nil, looping: false, muted: false)
+        } else {
+            replacePiece(with: asset)
+        }
+        wireFilmControls()
+        PlaybackCoordinator.shared.startVideo(self)
+        if startAt > 0.25 {
+            let time = CMTime(seconds: startAt, preferredTimescale: 600)
+            let tolerance = CMTime(seconds: 0.25, preferredTimescale: 600)
+            player?.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, self.playGeneration == generation else { return }
+                    self.controls?.releaseScrub()
+                    self.player?.play()
+                    self.refreshOverlays()
                 }
+            }
+        } else {
+            controls?.releaseScrub()
+            player?.play()
+            refreshOverlays()
+        }
+        prefetchNext()
+        guard filmAt == 0 else { return }
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = bounds.size.applying(CGAffineTransform(scaleX: 2, y: 2))
+        generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: .zero)]) { [weak self] _, image, _, _, _ in
+            guard let image else { return }
+            let still = Handoff(value: image)
+            Task { @MainActor [weak self] in
+                guard let self, case .privateVideo(let current)? = self.item?.kind, current.cacheKey == anchor else { return }
+                self.still = NSImage(cgImage: still.value, size: self.bounds.size)
+                if !self.isPlaying { self.imageView.image = self.still }
             }
         }
     }
 
+    /// The next file, in the player that's already on screen, so the clock doesn't go back to the start.
+    private func replacePiece(with asset: AVAsset) {
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        endObserver = nil
+        let item = AVPlayerItem(asset: asset)
+        item.preferredForwardBufferDuration = 5
+        guard let player else { return }
+        player.replaceCurrentItem(with: item)
+        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.finishedPart() }
+        }
+        controls?.detach()
+        controls?.attach(player)
+        statusObservation = player.observe(\.currentItem?.status, options: [.new]) { [weak self] player, _ in
+            guard player.currentItem?.status == .failed else { return }
+            Task { @MainActor in self?.showFailure() }
+        }
+    }
+
+    /// A drag ended in another piece. That piece starts at the matching moment.
+    private func jumpFilm(to absolute: Double) {
+        guard let index = filmIndex(at: absolute), filmQueue.indices.contains(index) else {
+            controls?.releaseScrub()
+            return
+        }
+        if index == filmAt {
+            let local = absolute - filmOffset(index)
+            let time = CMTime(seconds: max(0, local), preferredTimescale: 600)
+            let tolerance = CMTime(seconds: 0.25, preferredTimescale: 600)
+            player?.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
+                Task { @MainActor in self?.controls?.releaseScrub() }
+            }
+            return
+        }
+        if filmQueue.indices.contains(filmAt) { PrivateImageLoader.shared.discard(filmQueue[filmAt]) }
+        filmAt = index
+        pendingSeek = max(0, absolute - filmOffset(index))
+        if heldNext?.part != index { heldNext = nil }
+        playCurrentPart()
+    }
+
+    /// Decrypts the following piece while this one plays.
+    private func prefetchNext() {
+        let next = filmAt + 1
+        guard filmQueue.indices.contains(next) else { return }
+        if heldNext?.part == next { return }
+        if let nextToken, let nextPiece {
+            PrivateImageLoader.shared.cancel(nextToken, for: nextPiece)
+        }
+        self.nextToken = nil
+        let video = filmQueue[next]
+        nextPiece = video
+        nextToken = PrivateImageLoader.shared.data(for: video) { [weak self] data in
+            guard let self, let data, self.filmAt + 1 == next else { return }
+            self.heldNext = (next, data)
+            self.nextToken = nil
+        }
+    }
+
     /// The piece ended. The chain is read again, so a piece that arrived while this one played can follow.
-    /// A missing index still stops playback.
+    /// A missing index still stops playback. The player stays up, so the clock keeps its place in the film.
     private func finishedPart() {
         let played = filmQueue.indices.contains(filmAt) ? filmQueue[filmAt] : nil
         if let played { PrivateImageLoader.shared.discard(played) }
@@ -733,7 +922,7 @@ final class MediaView: NSView, Playable {
         if fresh.indices.contains(next), fresh[next].attachment != nil {
             filmQueue = fresh
             filmAt = next
-            endPlayback(advancing: true)
+            pendingSeek = 0
             playCurrentPart()
         } else {
             stopPlayback()
@@ -794,7 +983,7 @@ final class MediaView: NSView, Playable {
     /// `advancing` keeps the film queue so the next piece can start. The piece that just played is released.
     private func endPlayback(advancing: Bool) {
         if let videoToken {
-            let video = filmQueue.indices.contains(filmAt) ? filmQueue[filmAt] : nil
+            let video = loadingPiece ?? (filmQueue.indices.contains(filmAt) ? filmQueue[filmAt] : nil)
             if let video {
                 PrivateImageLoader.shared.cancel(videoToken, for: video)
             } else if case .privateVideo(let video)? = item?.kind {
@@ -802,6 +991,14 @@ final class MediaView: NSView, Playable {
             }
             self.videoToken = nil
         }
+        loadingPiece = nil
+        if let nextToken, let nextPiece {
+            PrivateImageLoader.shared.cancel(nextToken, for: nextPiece)
+        }
+        nextToken = nil
+        nextPiece = nil
+        heldNext = nil
+        pendingSeek = 0
         animator?.cancel()
         animator = nil
         controls?.detach()

@@ -1303,6 +1303,12 @@ final class PrivateMessagingTests: XCTestCase {
         XCTAssertNil(PrivateFilmNote.parse(text.replacingOccurrences(of: "0a", with: "0A")))
         XCTAssertNil(PrivateFilmNote.parse(PrivateFilmNote.text(caption: "", film: PrivateFilm(id: film.id, start: -1))))
         XCTAssertEqual(PrivateFilmNote.newID().count, 16)
+        let timed = PrivateFilm(id: film.id, start: 0, spans: [841.565, 57.25])
+        let timedText = PrivateFilmNote.text(caption: "full", film: timed)
+        XCTAssertEqual(PrivateFilmNote.parse(timedText)?.film, timed)
+        XCTAssertEqual(PrivateFilmNote.parse(timedText)?.caption, "full")
+        XCTAssertNil(PrivateFilmNote.parse(timedText.replacingOccurrences(of: "841565", with: "0")))
+        XCTAssertEqual(PrivateFilmNote.parse(text)?.film.spans, [])
     }
 
     func testLargestPlaintextSealsInsideTheFileCap() {

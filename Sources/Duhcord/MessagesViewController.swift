@@ -689,9 +689,10 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         let owner = WeakReference(self)
         Task.detached(priority: .userInitiated) {
             var pending: [PreparedAttachment] = []
+            var pendingSpans: [Double] = []
             var nextIndex = 0
             var sentAny = false
-            func ship(_ items: inout [PreparedAttachment], moreComing: Bool) async throws {
+            func ship(_ items: inout [PreparedAttachment], spans: [Double], moreComing: Bool) async throws {
                 if sentAny {
                     try await Task.sleep(nanoseconds: 1_000_000_000)
                     if prep.isCancelled { throw CancellationError() }
@@ -719,7 +720,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 }
                 let single = count == 1 && !sentAny && !moreComing
                 let body = single ? caption
-                    : PrivateFilmNote.text(caption: sentAny ? "" : caption, film: PrivateFilm(id: filmID, start: index))
+                    : PrivateFilmNote.text(caption: sentAny ? "" : caption,
+                                           film: PrivateFilm(id: filmID, start: index, spans: spans))
                 let content = try await MainActor.run { () -> String in
                     guard let chat = owner.object?.privateChat else { throw CancellationError() }
                     return try chat.seal(body, files: sealed.map(\.file), in: channelID)
@@ -742,13 +744,16 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                     DispatchQueue.main.async { owner.object?.updateJob(jobID, progress: fraction) }
                 } piece: { made in
                     pending.append(made)
+                    pendingSpans.append(made.duration)
                     if pending.count == PrivateMessaging.maxFiles {
                         var items = pending
+                        let spans = pendingSpans
                         pending = []
-                        try await ship(&items, moreComing: true)
+                        pendingSpans = []
+                        try await ship(&items, spans: spans, moreComing: true)
                     }
                 }
-                if !pending.isEmpty { try await ship(&pending, moreComing: false) }
+                if !pending.isEmpty { try await ship(&pending, spans: pendingSpans, moreComing: false) }
                 await MainActor.run {
                     guard let self = owner.object else { return }
                     self.jobs.removeValue(forKey: jobID)

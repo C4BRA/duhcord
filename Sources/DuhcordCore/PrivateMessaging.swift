@@ -215,10 +215,13 @@ public struct PrivateFilm: Equatable, Sendable {
     public var id: Data
     /// The index of this message's first piece. The next piece is the next attachment.
     public var start: Int
+    /// How long each piece in this message plays, in seconds. Empty when a message was sent before lengths were kept.
+    public var spans: [Double]
 
-    public init(id: Data, start: Int) {
+    public init(id: Data, start: Int, spans: [Double] = []) {
         self.id = id
         self.start = start
+        self.spans = spans
     }
 }
 
@@ -234,19 +237,35 @@ public enum PrivateFilmNote {
     }
 
     public static func text(caption: String, film: PrivateFilm) -> String {
-        mark + film.id.map { String(format: "%02x", $0) }.joined() + "/\(film.start)\n" + caption
+        var head = mark + film.id.map { String(format: "%02x", $0) }.joined() + "/\(film.start)"
+        if !film.spans.isEmpty {
+            head += "/" + film.spans.map { String(Int(($0 * 1000).rounded())) }.joined(separator: ",")
+        }
+        return head + "\n" + caption
     }
 
     /// Nil unless `text` begins with a well-formed note. Anything else is left for the caller to reject.
+    /// A note from before piece lengths were kept has no third field, and still parses.
     public static func parse(_ text: String) -> (film: PrivateFilm, caption: String)? {
         guard text.hasPrefix(mark) else { return nil }
         let body = text.dropFirst(mark.count)
-        guard let slash = body.firstIndex(of: "/"),
-              let newline = body[body.index(after: slash)...].firstIndex(of: "\n") else { return nil }
-        let hex = body[..<slash]
-        let startText = body[body.index(after: slash)..<newline]
+        guard let newline = body.firstIndex(of: "\n") else { return nil }
+        let header = body[..<newline]
+        let fields = header.split(separator: "/", omittingEmptySubsequences: false)
+        guard fields.count == 2 || fields.count == 3 else { return nil }
+        let hex = fields[0]
+        let startText = fields[1]
         guard hex.count == 32, hex.allSatisfy(isHex), startText.allSatisfy(isDigit),
               let start = Int(startText), (0...100_000).contains(start) else { return nil }
+        var spans: [Double] = []
+        if fields.count == 3 {
+            let parts = fields[2].split(separator: ",", omittingEmptySubsequences: false)
+            guard (1...PrivateMessaging.maxFiles).contains(parts.count) else { return nil }
+            for part in parts {
+                guard part.allSatisfy(isDigit), let ms = Int(part), (1...86_400_000).contains(ms) else { return nil }
+                spans.append(Double(ms) / 1000)
+            }
+        }
         var id = Data()
         var cursor = hex.startIndex
         while cursor < hex.endIndex {
@@ -256,7 +275,7 @@ public enum PrivateFilmNote {
             cursor = next
         }
         guard id.count == 16 else { return nil }
-        return (PrivateFilm(id: id, start: start), String(body[body.index(after: newline)...]))
+        return (PrivateFilm(id: id, start: start, spans: spans), String(body[body.index(after: newline)...]))
     }
 
     private static func isDigit(_ character: Character) -> Bool {

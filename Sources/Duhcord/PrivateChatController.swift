@@ -506,9 +506,10 @@ final class PrivateChatController {
             // The attachment at the same position, if it's the size this image's attachment must be.
             let attachment = message.attachments.indices.contains(index) ? message.attachments[index] : nil
             let matches = attachment.map { $0.size == nil || $0.size == file.sealedLength } ?? false
+            let span: Double = film?.spans.count == opened.files.count ? (film?.spans[index] ?? 0) : 0
             return PrivateImage(messageID: message.id, index: index, file: file,
                                 attachment: matches ? attachment : nil, trusted: opened.trusted,
-                                filmID: film?.id, filmPart: (film?.start ?? 0) + index)
+                                filmID: film?.id, filmPart: (film?.start ?? 0) + index, filmSpan: span)
         }
         // Only the oldest message that holds piece 0 offers the rest, in order, and only while nothing is missing.
         if let film, film.start == 0, opened.trusted, images.first?.attachment != nil {
@@ -550,8 +551,9 @@ final class PrivateChatController {
                 guard file.kind.isVideo else { continue }
                 guard let attachment = message.attachments.indices.contains(offset) ? message.attachments[offset] : nil,
                       attachment.size == nil || attachment.size == file.sealedLength else { continue }
+                let span = part.spans.count == opened.files.count ? part.spans[offset] : 0
                 let image = PrivateImage(messageID: message.id, index: offset, file: file, attachment: attachment,
-                                         trusted: true, filmID: film, filmPart: index)
+                                         trusted: true, filmID: film, filmPart: index, filmSpan: span)
                 let snow = message.id.snowflakeValue
                 if let existing = chosen[index], existing.snowflake <= snow { continue }
                 chosen[index] = (snow, image)
@@ -650,6 +652,8 @@ struct PrivateImage: Sendable {
     var filmID: Data? = nil
     /// This piece's index in the film. The piece at 0 is the one the row plays.
     var filmPart: Int = 0
+    /// How long this piece plays, in seconds. Zero when the message was sent before lengths were kept.
+    var filmSpan: Double = 0
     /// The pieces after this one, with no gaps. Only the piece at 0 carries them.
     var follows: [PrivateImage] = []
 
