@@ -454,10 +454,11 @@ final class VideoPrep: @unchecked Sendable {
             }
         }
         var copy: CMSampleBuffer?
+        let timingCount = info.count
         let made = info.withUnsafeMutableBufferPointer { buffer -> OSStatus in
             guard let base = buffer.baseAddress else { return kCMSampleBufferError_RequiredParameterMissing }
             return CMSampleBufferCreateCopyWithNewTiming(allocator: nil, sampleBuffer: sample,
-                                                         sampleTimingEntryCount: info.count, sampleTimingArray: base,
+                                                         sampleTimingEntryCount: timingCount, sampleTimingArray: base,
                                                          sampleBufferOut: &copy)
         }
         guard made == noErr, let copy else { return sample }
