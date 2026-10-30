@@ -301,6 +301,7 @@ final class MemoryAssetLoader: NSObject, AVAssetResourceLoaderDelegate, @uncheck
     static let scheme = "duhcord-memory"
 
     private let data: Data
+    private let name = UUID().uuidString
     private let queue = DispatchQueue(label: "duhcord.memory-video")
 
     init(data: Data) {
@@ -309,7 +310,8 @@ final class MemoryAssetLoader: NSObject, AVAssetResourceLoaderDelegate, @uncheck
     }
 
     func makeAsset() -> AVURLAsset {
-        let asset = AVURLAsset(url: URL(string: "\(Self.scheme)://video/private.mp4")!)
+        // Each piece needs its own address. One shared address makes every piece the first file.
+        let asset = AVURLAsset(url: URL(string: "\(Self.scheme)://video/\(name).mp4")!)
         asset.resourceLoader.setDelegate(self, queue: queue)
         return asset
     }

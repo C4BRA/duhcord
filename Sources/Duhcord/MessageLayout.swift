@@ -523,6 +523,21 @@ private final class VideoControls: NSView {
 
 /// Reports the start and end of a drag, so the playhead isn't pulled back while it's being moved.
 @MainActor
+private enum FilmPlaybackError: Error {
+    case failed
+}
+
+/// Pieces of one film, filled as each download finishes. Touched only on the main actor.
+private final class FilmGather: @unchecked Sendable {
+    var slots: [Data?]
+    var left: Int
+
+    init(count: Int) {
+        slots = Array(repeating: nil, count: count)
+        left = count
+    }
+}
+
 private final class TrackingSlider: NSSlider {
     var tracking: ((Bool) -> Void)?
 
@@ -559,14 +574,26 @@ final class MediaView: NSView, Playable {
     private var loader: StreamingLoader?
     /// A decrypted private video being played from memory.
     private var memoryLoader: MemoryAssetLoader?
+    /// Every piece of a split film, kept until playback stops so the join never waits on a download.
+    private var filmLoaders: [MemoryAssetLoader] = []
+    /// The same pieces, in order, when they could not be joined into one item.
+    private var filmBytes: [Data] = []
     /// Waiting for a private video to download and decrypt.
     private var videoToken: PrivateImageLoader.Token?
     /// The piece `videoToken` belongs to, so a seek can cancel that download.
     private var loadingPiece: PrivateImage?
-    /// A split private video: part 0, then each later piece, played one at a time. Empty for anything else.
+    /// Downloads started for a whole film, so stopping can cancel each one.
+    private var filmDownloads: [(PrivateImageLoader.Token, PrivateImage)] = []
+    /// A split private video. Empty for anything else. One composition plays every piece; a failed join falls back to one piece at a time.
     private var filmQueue: [PrivateImage] = []
     private var filmAt = 0
-    /// Bumps every time a piece is asked for, so a slow download can't start after a seek moved on.
+    /// The pieces were loaded up front and joined into the player item now showing.
+    private var composedFilm = false
+    /// Joining the pieces failed, so they play one after another from `filmBytes`.
+    private var pieceByPiece = false
+    /// A whole-film download is in flight. A second click must not start another.
+    private var filmOpening = false
+    /// Bumps every time a piece is asked for, so a slow download can't start after a seek or a stop.
     private var playGeneration = 0
     /// Where to start inside the piece that's about to play, when a drag landed past the current one.
     private var pendingSeek: Double = 0
@@ -717,7 +744,7 @@ final class MediaView: NSView, Playable {
     /// Downloads and decrypts a private video (only from a trusted key), then plays it from memory. Its first
     /// frame stays as the still afterwards.
     private func startPrivateVideo(_ video: PrivateImage) {
-        guard video.trusted, video.attachment != nil, videoToken == nil else { return }
+        guard video.trusted, video.attachment != nil, videoToken == nil, !filmOpening else { return }
         if video.filmID != nil {
             guard let fresh = filmResolver?(video), fresh.first?.attachment != nil else { return }
             filmQueue = fresh
@@ -729,9 +756,13 @@ final class MediaView: NSView, Playable {
         playCurrentPart()
     }
 
-    /// Decrypts the piece at `filmAt` and plays it. The previous piece's bytes are already released.
+    /// Decrypts the piece at `filmAt` and plays it. A film of several pieces is decrypted in full first.
     /// A player that's already up keeps its picture until the next piece is ready.
     private func playCurrentPart() {
+        if filmQueue.count > 1, filmBytes.isEmpty, !pieceByPiece, !composedFilm, player == nil {
+            playWholeFilm()
+            return
+        }
         guard filmQueue.indices.contains(filmAt) else {
             stopPlayback()
             return
@@ -749,6 +780,10 @@ final class MediaView: NSView, Playable {
         loadingPiece = nil
         playGeneration += 1
         let generation = playGeneration
+        if filmBytes.indices.contains(filmAt) {
+            beginPiece(filmBytes[filmAt], generation: generation, anchor: anchor)
+            return
+        }
         if let held = heldNext, held.part == filmAt {
             heldNext = nil
             beginPiece(held.data, generation: generation, anchor: anchor)
@@ -769,6 +804,113 @@ final class MediaView: NSView, Playable {
                 return
             }
             self.beginPiece(data, generation: generation, anchor: anchor)
+        }
+    }
+
+    /// Decrypts every piece before the first frame, then plays them as one film.
+    private func playWholeFilm() {
+        let queue = filmQueue
+        guard queue.count > 1, queue.allSatisfy({ $0.trusted && $0.attachment != nil }) else {
+            pieceByPiece = true
+            playCurrentPart()
+            return
+        }
+        filmOpening = true
+        playGeneration += 1
+        let generation = playGeneration
+        let anchor = filmAnchor
+        label.stringValue = "Decrypting \(queue.count) parts…"
+        addSubview(label)
+        layoutLabel()
+        let gathered = FilmGather(count: queue.count)
+        for (index, video) in queue.enumerated() {
+            guard playGeneration == generation else { return }
+            guard let token = PrivateImageLoader.shared.data(for: video, completion: { [weak self] data in
+                guard let self, self.playGeneration == generation,
+                      case .privateVideo(let current)? = self.item?.kind, current.cacheKey == anchor else { return }
+                guard let data else {
+                    self.showFailure()
+                    return
+                }
+                gathered.slots[index] = data
+                gathered.left -= 1
+                guard gathered.left == 0 else { return }
+                let parts = gathered.slots.compactMap { $0 }
+                guard parts.count == queue.count, self.playGeneration == generation else {
+                    self.showFailure()
+                    return
+                }
+                self.filmBytes = parts
+                for piece in queue { PrivateImageLoader.shared.discard(piece) }
+                self.filmDownloads = []
+                Task { @MainActor in
+                    await self.compose(parts, generation: generation, anchor: anchor)
+                }
+            }) else { continue }
+            filmDownloads.append((token, video))
+        }
+    }
+
+    /// One player item for the whole film. Its clock is the film clock, so the bar needs no per-piece offset.
+    @MainActor
+    private func compose(_ parts: [Data], generation: Int, anchor: String?) async {
+        guard playGeneration == generation else { return }
+        do {
+            let composition = AVMutableComposition()
+            guard let picture = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                throw FilmPlaybackError.failed
+            }
+            var soundtrack: AVMutableCompositionTrack?
+            var loaders: [MemoryAssetLoader] = []
+            var cursor = CMTime.zero
+            for data in parts {
+                guard playGeneration == generation else { return }
+                let loader = MemoryAssetLoader(data: data)
+                loaders.append(loader)
+                let asset = loader.makeAsset()
+                let videoTracks = try await asset.loadTracks(withMediaType: .video)
+                guard let source = videoTracks.first else { throw FilmPlaybackError.failed }
+                let videoRange = try await source.load(.timeRange)
+                if cursor == .zero {
+                    picture.preferredTransform = try await source.load(.preferredTransform)
+                }
+                try picture.insertTimeRange(videoRange, of: source, at: cursor)
+                if let audio = try await asset.loadTracks(withMediaType: .audio).first,
+                   let sound = soundtrack ?? composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+                    soundtrack = sound
+                    let audioRange = try await audio.load(.timeRange)
+                    try? sound.insertTimeRange(audioRange, of: audio, at: cursor)
+                }
+                cursor = CMTimeAdd(cursor, videoRange.duration)
+            }
+            guard playGeneration == generation else { return }
+            filmLoaders = loaders
+            composedFilm = true
+            filmOpening = false
+            startPlayer(asset: composition, retaining: nil, looping: false, muted: false)
+            player?.automaticallyWaitsToMinimizeStalling = false
+            PlaybackCoordinator.shared.startVideo(self)
+            refreshOverlays()
+            guard filmQueue.first?.cacheKey == anchor else { return }
+            let generator = AVAssetImageGenerator(asset: composition)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = bounds.size.applying(CGAffineTransform(scaleX: 2, y: 2))
+            generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: .zero)]) { [weak self] _, image, _, _, _ in
+                guard let image else { return }
+                let still = Handoff(value: image)
+                Task { @MainActor [weak self] in
+                    guard let self, case .privateVideo(let current)? = self.item?.kind, current.cacheKey == anchor else { return }
+                    self.still = NSImage(cgImage: still.value, size: self.bounds.size)
+                    if !self.isPlaying { self.imageView.image = self.still }
+                }
+            }
+        } catch {
+            guard playGeneration == generation else { return }
+            filmLoaders = []
+            composedFilm = false
+            filmOpening = false
+            pieceByPiece = true
+            playCurrentPart()
         }
     }
 
@@ -867,7 +1009,16 @@ final class MediaView: NSView, Playable {
     }
 
     /// A drag ended in another piece. That piece starts at the matching moment.
+    /// A joined film is already one timeline, so the drag is a normal seek.
     private func jumpFilm(to absolute: Double) {
+        if composedFilm {
+            let time = CMTime(seconds: max(0, absolute), preferredTimescale: 600)
+            let tolerance = CMTime(seconds: 0.25, preferredTimescale: 600)
+            player?.seek(to: time, toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
+                Task { @MainActor in self?.controls?.releaseScrub() }
+            }
+            return
+        }
         guard let index = filmIndex(at: absolute), filmQueue.indices.contains(index) else {
             controls?.releaseScrub()
             return
@@ -888,8 +1039,9 @@ final class MediaView: NSView, Playable {
         playCurrentPart()
     }
 
-    /// Decrypts the following piece while this one plays.
+    /// Decrypts the following piece while this one plays. A film loaded up front has nothing left to fetch.
     private func prefetchNext() {
+        if filmBytes.count == filmQueue.count { return }
         let next = filmAt + 1
         guard filmQueue.indices.contains(next) else { return }
         if heldNext?.part == next { return }
@@ -907,8 +1059,13 @@ final class MediaView: NSView, Playable {
     }
 
     /// The piece ended. The chain is read again, so a piece that arrived while this one played can follow.
+    /// A joined film has no next piece: the player item was the whole film.
     /// A missing index still stops playback. The player stays up, so the clock keeps its place in the film.
     private func finishedPart() {
+        if composedFilm {
+            stopPlayback()
+            return
+        }
         let played = filmQueue.indices.contains(filmAt) ? filmQueue[filmAt] : nil
         if let played { PrivateImageLoader.shared.discard(played) }
         let anchor = filmQueue.first
@@ -981,7 +1138,20 @@ final class MediaView: NSView, Playable {
     }
 
     /// `advancing` keeps the film queue so the next piece can start. The piece that just played is released.
-    private func endPlayback(advancing: Bool) {
+    /// `keepFilm` leaves the decrypted pieces in place so a joined film can fall back to one piece at a time.
+    private func endPlayback(advancing: Bool, keepFilm: Bool = false) {
+        playGeneration += 1
+        for download in filmDownloads {
+            PrivateImageLoader.shared.cancel(download.0, for: download.1)
+        }
+        filmDownloads = []
+        filmLoaders = []
+        composedFilm = false
+        filmOpening = false
+        if !keepFilm {
+            filmBytes = []
+            pieceByPiece = false
+        }
         if let videoToken {
             let video = loadingPiece ?? (filmQueue.indices.contains(filmAt) ? filmQueue[filmAt] : nil)
             if let video {
@@ -999,6 +1169,9 @@ final class MediaView: NSView, Playable {
         nextPiece = nil
         heldNext = nil
         pendingSeek = 0
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        statusObservation = nil
+        endObserver = nil
         animator?.cancel()
         animator = nil
         controls?.detach()
@@ -1010,13 +1183,16 @@ final class MediaView: NSView, Playable {
         loader?.cancelAll()
         memoryLoader = nil
         playerView?.removeFromSuperview()
-        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
-        statusObservation = nil
-        endObserver = nil
         playerView = nil
         player = nil
         looper = nil
         loader = nil
+        if keepFilm {
+            imageView.image = still
+            PlaybackCoordinator.shared.stopped(self)
+            refreshOverlays()
+            return
+        }
         if !advancing {
             if filmQueue.indices.contains(filmAt) { PrivateImageLoader.shared.discard(filmQueue[filmAt]) }
             filmQueue = []
@@ -1029,6 +1205,14 @@ final class MediaView: NSView, Playable {
     }
 
     private func showFailure() {
+        // A joined film that won't play still has every piece decrypted, so they can play one after another.
+        if composedFilm, !pieceByPiece, filmBytes.count > 1 {
+            pieceByPiece = true
+            endPlayback(advancing: true, keepFilm: true)
+            filmAt = 0
+            playCurrentPart()
+            return
+        }
         stopPlayback()
         label.stringValue = item?.open == nil ? "Couldn't play this video" : "Couldn't play this here · ↗ opens it"
         layoutLabel()

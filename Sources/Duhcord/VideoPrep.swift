@@ -304,28 +304,6 @@ final class VideoPrep: @unchecked Sendable {
         }
     }
 
-    /// Pulls one reader output onto a background queue without the queue closure touching the reader itself.
-    private final class OutputPump: @unchecked Sendable {
-        let output: AVAssetReaderOutput
-        let frames: SampleBufferList
-        let state: OSAllocatedUnfairLock<State>
-
-        let origin: CMTime
-
-        init(output: AVAssetReaderOutput, frames: SampleBufferList, state: OSAllocatedUnfairLock<State>, origin: CMTime) {
-            self.output = output
-            self.frames = frames
-            self.state = state
-            self.origin = origin
-        }
-
-        func run() {
-            while !state.withLock({ $0.isCancelled }), let sample = output.copyNextSampleBuffer() {
-                frames.add(VideoPrep.shifted(sample, from: origin))
-            }
-        }
-    }
-
     /// Writes already-read samples. The ready-callback only sees this object, which is safe to pass across queues.
     private final class InputPump: @unchecked Sendable {
         let input: AVAssetWriterInput
@@ -474,6 +452,9 @@ final class VideoPrep: @unchecked Sendable {
                         transform: CGAffineTransform, fps: Int32,
                         videoBitrate: Double, audioBitrate: Double, duration: Double, clip: Range<Double>?,
                         progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
+        // Finished before the picture reader exists. The two readers together left a split piece with no sound.
+        let origin = CMTime(seconds: clip?.lowerBound ?? 0, preferredTimescale: 600)
+        let sound = try readSound(asset, tracks: audio, bitrate: audioBitrate, origin: origin, clip: clip)
         let reader = try AVAssetReader(asset: asset)
         // Turned upright, scaled down and brought to standard (SDR) colour by the composition, at most 30 fps.
         let turn = Self.orientation(of: transform)
@@ -500,54 +481,22 @@ final class VideoPrep: @unchecked Sendable {
         videoOutput.alwaysCopiesSampleData = false
         guard reader.canAdd(videoOutput) else { throw Failure.failed }
         reader.add(videoOutput)
-        // The sound has its own reader. Sharing one stalls a long clip, and pulling both outputs at once
-        // comes back with no sound while the picture still finishes.
-        let soundOutput: AVAssetReaderAudioMixOutput?
-        let soundReader: AVAssetReader?
-        if audio.isEmpty {
-            soundOutput = nil
-            soundReader = nil
-        } else {
-            let extra = try AVAssetReader(asset: asset)
-            let output = Self.audioReader(audio, bitrate: audioBitrate)
-            guard extra.canAdd(output) else { throw Failure.failed }
-            extra.add(output)
-            soundOutput = output
-            soundReader = extra
-        }
 
         let session = try Self.compressionSession(size: size, fps: fps, bitrate: videoBitrate)
         defer { VTCompressionSessionInvalidate(session) }
         let frames = SampleBufferList()
-        let audioFrames = SampleBufferList()
-        let reading = ActiveMedia(reader: reader, writer: nil, audioReader: soundReader)
+        let reading = ActiveMedia(reader: reader, writer: nil)
         guard state.withLock({ state in
             guard !state.isCancelled else { return false }
             state.activeMedia = reading
             return true
         }) else { throw CancellationError() }
         defer { state.withLock { $0.activeMedia = nil } }
-        let origin = CMTime(seconds: clip?.lowerBound ?? 0, preferredTimescale: 600)
         if let clip {
-            let range = CMTimeRange(start: origin, duration: CMTime(seconds: clip.upperBound - clip.lowerBound,
-                                                                    preferredTimescale: 600))
-            reader.timeRange = range
-            soundReader?.timeRange = range
-        }
-        if let soundReader {
-            guard soundReader.startReading() else { throw Failure.failed }
+            reader.timeRange = CMTimeRange(start: origin, duration: CMTime(seconds: clip.upperBound - clip.lowerBound,
+                                                                           preferredTimescale: 600))
         }
         guard reader.startReading() else { throw Failure.failed }
-
-        let audioGroup = DispatchGroup()
-        if let audioOutput = soundOutput {
-            audioGroup.enter()
-            let pump = OutputPump(output: audioOutput, frames: audioFrames, state: state, origin: origin)
-            DispatchQueue.global(qos: .userInitiated).async {
-                pump.run()
-                audioGroup.leave()
-            }
-        }
 
         let frameDuration = CMTime(value: 1, timescale: fps)
         var encodeFailed = false
@@ -573,31 +522,54 @@ final class VideoPrep: @unchecked Sendable {
                 break
             }
         }
-        if cancelled || encodeFailed {
-            reader.cancelReading()
-            soundReader?.cancelReading()
-        }
+        if cancelled || encodeFailed { reader.cancelReading() }
         let complete = cancelled || encodeFailed
             ? noErr
             : VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
-        await Self.wait(audioGroup)
         if cancelled { throw CancellationError() }
-        if let soundReader, soundReader.status != .completed || audioFrames.samples.isEmpty {
-            throw Failure.failed
-        }
         guard !encodeFailed, complete == noErr, frames.status == noErr, !frames.samples.isEmpty,
               reader.status == .completed else { throw Failure.failed }
-        return try await mux(reader: reader, video: frames.samples, audio: audioFrames.samples,
-                             audioBitrate: audioBitrate, progress: progress)
+        return try await mux(reader: reader, video: frames.samples, audio: sound, progress: progress)
+    }
+
+    /// AAC for this stretch, read to the end before the picture so the two readers never run together.
+    private func readSound(_ asset: AVAsset, tracks: [AVAssetTrack], bitrate: Double, origin: CMTime,
+                           clip: Range<Double>?) throws -> [CMSampleBuffer] {
+        guard !tracks.isEmpty else { return [] }
+        let reader = try AVAssetReader(asset: asset)
+        let output = Self.audioReader(tracks)
+        guard reader.canAdd(output) else { throw Failure.failed }
+        reader.add(output)
+        if let clip {
+            reader.timeRange = CMTimeRange(start: origin, duration: CMTime(seconds: clip.upperBound - clip.lowerBound,
+                                                                           preferredTimescale: 600))
+        }
+        let reading = ActiveMedia(reader: reader, writer: nil)
+        guard state.withLock({ state in
+            guard !state.isCancelled else { return false }
+            state.activeMedia = reading
+            return true
+        }) else { throw CancellationError() }
+        defer { state.withLock { $0.activeMedia = nil } }
+        guard reader.startReading() else { throw Failure.failed }
+        var samples: [CMSampleBuffer] = []
+        while !cancelled, let sample = output.copyNextSampleBuffer() {
+            samples.append(Self.shifted(sample, from: origin))
+        }
+        if cancelled {
+            reader.cancelReading()
+            throw CancellationError()
+        }
+        guard reader.status == .completed, !samples.isEmpty else { throw Failure.failed }
+        return try Self.aacPackets(samples, bitrate: bitrate)
     }
 
     /// Puts the already-capped H.264 pictures, and AAC for the sound, into the same fragmented MP4 as a remux.
-    private func mux(reader: AVAssetReader, video: [CMSampleBuffer], audio: [CMSampleBuffer], audioBitrate: Double,
+    private func mux(reader: AVAssetReader, video: [CMSampleBuffer], audio: [CMSampleBuffer],
                      progress: @escaping @Sendable (Double) -> Void) async throws -> Data {
         guard let hint = CMSampleBufferGetFormatDescription(video[0]) else { throw Failure.failed }
-        // The writer can pass both tracks through, or encode both. It cannot encode the sound while the
-        // picture is already H.264, so the sound becomes AAC here.
-        let sound = try Self.aacPackets(audio, bitrate: audioBitrate)
+        // `audio` is already AAC. The writer cannot encode the sound while the picture is already H.264.
+        let sound = audio
         let collected = MemoryOutput()
         // A timed fragment cannot carry picture and sound together. One fragment at the end can.
         let writer = makeWriter(collected, segmentInterval: .indefinite)
@@ -607,7 +579,8 @@ final class VideoPrep: @unchecked Sendable {
         writer.add(videoInput)
         let includeAudio = !sound.isEmpty
         var audioInput: AVAssetWriterInput?
-        if includeAudio, let audioHint = CMSampleBufferGetFormatDescription(sound[0]) {
+        if includeAudio {
+            guard let audioHint = CMSampleBufferGetFormatDescription(sound[0]) else { throw Failure.failed }
             let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: audioHint)
             input.expectsMediaDataInRealTime = false
             guard writer.canAdd(input) else { throw Failure.failed }
@@ -657,14 +630,13 @@ final class VideoPrep: @unchecked Sendable {
         }
     }
 
-    /// The sound mixed down to PCM; mono at the lowest bitrates. AAC is made later, once the picture is already H.264.
-    /// The bytes are copied: a long clip holds them until the picture is finished, and an uncopied buffer is gone by then.
-    private static func audioReader(_ tracks: [AVAssetTrack], bitrate: Double) -> AVAssetReaderAudioMixOutput {
-        let channels = bitrate <= VideoEncode.minAudioBitrate ? 1 : 2
+    /// The sound mixed down to PCM. AAC is made from it before the picture is read.
+    /// Two channels even at the lowest bitrate: a mono mix came back with nothing to play.
+    private static func audioReader(_ tracks: [AVAssetTrack]) -> AVAssetReaderAudioMixOutput {
         let output = AVAssetReaderAudioMixOutput(audioTracks: tracks, audioSettings: [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: 44_100,
-            AVNumberOfChannelsKey: channels,
+            AVNumberOfChannelsKey: 2,
             AVLinearPCMBitDepthKey: 16,
             AVLinearPCMIsFloatKey: false,
             AVLinearPCMIsBigEndianKey: false,
