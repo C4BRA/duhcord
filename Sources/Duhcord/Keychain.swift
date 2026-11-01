@@ -50,7 +50,9 @@ enum Keychain {
         if deniedKeys.contains(key) { return .denied }
         if let hit = cache?.entries[key] {
             // A previous launch copied this into the vault and couldn't delete the old item.
-            _ = deleteItem(service: service, account: account, allowPrompt: false)
+            if legacyDeleteAttempted.insert(key).inserted {
+                _ = deleteItem(service: service, account: account, allowPrompt: false)
+            }
             return .value(hit)
         }
         switch readItem(service: service, account: account, allowPrompt: true) {
@@ -59,7 +61,11 @@ enum Keychain {
             vault.entries[key] = data
             cache = vault
             if persist() {
-                _ = deleteItem(service: service, account: account, allowPrompt: true)
+                if legacyDeleteAttempted.insert(key).inserted {
+                    _ = deleteItem(service: service, account: account, allowPrompt: false)
+                }
+            } else {
+                legacyDeleteAttempted.insert(key)
             }
             return .value(data)
         case .missing:
@@ -75,6 +81,11 @@ enum Keychain {
         return nil
     }
 
+    static func retry() {
+        failed = false
+        deniedKeys = []
+    }
+
     @discardableResult
     static func setData(_ data: Data, service: String, account: String) -> Bool {
         guard prepare() else { return false }
@@ -84,7 +95,9 @@ enum Keychain {
         cache = vault
         deniedKeys.remove(key)
         guard persist() else { return false }
-        _ = deleteItem(service: service, account: account, allowPrompt: false)
+        if legacyDeleteAttempted.insert(key).inserted {
+            _ = deleteItem(service: service, account: account, allowPrompt: false)
+        }
         return true
     }
 
@@ -108,12 +121,14 @@ enum Keychain {
     /// replacing the item; it is deleted once the new build owns the main one.
     private static let vaultService = "com.duhcord.secrets"
     private static let pendingService = "com.duhcord.secrets.pending"
+    private static let corruptService = "com.duhcord.secrets.corrupt"
     private static let vaultAccount = "Duhcord"
 
     private static var cache: Vault?
     private static var slot = vaultService
     private static var failed = false
     private static var deniedKeys: Set<String> = []
+    private static var legacyDeleteAttempted: Set<String> = []
 
     private enum Item {
         case value(Data)
@@ -133,7 +148,7 @@ enum Keychain {
         if failed { return false }
         if cache != nil { return true }
         switch unlockStore() {
-        case .ready:
+        case .ready, .repaired:
             return cache != nil
         case .denied:
             failed = true
@@ -144,6 +159,7 @@ enum Keychain {
 
     private enum Unlock {
         case ready
+        case repaired
         case denied
     }
 
@@ -157,18 +173,26 @@ enum Keychain {
         case (.value(let mainData), .value(let pendingData)):
             let pendingWins = generation(of: pendingData) > generation(of: mainData)
             let data = pendingWins ? pendingData : mainData
-            slot = pendingWins ? pendingService : vaultService
-            _ = deleteItem(service: pendingWins ? vaultService : pendingService, account: vaultAccount, allowPrompt: false)
-            if pendingWins { movePendingToMain(data) }
-            return adopt(data)
+            let service = pendingWins ? pendingService : vaultService
+            let result = adopt(data, readFrom: service)
+            if case .ready = result {
+                if pendingWins {
+                    movePendingToMain(data)
+                } else {
+                    _ = deleteItem(service: pendingService, account: vaultAccount, allowPrompt: false)
+                }
+            }
+            return result
         case (.value(let data), _):
-            slot = vaultService
-            _ = deleteItem(service: pendingService, account: vaultAccount, allowPrompt: false)
-            return adopt(data)
+            let result = adopt(data, readFrom: vaultService)
+            if case .ready = result {
+                _ = deleteItem(service: pendingService, account: vaultAccount, allowPrompt: false)
+            }
+            return result
         case (_, .value(let data)):
-            slot = pendingService
-            movePendingToMain(data)
-            return adopt(data)
+            let result = adopt(data, readFrom: pendingService)
+            if case .ready = result { movePendingToMain(data) }
+            return result
         case (.locked, _), (_, .locked):
             // The pending copy is the one written last when both survived. Approve that one only,
             // so a stale main item doesn't add a second password dialog.
@@ -189,8 +213,9 @@ enum Keychain {
     private static func prompt(service: String) -> Unlock {
         switch readItem(service: service, account: vaultAccount, allowPrompt: true) {
         case .value(let data):
-            claim(data, readFrom: service)
-            return adopt(data)
+            let result = adopt(data, readFrom: service)
+            if case .ready = result { claim(data, readFrom: service) }
+            return result
         case .missing:
             cache = Vault()
             slot = vaultService
@@ -238,8 +263,18 @@ enum Keychain {
         slot = vaultService
     }
 
-    private static func adopt(_ data: Data) -> Unlock {
-        guard let vault = try? JSONDecoder().decode(Vault.self, from: data) else { return .denied }
+    private static func adopt(_ data: Data, readFrom service: String) -> Unlock {
+        guard let vault = try? JSONDecoder().decode(Vault.self, from: data) else {
+            guard writeItem(service: corruptService, account: vaultAccount, data: data) else { return .denied }
+            slot = service
+            cache = Vault()
+            guard persist() else {
+                cache = nil
+                return .denied
+            }
+            return .repaired
+        }
+        slot = service
         cache = vault
         return .ready
     }

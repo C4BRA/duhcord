@@ -75,6 +75,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     /// Images can be attached in any channel; in Private, once the other person's key is here (they're encrypted).
     var canAttachImages: Bool {
         guard let channelID, store.channel(channelID) != nil, !isUploading else { return false }
+        if privateChat?.mode(for: channelID) == .locked { return false }
         if isPrivate, case .ready = privateChat?.status(for: channelID) { return true }
         return !isPrivate
     }
@@ -238,6 +239,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         }
         privateBar.isHidden = true
         privateBar.onAction = { [weak self] in self?.privateBarAction() }
+        privateBar.onSecondaryAction = { [weak self] in self?.privateBarSecondaryAction() }
         scrollToTop = scrollView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor)
         scrollToBar = scrollView.topAnchor.constraint(equalTo: privateBar.bottomAnchor)
         scrollToTop.isActive = true
@@ -298,7 +300,10 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     /// In Private, it says so, and waits for the other person's key.
     private func refreshInput() {
         if let channelID, let channel = store.channel(channelID) {
-            if isPrivate {
+            if privateChat?.mode(for: channelID) == .locked {
+                input.placeholder = "Private messaging keys unavailable"
+                input.isEnabled = false
+            } else if isPrivate {
                 let ready: Bool
                 if case .ready = privateChat?.status(for: channelID) { ready = true } else { ready = false }
                 input.placeholder = ready ? "Private message to @\(channel.displayName)" : "Waiting for @\(channel.displayName)…"
@@ -875,8 +880,9 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         findOlderPrivateMessages()
     }
 
-    private enum BarAction { case none, verify, accept, reviewKey, settings }
+    private enum BarAction { case none, verify, accept, reviewKey, settings, retryKeychain, allowStandard }
     private var barAction = BarAction.none
+    private var secondaryBarAction = BarAction.none
 
     private func refreshPrivateBar() {
         guard let channelID, let privateChat, let peer = privateChat.peer(in: channelID) else {
@@ -884,9 +890,22 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             return
         }
         let name = peer.displayName
+        if case .locked = privateChat.status(for: channelID) {
+            if privateChat.mode(for: channelID) == .standard {
+                setPrivateBar("Messages in this DM will be sent unencrypted while Keychain access is unavailable.",
+                              tone: .warning, action: "Try Again", then: .retryKeychain)
+            } else {
+                setPrivateBar("Duhcord couldn't open your private-messaging keys in the Keychain, so messages in this DM are paused.",
+                              tone: .warning, action: "Try Again", secondaryAction: "Send Unencrypted",
+                              then: .retryKeychain, thenSecondary: .allowStandard)
+            }
+            return
+        }
         if isPrivate {
             switch privateChat.status(for: channelID) {
             case .unavailable:
+                setPrivateBar(nil)
+            case .locked:
                 setPrivateBar(nil)
             case .waiting(let newKey):
                 if newKey {
@@ -920,9 +939,12 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
-    private func setPrivateBar(_ text: String?, tone: BannerView.Tone = .info, action: String? = nil, then: BarAction = .none) {
+    private func setPrivateBar(_ text: String?, tone: BannerView.Tone = .info, action: String? = nil,
+                               secondaryAction: String? = nil, then: BarAction = .none,
+                               thenSecondary: BarAction = .none) {
         barAction = then
-        if let text { privateBar.show(text, tone: tone, action: action) }
+        secondaryBarAction = thenSecondary
+        if let text { privateBar.show(text, tone: tone, action: action, secondaryAction: secondaryAction) }
         privateBar.isHidden = text == nil
         scrollToBar.isActive = text != nil
         scrollToTop.isActive = text == nil
@@ -939,6 +961,10 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             NSApp.sendAction(#selector(AppDelegate.showSettings(_:)), to: nil, from: self)
         case .reviewKey:
             reviewNewKey(in: channelID)
+        case .retryKeychain:
+            privateChat.retryKeychain()
+        case .allowStandard:
+            privateChat.useStandardWhileLocked(in: channelID)
         case .verify:
             guard let number = privateChat.safetyNumber(for: channelID), let window = view.window else { return }
             let name = privateChat.peer(in: channelID)?.displayName ?? "them"
@@ -954,6 +980,11 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 if !privateChat.markVerified(in: channelID, number: number) { self?.keysChangedWhileComparing() }
             }
         }
+    }
+
+    private func privateBarSecondaryAction() {
+        guard let channelID, let privateChat, secondaryBarAction == .allowStandard else { return }
+        privateChat.useStandardWhileLocked(in: channelID)
     }
 
     /// The other person has a key besides the accepted ones: compare the safety number it would make, then accept
@@ -1284,6 +1315,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
 
     private func send(_ text: String) {
         guard let channelID, let key = draftKey, !isUploading else { return }
+        guard privateChat?.mode(for: channelID) != .locked else { return }
         // Images still being prepared go with this message: it waits for them.
         if preparing > 0 {
             sendWhenReady = true
