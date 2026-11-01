@@ -82,6 +82,15 @@ final class VideoPrep: @unchecked Sendable {
     /// Set once the user stops the job, including during the pause between chained messages.
     var isCancelled: Bool { cancelled }
 
+    func sendsUnchanged(_ url: URL, limit: Int) async -> Bool {
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= limit else { return false }
+        let asset = AVURLAsset(url: url)
+        guard let video = try? await asset.loadTracks(withMediaType: .video).first,
+              let formats = try? await video.load(.formatDescriptions),
+              let codec = formats.first.map(CMFormatDescriptionGetMediaSubType) else { return false }
+        return codec == kCMVideoCodecType_H264 || codec == kCMVideoCodecType_HEVC
+    }
+
     /// Off the main thread. `progress` (0...1) is called from a background queue.
     /// `clip` encodes only that stretch, used when a private video is split into pieces.
     func prepare(_ url: URL, name: String, options: Options, clip: Range<Double>? = nil,
@@ -161,46 +170,6 @@ final class VideoPrep: @unchecked Sendable {
             throw Failure.tooLarge(limit: options.limit)
         }
         return fileSize
-    }
-
-    /// Encodes `url` into pieces that each fit `options.limit`. One piece when the whole video fits; otherwise
-    /// successive stretches, handed over one at a time so a long film is never all in memory.
-    func preparePieces(_ url: URL, name: String, options: Options,
-                       progress: @escaping @Sendable (Double) -> Void,
-                       piece: @escaping (PreparedAttachment) async throws -> Void) async throws {
-        do {
-            try await piece(try await prepare(url, name: name, options: options, progress: progress))
-            return
-        } catch Failure.tooLong {
-        }
-        let asset = AVURLAsset(url: url)
-        let duration = try await asset.load(.duration).seconds
-        guard duration.isFinite, duration > 0.1 else { throw Failure.unreadable }
-        let hasAudio = try await asset.loadTracks(withMediaType: .audio).isEmpty == false
-        let floor = VideoEncode.minVideoBitrate + (hasAudio ? VideoEncode.minAudioBitrate : 0)
-        var slice = max(1, Double(options.limit) * Self.headroom * 8 / floor * 0.85)
-        var start = 0.0
-        var count = 0
-        while start < duration - 0.05 {
-            if cancelled { throw CancellationError() }
-            if count >= 48 {
-                throw Failure.tooLong(maxMinutes: max(1, Int(start / 60)))
-            }
-            let end = min(duration, start + slice)
-            let sliceStart = start
-            do {
-                let made = try await prepare(url, name: name, options: options, clip: sliceStart..<end) { fraction in
-                    progress(min(1, (sliceStart + fraction * (end - sliceStart)) / duration))
-                }
-                try await piece(made)
-                start = end
-                count += 1
-            } catch Failure.tooLong {
-                let shorter = (end - start) / 2
-                guard shorter >= 1 else { throw Failure.tooLong(maxMinutes: max(1, Int(start / 60))) }
-                slice = shorter
-            }
-        }
     }
 
     /// Which way a track's transform turns it, for the quarter turns phones record with.

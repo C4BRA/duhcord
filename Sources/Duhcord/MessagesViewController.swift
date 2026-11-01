@@ -375,15 +375,16 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         return false
     }
 
+    private func rejectAttachWhileFilmPending() -> Bool {
+        guard attached.contains(where: { $0.sourceURL != nil }) else { return false }
+        NSSound.beep()
+        return true
+    }
+
     /// Prepares dropped or pasted images and videos in the background, then adds them to the row (up to the most a
     /// message can carry).
     private func attach(_ sources: [ImagePrep.Source]) {
-        guard canAttachImages, !isUploading, !sources.isEmpty else { return }
-        // A video waiting to be split fills the message on its own.
-        if attached.contains(where: { $0.sourceURL != nil }) {
-            NSSound.beep()
-            return
-        }
+        guard canAttachImages, !isUploading, !sources.isEmpty, !rejectAttachWhileFilmPending() else { return }
         let room = PrivateMessaging.maxFiles - attached.count - preparing
         if sources.count > room { NSSound.beep() }
         for source in sources.prefix(max(0, room)) {
@@ -417,6 +418,19 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 let owner = WeakReference(self)
                 Task.detached(priority: .userInitiated) {
                     do {
+                        let sourceSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                        let pieceLimit = UploadLimit.privatePiecePlaintext(premiumType: premium)
+                        if alone, sourceSize > pieceLimit,
+                           await prep.sendsUnchanged(url, limit: UploadLimit.privateReelPlaintext(premiumType: premium)) {
+                            let seconds = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0
+                            let icon = NSImage(systemSymbolName: "film", accessibilityDescription: "Video") ?? NSImage()
+                            let placeholder = PreparedAttachment(data: Data(), width: 16, height: 9, kind: .mp4,
+                                                                thumbnail: icon, name: name, duration: seconds,
+                                                                sourceURL: url)
+                            let result = Handoff(value: placeholder)
+                            await MainActor.run { owner.object?.finishJob(id, result.value, failure: nil, name: name) }
+                            return
+                        }
                         let prepared = try await prep.prepare(url, name: name, options: options) { fraction in
                             DispatchQueue.main.async { owner.object?.updateJob(id, progress: fraction) }
                         }
@@ -675,14 +689,14 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         }
     }
 
-    /// Encodes a private video into sealed pieces and sends them, four to a message. A film that fits in one
-    /// piece is an ordinary private video. Each further message waits a second after the previous one was
-    /// accepted. Anything already sent is left in the channel if a later piece fails.
+    /// Encodes a private video once, then sends its encrypted chunks in batches.
     @available(macOS 14, *)
+    // swiftlint:disable:next cyclomatic_complexity function_body_length
     private func sendFilm(_ url: URL, caption: String, placeholder: PreparedAttachment,
                           in channelID: Snowflake, key: DraftKey) {
-        let limit = UploadLimit.privatePiecePlaintext(premiumType: store.premiumType)
-        let options = VideoPrep.Options(limit: limit, compress: true, forPrivate: true)
+        let pieceLimit = UploadLimit.privatePiecePlaintext(premiumType: store.premiumType)
+        let reelLimit = UploadLimit.privateReelPlaintext(premiumType: store.premiumType)
+        let options = VideoPrep.Options(limit: reelLimit, compress: true, forPrivate: true)
         let prep = VideoPrep()
         let jobID = UUID()
         jobOrder.append(jobID)
@@ -693,15 +707,14 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         uploading.insert(key)
         refreshInput()
         refreshTray()
-        let filmID = PrivateFilmNote.newID()
         let filmName = placeholder.name
         let owner = WeakReference(self)
         Task.detached(priority: .userInitiated) {
-            var pending: [PreparedAttachment] = []
-            var pendingSpans: [Double] = []
             var nextIndex = 0
             var sentAny = false
-            func ship(_ items: inout [PreparedAttachment], spans: [Double], moreComing: Bool) async throws {
+            // swiftlint:disable:next cyclomatic_complexity
+            func ship(_ items: inout [PreparedAttachment], reel: PrivateReel?) async throws {
+                if prep.isCancelled { throw CancellationError() }
                 if sentAny {
                     try await Task.sleep(nanoseconds: 1_000_000_000)
                     if prep.isCancelled { throw CancellationError() }
@@ -711,30 +724,31 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                     try await rest.waitForMessageSlot(in: channelID)
                     if prep.isCancelled { throw CancellationError() }
                 }
-                let index = nextIndex
                 let count = items.count
                 nextIndex += count
-                // Seal first and drop the plaintext, so the upload holds only the ciphertext.
+                // Seal one batch and drop its plaintext before sending.
                 let sealed = try items.map {
                     try PrivateCrypto.sealFile($0.data, width: $0.width, height: $0.height, kind: $0.kind)
                 }
                 items = []
+                if prep.isCancelled { throw CancellationError() }
                 let uploads = sealed.map {
-                    UploadFile(name: PrivateMessaging.fileName, data: $0.sealed, contentType: "application/octet-stream")
+                    UploadFile(name: PrivateMessaging.fileName, data: $0.sealed,
+                               contentType: "application/octet-stream")
                 }
-                let perFile = await MainActor.run { UploadLimit.discordLimit(premiumType: owner.object?.store.premiumType) }
+                let perFile = await MainActor.run {
+                    UploadLimit.discordLimit(premiumType: owner.object?.store.premiumType)
+                }
                 guard uploads.allSatisfy({ $0.data.count <= perFile }),
                       uploads.reduce(0, { $0 + $1.data.count }) <= UploadLimit.duhcordCap else {
                     throw PrivateMessagingError.filesTooLarge
                 }
-                let single = count == 1 && !sentAny && !moreComing
-                let body = single ? caption
-                    : PrivateFilmNote.text(caption: sentAny ? "" : caption,
-                                           film: PrivateFilm(id: filmID, start: index, spans: spans))
+                let body = reel.map { PrivateReelNote.text(caption: sentAny ? "" : caption, reel: $0) } ?? caption
                 let content = try await MainActor.run { () -> String in
                     guard let chat = owner.object?.privateChat else { throw CancellationError() }
                     return try chat.seal(body, files: sealed.map(\.file), in: channelID)
                 }
+                if prep.isCancelled { throw CancellationError() }
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                     Task { @MainActor in
                         guard let session = owner.object?.session else {
@@ -749,20 +763,33 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 sentAny = true
             }
             do {
-                try await prep.preparePieces(url, name: filmName, options: options) { fraction in
+                let made = try await prep.prepare(url, name: filmName, options: options) { fraction in
                     DispatchQueue.main.async { owner.object?.updateJob(jobID, progress: fraction) }
-                } piece: { made in
-                    pending.append(made)
-                    pendingSpans.append(made.duration)
-                    if pending.count == PrivateMessaging.maxFiles {
-                        var items = pending
-                        let spans = pendingSpans
-                        pending = []
-                        pendingSpans = []
-                        try await ship(&items, spans: spans, moreComing: true)
+                }
+                guard !made.data.isEmpty else { throw VideoPrep.Failure.failed }
+                if made.data.count <= pieceLimit {
+                    var items = [made]
+                    try await ship(&items, reel: nil)
+                } else {
+                    let chunkCount = (made.data.count + pieceLimit - 1) / pieceLimit
+                    guard chunkCount <= PrivateMessaging.maxReelChunks else {
+                        let minutes = max(1, Int(made.duration * Double(reelLimit) / Double(made.data.count) / 60))
+                        throw VideoPrep.Failure.tooLong(maxMinutes: minutes)
+                    }
+                    let reelID = PrivateReelNote.newID()
+                    var pending: [PreparedAttachment] = []
+                    for start in stride(from: 0, to: made.data.count, by: pieceLimit) {
+                        if prep.isCancelled { throw CancellationError() }
+                        let end = min(made.data.count, start + pieceLimit)
+                        pending.append(PreparedAttachment(
+                            data: made.data.subdata(in: start..<end), width: made.width, height: made.height,
+                            kind: .reelChunk, thumbnail: made.thumbnail, name: filmName, duration: made.duration))
+                        if pending.count == PrivateMessaging.maxFiles || end == made.data.count {
+                            let reel = PrivateReel(id: reelID, start: nextIndex, count: chunkCount, bytes: made.data.count)
+                            try await ship(&pending, reel: reel)
+                        }
                     }
                 }
-                if !pending.isEmpty { try await ship(&pending, spans: pendingSpans, moreComing: false) }
                 await MainActor.run {
                     guard let self = owner.object else { return }
                     self.jobs.removeValue(forKey: jobID)
@@ -1384,6 +1411,10 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             guard let self, let chat = self.privateChat else { return [] }
             return chat.playbackQueue(forFilmOf: video, in: message.channelId)
         }
+        cell.reelResolver = { [weak self] video in
+            guard let self, let chat = self.privateChat else { return nil }
+            return chat.reelChunks(for: video, in: message.channelId)
+        }
         cell.configure(cached.layout, header: cached.header)
         cell.setAccessibilityLabel(spokenText(for: message))
         cell.authorNameWidth = row < rows.count && !rows[row].grouped
@@ -1590,6 +1621,7 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
     var onAuthorClicked: ((NSRect) -> Void)?
     /// Rebuilds a private film from the messages loaded now, for the video view in this row.
     var filmResolver: ((PrivateImage) -> [PrivateImage])?
+    var reelResolver: ((PrivateImage) -> [PrivateImage]?)?
     /// The message's own items for the right-click menu.
     var contextItems: (() -> [NSMenuItem])?
     /// How much of the header line is the author's name, which opens their profile like the picture does.
@@ -1659,6 +1691,7 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
                 view.isHidden = false
                 view.frame = layout.media[i].frame
                 view.filmResolver = filmResolver
+                view.reelResolver = reelResolver
                 view.configure(layout.media[i])
             } else {
                 view.cancel()
@@ -1720,6 +1753,7 @@ private final class MessageCell: NSTableCellView, NSTextViewDelegate {
         cancelMedia()
         onAuthorClicked = nil
         filmResolver = nil
+        reelResolver = nil
         contextItems = nil
     }
 

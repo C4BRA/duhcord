@@ -28,4 +28,10 @@ public enum UploadLimit {
         let perFile = min(discordLimit(premiumType: premiumType), duhcordCap / PrivateMessaging.maxFiles)
         return PrivateMessaging.largestPlaintext(sealingWithin: perFile)
     }
+
+    /// How large one encoded private reel may be before it is split into chunks.
+    public static func privateReelPlaintext(premiumType: Int?) -> Int {
+        min(privatePiecePlaintext(premiumType: premiumType) * PrivateMessaging.maxReelChunks,
+            200 * 1024 * 1024)
+    }
 }
