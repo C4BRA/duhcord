@@ -231,7 +231,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
         case #selector(togglePrivateMessages(_:)):
             guard let channelID = session.store.focusedChannelID else { return false }
             menuItem.state = privateChat.mode(for: channelID) == .private ? .on : .off
-            return privateChat.status(for: channelID) != .unavailable
+            let status = privateChat.status(for: channelID)
+            return status != .unavailable && status != .locked
         case #selector(toggleMute(_:)):
             menuItem.title = voice.muted ? "Unmute" : "Mute"
             return true
@@ -425,7 +426,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     private func refreshPrivateModeItem() {
         guard let item = privateModeItem else { return }
         let channelID = session.store.focusedChannelID
-        let available = channelID.map { privateChat.status(for: $0) != .unavailable } ?? false
+        let available = channelID.map {
+            let status = privateChat.status(for: $0)
+            return status != .unavailable && status != .locked
+        } ?? false
         item.isEnabled = available
         item.subitems.forEach { $0.isEnabled = available }
         item.selectedIndex = channelID.map { privateChat.mode(for: $0) == .private ? 1 : 0 } ?? 0
@@ -449,7 +453,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     }
 
     private func setPrivateMode(_ on: Bool) {
-        guard let channelID = session.store.focusedChannelID, privateChat.status(for: channelID) != .unavailable else {
+        guard let channelID = session.store.focusedChannelID,
+              privateChat.status(for: channelID) != .unavailable,
+              privateChat.status(for: channelID) != .locked else {
             refreshPrivateModeItem()
             return
         }
