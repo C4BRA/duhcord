@@ -150,6 +150,7 @@ struct PreparedAttachment {
         case .png: return UploadFile(name: "image.png", data: data, contentType: "image/png")
         case .jpeg: return UploadFile(name: "image.jpg", data: data, contentType: "image/jpeg")
         case .mp4: return UploadFile(name: "video.mp4", data: data, contentType: "video/mp4")
+        case .reelChunk: return UploadFile(name: "video.mp4", data: data, contentType: "video/mp4")
         }
     }
 }

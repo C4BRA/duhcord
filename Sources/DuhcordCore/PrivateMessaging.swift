@@ -32,6 +32,8 @@ public enum PrivateMessaging {
     static let maxPlaintext = 64 * 1024
     /// Images and videos per message.
     public static let maxFiles = 4
+    /// Chunks accepted in a private reel note.
+    public static let maxReelChunks = 1024
     /// Discord's upload limit without Nitro, less room for the rest of the request: what images are sized for, so
     /// four of them fit whatever the account.
     public static let maxUploadBytes = 20 * 1024 * 1024 - 64 * 1024
@@ -161,9 +163,10 @@ public enum PrivateMessaging {
 /// only the recipients see it; the encrypted bytes are the message's attachment at the same position.
 public struct PrivateFile: Equatable, Sendable {
     public enum Kind: UInt8, Sendable {
-        case jpeg = 1, png = 2, mp4 = 3
+        case jpeg = 1, png = 2, mp4 = 3, reelChunk = 4
 
         public var isVideo: Bool { self == .mp4 }
+        public var isReelChunk: Bool { self == .reelChunk }
     }
 
     /// The image's own key (ChaCha20-Poly1305), random and used once.
@@ -205,6 +208,62 @@ public struct PrivateFile: Equatable, Sendable {
                   width: number(40..<42), height: number(42..<44), kind: kind)
         guard width > 0, height > 0, length <= PrivateMessaging.maxFileBytes,
               sealedLength == PrivateMessaging.sealedLength(forFileOf: length) else { return nil }
+    }
+}
+
+/// The shared identity and size of a private video split into encrypted chunks.
+public struct PrivateReel: Equatable, Sendable {
+    public var id: Data
+    public var start: Int
+    public var count: Int
+    public var bytes: Int
+
+    public init(id: Data, start: Int, count: Int, bytes: Int) {
+        self.id = id
+        self.start = start
+        self.count = count
+        self.bytes = bytes
+    }
+}
+
+/// The line a split private video puts in front of its caption.
+public enum PrivateReelNote {
+    static let mark = "\u{1E}reel/"
+
+    public static func begins(_ text: String) -> Bool { text.hasPrefix(mark) }
+
+    public static func newID() -> Data {
+        SymmetricKey(size: SymmetricKeySize(bitCount: 128)).withUnsafeBytes { Data($0) }
+    }
+
+    public static func text(caption: String, reel: PrivateReel) -> String {
+        let hex = reel.id.map { String(format: "%02x", $0) }.joined()
+        return mark + "\(hex)/\(reel.start)/\(reel.count)/\(reel.bytes)\n" + caption
+    }
+
+    public static func parse(_ text: String) -> (reel: PrivateReel, caption: String)? {
+        guard text.hasPrefix(mark) else { return nil }
+        let body = text.dropFirst(mark.count)
+        guard let newline = body.firstIndex(of: "\n") else { return nil }
+        let fields = body[..<newline].split(separator: "/", omittingEmptySubsequences: false)
+        guard fields.count == 4 else { return nil }
+        let hex = fields[0]
+        guard hex.count == 32, hex.allSatisfy({ $0.isASCII && ($0.isNumber || ("a"..."f").contains($0)) }),
+              fields.dropFirst().allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isASCII) && $0.allSatisfy(\.isNumber) }),
+              let start = Int(fields[1]), let count = Int(fields[2]), let bytes = Int(fields[3]),
+              (2...PrivateMessaging.maxReelChunks).contains(count), (0..<count).contains(start),
+              (1...count * PrivateMessaging.maxFileBytes).contains(bytes) else { return nil }
+        var id = Data()
+        var cursor = hex.startIndex
+        while cursor < hex.endIndex {
+            let next = hex.index(cursor, offsetBy: 2)
+            guard let byte = UInt8(hex[cursor..<next], radix: 16) else { return nil }
+            id.append(byte)
+            cursor = next
+        }
+        guard id.count == 16 else { return nil }
+        return (PrivateReel(id: id, start: start, count: count, bytes: bytes),
+                String(body[body.index(after: newline)...]))
     }
 }
 

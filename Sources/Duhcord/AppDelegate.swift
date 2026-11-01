@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Settings.registerDefaults()
+        if #available(macOS 14, *) { ReelSpool.removeLeftovers() }
         updates = UpdateController()
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake),
                                                           name: NSWorkspace.didWakeNotification, object: nil)

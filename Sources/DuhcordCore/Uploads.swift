@@ -28,4 +28,7 @@ public enum UploadLimit {
         let perFile = min(discordLimit(premiumType: premiumType), duhcordCap / PrivateMessaging.maxFiles)
         return PrivateMessaging.largestPlaintext(sealingWithin: perFile)
     }
+
+    /// Maximum source size to try unchanged before streaming an encode.
+    public static let privateUnchangedReelPlaintext = 200 * 1024 * 1024
 }

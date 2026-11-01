@@ -160,6 +160,8 @@ final class PrivateChatController {
         let trusted: Bool
         /// Set when this message is one stretch of a video split across attachments or messages.
         let film: PrivateFilm?
+        /// Set when this message contains encrypted chunks of a whole-film MP4.
+        let reel: PrivateReel?
         /// The salt the message was sealed with, so a copy of a film part is not played as another part.
         let salt: Data
     }
@@ -580,7 +582,14 @@ final class PrivateChatController {
             let span: Double = film?.spans.count == opened.files.count ? (film?.spans[index] ?? 0) : 0
             return PrivateImage(messageID: message.id, index: index, file: file,
                                 attachment: matches ? attachment : nil, trusted: opened.trusted,
-                                filmID: film?.id, filmPart: (film?.start ?? 0) + index, filmSpan: span)
+                                filmID: film?.id, filmPart: (film?.start ?? 0) + index, filmSpan: span,
+                                reel: opened.reel, reelPart: (opened.reel?.start ?? 0) + index)
+        }
+        if let reel = opened.reel, reel.start == 0, opened.trusted, images.first?.attachment != nil {
+            let parts = reelParts(reel, author: message.author.id, channelID: message.channelId)
+            if parts[0]?.messageID != message.id {
+                for index in images.indices { images[index].reelPart = max(images[index].reelPart, 1) }
+            }
         }
         // Only the oldest message that holds piece 0 offers the rest, in order, and only while nothing is missing.
         if let film, film.start == 0, opened.trusted, images.first?.attachment != nil {
@@ -592,6 +601,44 @@ final class PrivateChatController {
             }
         }
         return images
+    }
+
+    /// The chunks of a reel in order, or nil while any chunk is missing or invalid.
+    func reelChunks(for image: PrivateImage, in channelID: Snowflake) -> [PrivateImage]? {
+        guard image.reel != nil, image.reelPart == 0,
+              let message = store.messages(in: channelID)?.first(where: { $0.id == image.messageID }),
+              let opened = open(content: message.content, id: message.id, authorID: message.author.id,
+                                channelID: channelID, postedAt: Self.postedAt(message)),
+              let reel = opened.reel, reel.start == 0 else { return nil }
+        let parts = reelParts(reel, author: message.author.id, channelID: channelID)
+        guard parts.count == reel.count,
+              (0..<reel.count).allSatisfy({ parts[$0] != nil }),
+              parts.values.reduce(0, { $0 + $1.file.length }) == reel.bytes else { return nil }
+        return (0..<reel.count).compactMap { parts[$0] }
+    }
+
+    private func reelParts(_ reel: PrivateReel, author: Snowflake, channelID: Snowflake) -> [Int: PrivateImage] {
+        guard #available(macOS 14, *) else { return [:] }
+        var chosen: [Int: (snowflake: UInt64, image: PrivateImage)] = [:]
+        for message in store.messages(in: channelID) ?? [] where message.author.id == author {
+            guard let opened = open(content: message.content, id: message.id, authorID: author,
+                                    channelID: channelID, postedAt: Self.postedAt(message)),
+                  let part = opened.reel, part.id == reel.id, part.count == reel.count,
+                  part.bytes == reel.bytes, opened.trusted, firstWithSalt[opened.salt] == message.id,
+                  part.start + opened.files.count <= part.count else { continue }
+            for (offset, file) in opened.files.enumerated() {
+                let index = part.start + offset
+                guard file.kind.isReelChunk,
+                      let attachment = message.attachments.indices.contains(offset) ? message.attachments[offset] : nil,
+                      attachment.size == nil || attachment.size == file.sealedLength else { continue }
+                let image = PrivateImage(messageID: message.id, index: offset, file: file, attachment: attachment,
+                                         trusted: true, reel: part, reelPart: index)
+                let snowflake = message.id.snowflakeValue
+                if let existing = chosen[index], existing.snowflake <= snowflake { continue }
+                chosen[index] = (snowflake, image)
+            }
+        }
+        return chosen.mapValues(\.image)
     }
 
     /// The pieces of a film in order, rebuilt from the messages currently loaded. Empty when this message is
@@ -666,32 +713,55 @@ final class PrivateChatController {
             warnings.append(fromMe ? "⚠️ *Sent from a Mac you haven't approved in Settings.*"
                                    : "⚠️ *Sent from a new key you haven't accepted. It may not be them.*")
         }
-        var shown: Opened?
         if let result {
-            if let warning = replayWarning(result, id: id, postedAt: postedAt ?? Self.date(of: id)) { warnings.append(warning) }
-            var caption = result.text
-            var film: PrivateFilm?
-            if PrivateFilmNote.begins(result.text) {
-                // A film note that isn't well formed, or that isn't all video, is not shown.
-                if let parsed = PrivateFilmNote.parse(result.text),
-                   !result.files.isEmpty, result.files.allSatisfy({ $0.kind.isVideo }) {
-                    film = parsed.film
-                    caption = parsed.caption
-                } else {
-                    shown = Opened(text: "This private video's description was rejected, so it isn't shown.",
-                                   original: "", files: [], trusted: false, film: nil, salt: result.salt)
-                }
-            }
-            if shown == nil {
-                let body = (film?.start ?? 0) > 0 && caption.isEmpty ? "Continues a private video." : caption
-                let lines = warnings + (body.isEmpty ? [] : [body])
-                shown = Opened(text: lines.joined(separator: "\n"), original: caption, files: result.files,
-                               trusted: isTrusted, film: film, salt: result.salt)
-            }
+            let posted = postedAt ?? Self.date(of: id)
+            let warning = replayWarning(result, id: id, postedAt: posted)
+            if let warning { warnings.append(warning) }
+            let shown = openedResult(result, trusted: isTrusted, warnings: warnings)
+            if opened.count > 2000 { clearOpened() }
+            opened[id] = (content, shown)
+            return shown
         }
         if opened.count > 2000 { clearOpened() }
-        opened[id] = (content, shown)
-        return shown
+        opened[id] = (content, nil)
+        return nil
+    }
+
+    @available(macOS 14, *)
+    private func openedResult(_ result: PrivateCrypto.Opened, trusted: Bool, warnings: [String]) -> Opened {
+        var caption = result.text
+        var film: PrivateFilm?
+        var reel: PrivateReel?
+        if PrivateFilmNote.begins(result.text) {
+            if let parsed = PrivateFilmNote.parse(result.text),
+               !result.files.isEmpty, result.files.allSatisfy({ $0.kind.isVideo }) {
+                film = parsed.film
+                caption = parsed.caption
+            } else {
+                return rejectedVideo(result.salt)
+            }
+        } else if PrivateReelNote.begins(result.text) {
+            if let parsed = PrivateReelNote.parse(result.text),
+               !result.files.isEmpty, result.files.allSatisfy(\.kind.isReelChunk),
+               parsed.reel.start + result.files.count <= parsed.reel.count {
+                reel = parsed.reel
+                caption = parsed.caption
+            } else {
+                return rejectedVideo(result.salt)
+            }
+        } else if result.files.contains(where: \.kind.isReelChunk) {
+            return rejectedVideo(result.salt)
+        }
+        let continues = (film?.start ?? 0) > 0 || (reel?.start ?? 0) > 0
+        let body = continues && caption.isEmpty ? "Continues a private video." : caption
+        let lines = warnings + (body.isEmpty ? [] : [body])
+        return Opened(text: lines.joined(separator: "\n"), original: caption, files: result.files,
+                      trusted: trusted, film: film, reel: reel, salt: result.salt)
+    }
+
+    private func rejectedVideo(_ salt: Data) -> Opened {
+        Opened(text: "This private video's description was rejected, so it isn't shown.",
+               original: "", files: [], trusted: false, film: nil, reel: nil, salt: salt)
     }
 
     /// Ten minutes covers clocks that are a little off and messages that took a while to send.
@@ -733,6 +803,8 @@ struct PrivateImage: Sendable {
     var filmSpan: Double = 0
     /// The pieces after this one, with no gaps. Only the piece at 0 carries them.
     var follows: [PrivateImage] = []
+    var reel: PrivateReel?
+    var reelPart: Int = 0
 
     /// By its attachment, which is unique to this image: removing an earlier image shifts the positions.
     var cacheKey: String { attachment.map { "attachment/\($0.id)" } ?? "\(messageID)/\(index)" }

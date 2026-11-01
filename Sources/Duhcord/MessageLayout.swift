@@ -115,12 +115,13 @@ enum MessageLayoutBuilder {
         // Encrypted images: their size comes inside the message, so space is reserved before they're decrypted.
         // They're the only way to see the picture, so with previews off they wait for a click instead of hiding.
         for image in privateImages {
+            if image.reel != nil, image.reelPart > 0 { continue }
             // Later pieces of a split video play from the first one. They aren't a second player.
             if image.filmID != nil, image.filmPart > 0 { continue }
             let size = fit(image.file.width, image.file.height, max: box)
             y += 6
             let available = image.trusted && image.attachment != nil
-            if image.file.kind.isVideo {
+            if image.file.kind.isVideo || image.file.kind.isReelChunk {
                 // Videos wait for a click: nothing that large downloads on its own.
                 let label = !image.trusted ? "Not shown: sent from a key you haven't accepted"
                     : (image.attachment == nil ? "Video unavailable" : nil)
@@ -588,6 +589,7 @@ final class MediaView: NSView, Playable {
     private var loader: StreamingLoader?
     /// A decrypted private video being played from memory.
     private var memoryLoader: MemoryAssetLoader?
+    private var reelLoader: ReelAssetLoader?
     /// Every piece of a split film, kept until playback stops so the join never waits on a download.
     private var filmLoaders: [MemoryAssetLoader] = []
     /// The same pieces, in order, when they could not be joined into one item.
@@ -619,6 +621,7 @@ final class MediaView: NSView, Playable {
     private var filmAnchor: String?
     /// Rebuilds a film from the messages loaded now. Nil when this row has no film.
     var filmResolver: ((PrivateImage) -> [PrivateImage])?
+    var reelResolver: ((PrivateImage) -> [PrivateImage]?)?
     private var statusObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
     private var isPlaying: Bool { animator != nil || player != nil }
@@ -759,6 +762,39 @@ final class MediaView: NSView, Playable {
     /// frame stays as the still afterwards.
     private func startPrivateVideo(_ video: PrivateImage) {
         guard video.trusted, video.attachment != nil, videoToken == nil, !filmOpening else { return }
+        if video.reel != nil {
+            guard let chunks = reelResolver?(video) else {
+                label.stringValue = "Part of this video hasn't loaded."
+                addSubview(label)
+                layoutLabel()
+                return
+            }
+            let loader = ReelAssetLoader(lengths: chunks.map { $0.file.length }) { index, done in
+                let chunk = chunks[index]
+                let token = ReelFetchToken()
+                DispatchQueue.main.async {
+                    let current = PrivateImageLoader.shared.data(for: chunk) { data in
+                        PrivateImageLoader.shared.discard(chunk)
+                        done(data)
+                    }
+                    if token.install(current), let current {
+                        PrivateImageLoader.shared.cancel(current, for: chunk)
+                    }
+                }
+                return {
+                    DispatchQueue.main.async {
+                        if let current = token.cancel() {
+                            PrivateImageLoader.shared.cancel(current, for: chunk)
+                        }
+                    }
+                }
+            }
+            reelLoader = loader
+            startPlayer(asset: loader.makeAsset(), retaining: nil, looping: false, muted: false)
+            PlaybackCoordinator.shared.startVideo(self)
+            refreshOverlays()
+            return
+        }
         if video.filmID != nil {
             guard let fresh = filmResolver?(video), fresh.first?.attachment != nil else { return }
             filmQueue = fresh
@@ -1224,6 +1260,8 @@ final class MediaView: NSView, Playable {
         looper?.disableLooping()
         player?.replaceCurrentItem(with: nil)
         loader?.cancelAll()
+        reelLoader?.cancelAll()
+        reelLoader = nil
         memoryLoader = nil
         playerView?.removeFromSuperview()
         playerView = nil
@@ -1370,4 +1408,27 @@ final class MediaView: NSView, Playable {
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .pointingHand)
     }
+}
+
+private final class ReelFetchToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: PrivateImageLoader.Token?
+    private var cancelled = false
+
+    func install(_ token: PrivateImageLoader.Token?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if cancelled { return true }
+        value = token
+        return false
+    }
+
+    func cancel() -> PrivateImageLoader.Token? {
+        lock.lock()
+        defer { lock.unlock() }
+        cancelled = true
+        defer { value = nil }
+        return value
+    }
+
 }

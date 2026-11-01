@@ -6,14 +6,14 @@ import UniformTypeIdentifiers
 import VideoToolbox
 import os
 
-/// Turns a video the user attached into what's sent, written straight to memory (a fragmented MP4) so it never
-/// touches the disk:
+/// Turns a video the user attached into what's sent:
 /// - Only the picture and sound are copied, so location, camera details and other metadata stay behind.
 /// - With "Compress videos" on (the default), a video that's too large is re-encoded with the Mac's hardware
 ///   encoder at a bitrate worked out from its length and the account's upload limit. Frame rate drops from 30
 ///   to 24 to 15 before the picture shrinks past 480, and nothing under 120 kbps of video is encoded. The
 ///   encoder is held to that bitrate for every second, so a busy picture cannot blow past the upload limit.
 ///   A video that already fits is only repackaged, which keeps its quality.
+/// - A private reel can be encoded once and handed out as encrypted, on-disk chunks.
 /// - H.264, which plays on every Discord app and on any operating system. A private video that already fits
 ///   and is HEVC is sent unchanged.
 // Active reader and writer references are protected by the cancellation-state lock.
@@ -64,6 +64,24 @@ final class VideoPrep: @unchecked Sendable {
         var activeMedia: ActiveMedia?
     }
 
+    private struct StreamingPlan: @unchecked Sendable {
+        let asset: AVAsset
+        let video: AVAssetTrack
+        let audio: [AVAssetTrack]
+        let duration: Double
+        let transform: CGAffineTransform
+        let size: CGSize
+        let picture: VideoEncode.Picture
+        let bitrate: Double
+    }
+
+    struct ReelResult {
+        let width: Int
+        let height: Int
+        let duration: Double
+        let thumbnail: NSImage
+    }
+
     // AVFoundation cancellation state is read and changed only while holding this lock.
     private let state = OSAllocatedUnfairLock(initialState: State())
 
@@ -81,6 +99,15 @@ final class VideoPrep: @unchecked Sendable {
     private var cancelled: Bool { state.withLock { $0.isCancelled } }
     /// Set once the user stops the job, including during the pause between chained messages.
     var isCancelled: Bool { cancelled }
+
+    func sendsUnchanged(_ url: URL, limit: Int) async -> Bool {
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= limit else { return false }
+        let asset = AVURLAsset(url: url)
+        guard let video = try? await asset.loadTracks(withMediaType: .video).first,
+              let formats = try? await video.load(.formatDescriptions),
+              let codec = formats.first.map(CMFormatDescriptionGetMediaSubType) else { return false }
+        return codec == kCMVideoCodecType_H264 || codec == kCMVideoCodecType_HEVC
+    }
 
     /// Off the main thread. `progress` (0...1) is called from a background queue.
     /// `clip` encodes only that stretch, used when a private video is split into pieces.
@@ -155,52 +182,172 @@ final class VideoPrep: @unchecked Sendable {
         throw Failure.tooLong(maxMinutes: Int(duration / 60 * 0.75))
     }
 
+    func reelDimensions(_ url: URL) async throws -> (width: Int, height: Int) {
+        let plan = try await streamingPlan(url)
+        return (Int(plan.picture.width), Int(plan.picture.height))
+    }
+
+    // swiftlint:disable:next function_body_length cyclomatic_complexity
+    func encodeReel(_ url: URL, progress: @escaping @Sendable (Double) -> Void,
+                    output: @escaping @Sendable (Data) throws -> Void) async throws
+        -> ReelResult {
+        let plan = try await streamingPlan(url)
+        let size = CGSize(width: plan.picture.width, height: plan.picture.height)
+        let thumbnail = await Self.thumbnail(plan.asset)
+        let naturalSize = try await plan.video.load(.naturalSize)
+        let uprightBounds = CGRect(origin: .zero, size: naturalSize).applying(plan.transform)
+        let translation = CGAffineTransform(translationX: -uprightBounds.minX, y: -uprightBounds.minY)
+        let normalized = plan.transform.concatenating(translation)
+        let scale = min(size.width / max(1, uprightBounds.width), size.height / max(1, uprightBounds.height))
+        let transform = normalized.concatenating(CGAffineTransform(scaleX: scale, y: scale))
+        let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: plan.video)
+        layerInstruction.setTransform(transform, at: .zero)
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: CMTime(seconds: plan.duration,
+                                                                            preferredTimescale: 600))
+        instruction.layerInstructions = [layerInstruction]
+        let composition = AVMutableVideoComposition()
+        composition.instructions = [instruction]
+        composition.renderSize = size
+        composition.frameDuration = CMTime(value: 1, timescale: Int32(plan.picture.fps))
+        composition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
+        composition.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+        composition.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
+
+        let reader = try AVAssetReader(asset: plan.asset)
+        let videoOutput = AVAssetReaderVideoCompositionOutput(videoTracks: [plan.video], videoSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        ])
+        videoOutput.videoComposition = composition
+        videoOutput.alwaysCopiesSampleData = false
+        guard reader.canAdd(videoOutput) else { throw Failure.failed }
+        reader.add(videoOutput)
+
+        var audioOutput: AVAssetReaderAudioMixOutput?
+        if !plan.audio.isEmpty {
+            let output = Self.audioReader(plan.audio)
+            guard reader.canAdd(output) else { throw Failure.failed }
+            reader.add(output)
+            audioOutput = output
+        }
+
+        let writer = AVAssetWriter(contentType: UTType.mpeg4Movie)
+        writer.outputFileTypeProfile = .mpeg4AppleHLS
+        writer.preferredOutputSegmentInterval = CMTime(seconds: 6, preferredTimescale: 600)
+        writer.initialSegmentStartTime = .zero
+        writer.shouldOptimizeForNetworkUse = true
+        let failed = OSAllocatedUnfairLock(initialState: false)
+        let segmentOutput = SegmentOutput(output: output, reader: reader, writer: writer, failed: failed)
+        writer.delegate = segmentOutput
+
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: Int(plan.picture.width),
+            AVVideoHeightKey: Int(plan.picture.height),
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: Int(plan.bitrate.rounded()),
+                AVVideoExpectedSourceFrameRateKey: plan.picture.fps,
+                AVVideoMaxKeyFrameIntervalDurationKey: 2,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+            ]
+        ])
+        videoInput.expectsMediaDataInRealTime = false
+        guard writer.canAdd(videoInput) else { throw Failure.failed }
+        writer.add(videoInput)
+
+        var audioInput: AVAssetWriterInput?
+        if audioOutput != nil {
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 44_100,
+                AVNumberOfChannelsKey: 2,
+                AVEncoderBitRateKey: 128_000
+            ])
+            input.expectsMediaDataInRealTime = false
+            guard writer.canAdd(input) else { throw Failure.failed }
+            writer.add(input)
+            audioInput = input
+        }
+
+        let activeMedia = ActiveMedia(reader: reader, writer: writer)
+        guard state.withLock({ state in
+            guard !state.isCancelled else { return false }
+            state.activeMedia = activeMedia
+            return true
+        }) else { throw CancellationError() }
+        defer { state.withLock { $0.activeMedia = nil } }
+
+        guard reader.startReading(), writer.startWriting() else {
+            reader.cancelReading()
+            writer.cancelWriting()
+            throw writer.error ?? reader.error ?? Failure.failed
+        }
+        writer.startSession(atSourceTime: .zero)
+
+        let group = DispatchGroup()
+        func feed(_ input: AVAssetWriterInput, _ output: AVAssetReaderOutput, reportsProgress: Bool) {
+            let queue = DispatchQueue(label: reportsProgress ? "duhcord.video.reel" : "duhcord.video.reel-audio",
+                                      qos: .userInitiated)
+            group.enter()
+            let pump = StreamingInputPump(input: input, output: output, duration: plan.duration,
+                                          reportsProgress: reportsProgress, progress: progress, state: state,
+                                          failed: failed)
+            input.requestMediaDataWhenReady(on: queue) { pump.step { group.leave() } }
+        }
+        feed(videoInput, videoOutput, reportsProgress: true)
+        if let audioInput, let audioOutput { feed(audioInput, audioOutput, reportsProgress: false) }
+        await Self.wait(group)
+
+        if cancelled {
+            reader.cancelReading()
+            writer.cancelWriting()
+            throw CancellationError()
+        }
+        if let error = segmentOutput.error {
+            writer.cancelWriting()
+            throw error
+        }
+        guard !failed.withLock({ $0 }), reader.status == .completed else {
+            writer.cancelWriting()
+            throw reader.error ?? writer.error ?? Failure.failed
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            writer.finishWriting { continuation.resume() }
+        }
+        if let error = segmentOutput.error { throw error }
+        guard writer.status == .completed else { throw writer.error ?? Failure.failed }
+        progress(1)
+        return ReelResult(width: Int(plan.picture.width), height: Int(plan.picture.height),
+                          duration: plan.duration, thumbnail: thumbnail)
+    }
+
+    private func streamingPlan(_ url: URL) async throws -> StreamingPlan {
+        let asset = AVURLAsset(url: url)
+        let duration = try await asset.load(.duration).seconds
+        guard duration.isFinite, duration > 0.1,
+              let video = try await asset.loadTracks(withMediaType: .video).first else { throw Failure.unreadable }
+        let audio = try await asset.loadTracks(withMediaType: .audio)
+        let (natural, transform, frameRate, estimatedDataRate) = try await video.load(
+            .naturalSize, .preferredTransform, .nominalFrameRate, .estimatedDataRate)
+        let shown = natural.applying(transform)
+        let display = CGSize(width: abs(shown.width), height: abs(shown.height))
+        guard display.width >= 2, display.height >= 2 else { throw Failure.unreadable }
+        let sourceBitrate = Double(estimatedDataRate)
+        let bitrate = sourceBitrate == 0
+            ? 2_500_000
+            : min(2_500_000, max(VideoEncode.minVideoBitrate, sourceBitrate))
+        let picture = VideoEncode.picture(width: display.width, height: display.height, videoBitrate: bitrate,
+                                          sourceFPS: Double(frameRate), hevc: false)
+        return StreamingPlan(asset: asset, video: video, audio: audio, duration: duration, transform: transform,
+                            size: display, picture: picture, bitrate: bitrate)
+    }
+
     private func checkSourceSize(_ url: URL, options: Options) throws -> Int {
         let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? .max
         guard options.compress || fileSize <= options.limit * 11 / 10 else {
             throw Failure.tooLarge(limit: options.limit)
         }
         return fileSize
-    }
-
-    /// Encodes `url` into pieces that each fit `options.limit`. One piece when the whole video fits; otherwise
-    /// successive stretches, handed over one at a time so a long film is never all in memory.
-    func preparePieces(_ url: URL, name: String, options: Options,
-                       progress: @escaping @Sendable (Double) -> Void,
-                       piece: @escaping (PreparedAttachment) async throws -> Void) async throws {
-        do {
-            try await piece(try await prepare(url, name: name, options: options, progress: progress))
-            return
-        } catch Failure.tooLong {
-        }
-        let asset = AVURLAsset(url: url)
-        let duration = try await asset.load(.duration).seconds
-        guard duration.isFinite, duration > 0.1 else { throw Failure.unreadable }
-        let hasAudio = try await asset.loadTracks(withMediaType: .audio).isEmpty == false
-        let floor = VideoEncode.minVideoBitrate + (hasAudio ? VideoEncode.minAudioBitrate : 0)
-        var slice = max(1, Double(options.limit) * Self.headroom * 8 / floor * 0.85)
-        var start = 0.0
-        var count = 0
-        while start < duration - 0.05 {
-            if cancelled { throw CancellationError() }
-            if count >= 48 {
-                throw Failure.tooLong(maxMinutes: max(1, Int(start / 60)))
-            }
-            let end = min(duration, start + slice)
-            let sliceStart = start
-            do {
-                let made = try await prepare(url, name: name, options: options, clip: sliceStart..<end) { fraction in
-                    progress(min(1, (sliceStart + fraction * (end - sliceStart)) / duration))
-                }
-                try await piece(made)
-                start = end
-                count += 1
-            } catch Failure.tooLong {
-                let shorter = (end - start) / 2
-                guard shorter >= 1 else { throw Failure.tooLong(maxMinutes: max(1, Int(start / 60))) }
-                slice = shorter
-            }
-        }
     }
 
     /// Which way a track's transform turns it, for the quarter turns phones record with.
@@ -244,9 +391,8 @@ final class VideoPrep: @unchecked Sendable {
         let input: AVAssetWriterInput
     }
 
-    /// `segmentInterval` `.indefinite` writes one fragment at the end, the only way the writer will pass picture
-    /// and sound through together.
-    private func makeWriter(_ output: MemoryOutput,
+    /// `indefinite` keeps a one-shot remux's picture and sound in one file.
+    private func makeWriter(_ output: AVAssetWriterDelegate,
                             segmentInterval: CMTime = CMTime(seconds: 4, preferredTimescale: 600)) -> AVAssetWriter {
         let writer = AVAssetWriter(contentType: UTType.mpeg4Movie)
         // Not CMAF: it allows only one track, so every video with sound failed.
@@ -362,6 +508,96 @@ final class VideoPrep: @unchecked Sendable {
                         return true
                     }
                     if finished { 
+                        input.markAsFinished()
+                        finish()
+                    }
+                }
+            }
+        }
+    }
+
+    private final class SegmentOutput: NSObject, AVAssetWriterDelegate, @unchecked Sendable {
+        private let lock = NSLock()
+        private let output: @Sendable (Data) throws -> Void
+        private weak var reader: AVAssetReader?
+        private weak var writer: AVAssetWriter?
+        private let failed: OSAllocatedUnfairLock<Bool>
+        private var storedError: Error?
+
+        init(output: @escaping @Sendable (Data) throws -> Void, reader: AVAssetReader, writer: AVAssetWriter,
+             failed: OSAllocatedUnfairLock<Bool>) {
+            self.output = output
+            self.reader = reader
+            self.writer = writer
+            self.failed = failed
+        }
+
+        func assetWriter(_ writer: AVAssetWriter, didOutputSegmentData segmentData: Data,
+                         segmentType: AVAssetSegmentType, segmentReport: AVAssetSegmentReport?) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard storedError == nil else { return }
+            do {
+                try output(segmentData)
+            } catch {
+                storedError = error
+                failed.withLock { $0 = true }
+                reader?.cancelReading()
+                self.writer?.cancelWriting()
+            }
+        }
+
+        var error: Error? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedError
+        }
+    }
+
+    private final class StreamingInputPump: @unchecked Sendable {
+        let input: AVAssetWriterInput
+        let output: AVAssetReaderOutput
+        let duration: Double
+        let reportsProgress: Bool
+        let progress: @Sendable (Double) -> Void
+        let state: OSAllocatedUnfairLock<State>
+        let failed: OSAllocatedUnfairLock<Bool>
+        private let done = OSAllocatedUnfairLock(initialState: false)
+
+        init(input: AVAssetWriterInput, output: AVAssetReaderOutput, duration: Double, reportsProgress: Bool,
+             progress: @escaping @Sendable (Double) -> Void, state: OSAllocatedUnfairLock<State>,
+             failed: OSAllocatedUnfairLock<Bool>) {
+            self.input = input
+            self.output = output
+            self.duration = duration
+            self.reportsProgress = reportsProgress
+            self.progress = progress
+            self.state = state
+            self.failed = failed
+        }
+
+        func step(finish: @escaping @Sendable () -> Void) {
+            while input.isReadyForMoreMediaData, !done.withLock({ $0 }) {
+                let shouldFinish = autoreleasepool {
+                    if state.withLock({ $0.isCancelled }) || failed.withLock({ $0 }) {
+                        return true
+                    }
+                    guard let sample = output.copyNextSampleBuffer() else { return true }
+                    if reportsProgress, duration > 0 {
+                        let fraction = CMSampleBufferGetPresentationTimeStamp(sample).seconds / duration
+                        progress(min(1, max(0, fraction)))
+                    }
+                    let shouldFinish = !input.append(sample)
+                    if shouldFinish { failed.withLock { $0 = true } }
+                    return shouldFinish
+                }
+                if shouldFinish {
+                    let finished = done.withLock { finished in
+                        guard !finished else { return false }
+                        finished = true
+                        return true
+                    }
+                    if finished {
                         input.markAsFinished()
                         finish()
                     }

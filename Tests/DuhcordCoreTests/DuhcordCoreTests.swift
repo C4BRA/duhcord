@@ -1343,6 +1343,66 @@ final class PrivateMessagingTests: XCTestCase {
         XCTAssertEqual(PrivateCrypto.openFile(sealed, file: file)?.count, 30_000)
     }
 
+    func testReelNoteRoundTripsAndRejectsMalformedFields() {
+        let reel = PrivateReel(id: Data((0..<16).map { UInt8($0) }), start: 4, count: 6, bytes: 123_456)
+        let text = PrivateReelNote.text(caption: "hello\nthere", reel: reel)
+        XCTAssertTrue(PrivateReelNote.begins(text))
+        XCTAssertEqual(PrivateReelNote.parse(text)?.reel, reel)
+        XCTAssertEqual(PrivateReelNote.parse(text)?.caption, "hello\nthere")
+        XCTAssertEqual(PrivateReelNote.newID().count, 16)
+        XCTAssertNil(PrivateReelNote.parse("hello"))
+        XCTAssertNil(PrivateReelNote.parse(text.replacingOccurrences(of: "\n", with: "")))
+        XCTAssertNil(PrivateReelNote.parse(text.replacingOccurrences(of: "0a", with: "0A")))
+        XCTAssertNil(PrivateReelNote.parse(text.replacingOccurrences(of: "0a", with: "0g")))
+        XCTAssertNil(PrivateReelNote.parse(text.replacingOccurrences(of: "/4/6/", with: "/4/6/7/")))
+        XCTAssertNil(PrivateReelNote.parse(text.replacingOccurrences(of: "/4/6/", with: "/x/6/")))
+        XCTAssertNil(PrivateReelNote.parse(text.replacingOccurrences(of: "/4/6/", with: "/4/x/")))
+        XCTAssertNil(PrivateReelNote.parse(text.replacingOccurrences(of: "/6/123456", with: "/6/x")))
+        XCTAssertNil(PrivateReelNote.parse(PrivateReelNote.text(
+            caption: "", reel: PrivateReel(id: reel.id, start: 0, count: 1, bytes: 1))))
+        XCTAssertNotNil(PrivateReelNote.parse(PrivateReelNote.text(
+            caption: "", reel: PrivateReel(id: reel.id, start: 0,
+                                           count: PrivateMessaging.maxReelChunks, bytes: 1))))
+        XCTAssertNil(PrivateReelNote.parse(PrivateReelNote.text(
+            caption: "", reel: PrivateReel(id: reel.id, start: 0,
+                                           count: PrivateMessaging.maxReelChunks + 1, bytes: 1))))
+        XCTAssertNil(PrivateReelNote.parse(PrivateReelNote.text(
+            caption: "", reel: PrivateReel(id: reel.id, start: -1, count: 2, bytes: 1))))
+        XCTAssertNil(PrivateReelNote.parse(PrivateReelNote.text(
+            caption: "", reel: PrivateReel(id: reel.id, start: 2, count: 2, bytes: 1))))
+        XCTAssertNil(PrivateReelNote.parse(PrivateReelNote.text(
+            caption: "", reel: PrivateReel(id: reel.id, start: 0, count: 2, bytes: 0))))
+        XCTAssertNil(PrivateReelNote.parse(PrivateReelNote.text(
+            caption: "", reel: PrivateReel(id: reel.id, start: 0, count: 2,
+                                            bytes: 2 * PrivateMessaging.maxFileBytes + 1))))
+    }
+
+    func testReelChunkFileAndMessageRoundTrip() throws {
+        guard #available(macOS 14, *) else { throw XCTSkip("HPKE needs macOS 14") }
+        let alice = Curve25519.KeyAgreement.PrivateKey(), bob = Curve25519.KeyAgreement.PrivateKey()
+        let firstData = Data(repeating: 0x31, count: 2048)
+        let secondData = Data(repeating: 0x72, count: 4096)
+        let (first, firstSealed) = try PrivateCrypto.sealFile(firstData, width: 1280, height: 720, kind: .reelChunk)
+        let (second, secondSealed) = try PrivateCrypto.sealFile(secondData, width: 1280, height: 720, kind: .reelChunk)
+        XCTAssertTrue(first.kind.isReelChunk)
+        XCTAssertFalse(first.kind.isVideo)
+        XCTAssertEqual(PrivateFile(first.encoded()), first)
+        let text = PrivateReelNote.text(caption: "clip", reel: PrivateReel(
+            id: PrivateReelNote.newID(), start: 0, count: 2, bytes: firstData.count + secondData.count))
+        let content = try PrivateCrypto.seal(text, files: [first, second], channelID: "5", sender: alice,
+                                             recipients: [bob.publicKey])
+        guard case .encrypted(let payload) = PrivateMessaging.kind(of: content) else { return XCTFail("not encrypted") }
+        let opened = try XCTUnwrap(PrivateCrypto.open(payload, channelID: "5", recipient: bob,
+                                                      senders: [alice.publicKey], fromSelf: false))
+        XCTAssertEqual(opened.files, [first, second])
+        XCTAssertEqual(PrivateCrypto.openFile(firstSealed, file: opened.files[0]), firstData)
+        XCTAssertEqual(PrivateCrypto.openFile(secondSealed, file: opened.files[1]), secondData)
+    }
+
+    func testPrivateUnchangedReelLimit() {
+        XCTAssertEqual(UploadLimit.privateUnchangedReelPlaintext, 200 * 1024 * 1024)
+    }
+
     func testAttachmentURLs() {
         XCTAssertTrue(MediaRequest.isAllowedAttachmentURL(URL(string: "https://cdn.discordapp.com/attachments/1/2/encrypted.bin?ex=1")!))
         XCTAssertFalse(MediaRequest.isAllowedAttachmentURL(URL(string: "http://cdn.discordapp.com/attachments/1/2/a")!))
