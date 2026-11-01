@@ -529,12 +529,20 @@ private enum FilmPlaybackError: Error {
 
 /// Pieces of one film, filled as each download finishes. Touched only on the main actor.
 private final class FilmGather: @unchecked Sendable {
+    let queue: [PrivateImage]
+    let generation: Int
+    let anchor: String?
     var slots: [Data?]
     var left: Int
+    var next = 0
+    var active = 0
 
-    init(count: Int) {
-        slots = Array(repeating: nil, count: count)
-        left = count
+    init(queue: [PrivateImage], generation: Int, anchor: String?) {
+        self.queue = queue
+        self.generation = generation
+        self.anchor = anchor
+        slots = Array(repeating: nil, count: queue.count)
+        left = queue.count
     }
 }
 
@@ -554,6 +562,12 @@ private final class TrackingSlider: NSSlider {
 final class MediaView: NSView, Playable {
     /// Spoilers and click-to-load images the user already opened this session.
     private static var revealed: Set<URL> = []
+    /// A joined film has no more than twelve pieces.
+    private static let joinedFilmPieceLimit = 12
+    /// A joined film uses no more than 256 MiB of file data.
+    private static let joinedFilmByteLimit = 256 * 1024 * 1024
+    /// At most three pieces download while a film is joined.
+    private static let simultaneousFilmDownloadLimit = 3
 
     private let imageView = NSImageView()
     private let label = NSTextField(labelWithString: "")
@@ -815,6 +829,17 @@ final class MediaView: NSView, Playable {
             playCurrentPart()
             return
         }
+        guard queue.count <= Self.joinedFilmPieceLimit else {
+            pieceByPiece = true
+            playCurrentPart()
+            return
+        }
+        let totalLength = queue.reduce(0) { $0 + $1.file.length }
+        guard totalLength <= Self.joinedFilmByteLimit else {
+            pieceByPiece = true
+            playCurrentPart()
+            return
+        }
         filmOpening = true
         playGeneration += 1
         let generation = playGeneration
@@ -822,32 +847,50 @@ final class MediaView: NSView, Playable {
         label.stringValue = "Decrypting \(queue.count) parts…"
         addSubview(label)
         layoutLabel()
-        let gathered = FilmGather(count: queue.count)
-        for (index, video) in queue.enumerated() {
-            guard playGeneration == generation else { return }
-            guard let token = PrivateImageLoader.shared.data(for: video, completion: { [weak self] data in
-                guard let self, self.playGeneration == generation,
-                      case .privateVideo(let current)? = self.item?.kind, current.cacheKey == anchor else { return }
-                guard let data else {
-                    self.showFailure()
-                    return
-                }
-                gathered.slots[index] = data
-                gathered.left -= 1
-                guard gathered.left == 0 else { return }
-                let parts = gathered.slots.compactMap { $0 }
-                guard parts.count == queue.count, self.playGeneration == generation else {
-                    self.showFailure()
-                    return
-                }
-                self.filmBytes = parts
-                for piece in queue { PrivateImageLoader.shared.discard(piece) }
-                self.filmDownloads = []
-                Task { @MainActor in
-                    await self.compose(parts, generation: generation, anchor: anchor)
-                }
-            }) else { continue }
-            filmDownloads.append((token, video))
+        let gathered = FilmGather(queue: queue, generation: generation, anchor: anchor)
+        startFilmDownloads(gathered)
+    }
+
+    private func startFilmDownloads(_ gathered: FilmGather) {
+        while playGeneration == gathered.generation,
+              gathered.active < Self.simultaneousFilmDownloadLimit,
+              gathered.next < gathered.queue.count {
+            let index = gathered.next
+            let video = gathered.queue[index]
+            gathered.next += 1
+            gathered.active += 1
+            let token = PrivateImageLoader.shared.data(for: video) { [weak self] data in
+                self?.filmDownloadCompleted(data, video: video, index: index, gathered: gathered)
+            }
+            if let token { filmDownloads.append((token, video)) }
+        }
+    }
+
+    private func filmDownloadCompleted(_ data: Data?, video: PrivateImage, index: Int, gathered: FilmGather) {
+        guard playGeneration == gathered.generation,
+              case .privateVideo(let current)? = item?.kind, current.cacheKey == gathered.anchor else { return }
+        gathered.active -= 1
+        filmDownloads.removeAll { $0.1.cacheKey == video.cacheKey }
+        guard let data else {
+            showFailure()
+            return
+        }
+        gathered.slots[index] = data
+        gathered.left -= 1
+        guard gathered.left == 0 else {
+            startFilmDownloads(gathered)
+            return
+        }
+        let parts = gathered.slots.compactMap { $0 }
+        guard parts.count == gathered.queue.count else {
+            showFailure()
+            return
+        }
+        filmBytes = parts
+        for piece in gathered.queue { PrivateImageLoader.shared.discard(piece) }
+        filmDownloads = []
+        Task { @MainActor in
+            await compose(parts, generation: gathered.generation, anchor: gathered.anchor)
         }
     }
 
