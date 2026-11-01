@@ -29,9 +29,6 @@ public enum UploadLimit {
         return PrivateMessaging.largestPlaintext(sealingWithin: perFile)
     }
 
-    /// How large one encoded private reel may be before it is split into chunks.
-    public static func privateReelPlaintext(premiumType: Int?) -> Int {
-        min(privatePiecePlaintext(premiumType: premiumType) * PrivateMessaging.maxReelChunks,
-            200 * 1024 * 1024)
-    }
+    /// Maximum source size to try unchanged before streaming an encode.
+    public static let privateUnchangedReelPlaintext = 200 * 1024 * 1024
 }

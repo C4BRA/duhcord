@@ -1360,8 +1360,12 @@ final class PrivateMessagingTests: XCTestCase {
         XCTAssertNil(PrivateReelNote.parse(text.replacingOccurrences(of: "/6/123456", with: "/6/x")))
         XCTAssertNil(PrivateReelNote.parse(PrivateReelNote.text(
             caption: "", reel: PrivateReel(id: reel.id, start: 0, count: 1, bytes: 1))))
+        XCTAssertNotNil(PrivateReelNote.parse(PrivateReelNote.text(
+            caption: "", reel: PrivateReel(id: reel.id, start: 0,
+                                           count: PrivateMessaging.maxReelChunks, bytes: 1))))
         XCTAssertNil(PrivateReelNote.parse(PrivateReelNote.text(
-            caption: "", reel: PrivateReel(id: reel.id, start: 0, count: 9, bytes: 1))))
+            caption: "", reel: PrivateReel(id: reel.id, start: 0,
+                                           count: PrivateMessaging.maxReelChunks + 1, bytes: 1))))
         XCTAssertNil(PrivateReelNote.parse(PrivateReelNote.text(
             caption: "", reel: PrivateReel(id: reel.id, start: -1, count: 2, bytes: 1))))
         XCTAssertNil(PrivateReelNote.parse(PrivateReelNote.text(
@@ -1395,12 +1399,8 @@ final class PrivateMessagingTests: XCTestCase {
         XCTAssertEqual(PrivateCrypto.openFile(secondSealed, file: opened.files[1]), secondData)
     }
 
-    func testPrivateReelLimit() {
-        for premium in [nil, 0, 1, 2, 3] {
-            let piece = UploadLimit.privatePiecePlaintext(premiumType: premium)
-            XCTAssertEqual(UploadLimit.privateReelPlaintext(premiumType: premium),
-                           min(piece * PrivateMessaging.maxReelChunks, 200 * 1024 * 1024))
-        }
+    func testPrivateUnchangedReelLimit() {
+        XCTAssertEqual(UploadLimit.privateUnchangedReelPlaintext, 200 * 1024 * 1024)
     }
 
     func testAttachmentURLs() {

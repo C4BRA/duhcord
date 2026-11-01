@@ -32,8 +32,8 @@ public enum PrivateMessaging {
     static let maxPlaintext = 64 * 1024
     /// Images and videos per message.
     public static let maxFiles = 4
-    /// Chunks in one private reel.
-    public static let maxReelChunks = 8
+    /// Chunks accepted in a private reel note.
+    public static let maxReelChunks = 1024
     /// Discord's upload limit without Nitro, less room for the rest of the request: what images are sized for, so
     /// four of them fit whatever the account.
     public static let maxUploadBytes = 20 * 1024 * 1024 - 64 * 1024

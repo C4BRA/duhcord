@@ -420,8 +420,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                     do {
                         let sourceSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                         let pieceLimit = UploadLimit.privatePiecePlaintext(premiumType: premium)
-                        if alone, sourceSize > pieceLimit,
-                           await prep.sendsUnchanged(url, limit: UploadLimit.privateReelPlaintext(premiumType: premium)) {
+                        if alone, sourceSize > pieceLimit {
                             let seconds = (try? await AVURLAsset(url: url).load(.duration).seconds) ?? 0
                             let icon = NSImage(systemSymbolName: "film", accessibilityDescription: "Video") ?? NSImage()
                             let placeholder = PreparedAttachment(data: Data(), width: 16, height: 9, kind: .mp4,
@@ -695,8 +694,6 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     private func sendFilm(_ url: URL, caption: String, placeholder: PreparedAttachment,
                           in channelID: Snowflake, key: DraftKey) {
         let pieceLimit = UploadLimit.privatePiecePlaintext(premiumType: store.premiumType)
-        let reelLimit = UploadLimit.privateReelPlaintext(premiumType: store.premiumType)
-        let options = VideoPrep.Options(limit: reelLimit, compress: true, forPrivate: true)
         let prep = VideoPrep()
         let jobID = UUID()
         jobOrder.append(jobID)
@@ -710,10 +707,13 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         let filmName = placeholder.name
         let owner = WeakReference(self)
         Task.detached(priority: .userInitiated) {
-            var nextIndex = 0
+            var spool: ReelSpool?
             var sentAny = false
-            // swiftlint:disable:next cyclomatic_complexity
-            func ship(_ items: inout [PreparedAttachment], reel: PrivateReel?) async throws {
+            var totalChunks = 1
+            var chunksSent = 0
+            defer { spool?.remove() }
+
+            func waitForSlot() async throws {
                 if prep.isCancelled { throw CancellationError() }
                 if sentAny {
                     try await Task.sleep(nanoseconds: 1_000_000_000)
@@ -724,30 +724,9 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                     try await rest.waitForMessageSlot(in: channelID)
                     if prep.isCancelled { throw CancellationError() }
                 }
-                let count = items.count
-                nextIndex += count
-                // Seal one batch and drop its plaintext before sending.
-                let sealed = try items.map {
-                    try PrivateCrypto.sealFile($0.data, width: $0.width, height: $0.height, kind: $0.kind)
-                }
-                items = []
-                if prep.isCancelled { throw CancellationError() }
-                let uploads = sealed.map {
-                    UploadFile(name: PrivateMessaging.fileName, data: $0.sealed,
-                               contentType: "application/octet-stream")
-                }
-                let perFile = await MainActor.run {
-                    UploadLimit.discordLimit(premiumType: owner.object?.store.premiumType)
-                }
-                guard uploads.allSatisfy({ $0.data.count <= perFile }),
-                      uploads.reduce(0, { $0 + $1.data.count }) <= UploadLimit.duhcordCap else {
-                    throw PrivateMessagingError.filesTooLarge
-                }
-                let body = reel.map { PrivateReelNote.text(caption: sentAny ? "" : caption, reel: $0) } ?? caption
-                let content = try await MainActor.run { () -> String in
-                    guard let chat = owner.object?.privateChat else { throw CancellationError() }
-                    return try chat.seal(body, files: sealed.map(\.file), in: channelID)
-                }
+            }
+
+            func send(_ content: String, uploads: [UploadFile], chunks: Int) async throws {
                 if prep.isCancelled { throw CancellationError() }
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                     Task { @MainActor in
@@ -761,34 +740,124 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                     }
                 }
                 sentAny = true
+                chunksSent += chunks
+                let fraction = 0.8 + 0.2 * Double(chunksSent) / Double(max(1, totalChunks))
+                await MainActor.run { owner.object?.updateJob(jobID, progress: fraction) }
             }
-            do {
-                let made = try await prep.prepare(url, name: filmName, options: options) { fraction in
-                    DispatchQueue.main.async { owner.object?.updateJob(jobID, progress: fraction) }
+
+            func checkUploadLimits(_ uploads: [UploadFile]) async throws {
+                let perFile = await MainActor.run {
+                    UploadLimit.discordLimit(premiumType: owner.object?.store.premiumType)
                 }
-                guard !made.data.isEmpty else { throw VideoPrep.Failure.failed }
-                if made.data.count <= pieceLimit {
-                    var items = [made]
-                    try await ship(&items, reel: nil)
-                } else {
-                    let chunkCount = (made.data.count + pieceLimit - 1) / pieceLimit
-                    guard chunkCount <= PrivateMessaging.maxReelChunks else {
-                        let minutes = max(1, Int(made.duration * Double(reelLimit) / Double(made.data.count) / 60))
-                        throw VideoPrep.Failure.tooLong(maxMinutes: minutes)
+                guard uploads.allSatisfy({ $0.data.count <= perFile }),
+                      uploads.reduce(0, { $0 + $1.data.count }) <= UploadLimit.duhcordCap else {
+                    throw PrivateMessagingError.filesTooLarge
+                }
+            }
+
+            func ship(_ items: inout [PreparedAttachment]) async throws {
+                guard !items.isEmpty else { return }
+                try await waitForSlot()
+                // Seal one batch and drop its plaintext before sending.
+                let sealed = try items.map {
+                    try PrivateCrypto.sealFile($0.data, width: $0.width, height: $0.height, kind: $0.kind)
+                }
+                let count = items.count
+                items = []
+                let uploads = sealed.map {
+                    UploadFile(name: PrivateMessaging.fileName, data: $0.sealed,
+                               contentType: "application/octet-stream")
+                }
+                try await checkUploadLimits(uploads)
+                let content = try await MainActor.run { () throws -> String in
+                    guard let chat = owner.object?.privateChat else { throw CancellationError() }
+                    return try chat.seal(caption, files: sealed.map(\.file), in: channelID)
+                }
+                try await send(content, uploads: uploads, chunks: count)
+            }
+
+            func ship(_ source: ReelSpool, reelID: Data, thumbnail: NSImage) async throws {
+                let files = source.files
+                guard !files.isEmpty else { throw VideoPrep.Failure.failed }
+                totalChunks = files.count
+                if files.count == 1 {
+                    guard let data = PrivateCrypto.openFile(try source.sealedChunk(0), file: files[0]) else {
+                        throw VideoPrep.Failure.failed
                     }
-                    let reelID = PrivateReelNote.newID()
-                    var pending: [PreparedAttachment] = []
-                    for start in stride(from: 0, to: made.data.count, by: pieceLimit) {
-                        if prep.isCancelled { throw CancellationError() }
-                        let end = min(made.data.count, start + pieceLimit)
-                        pending.append(PreparedAttachment(
-                            data: made.data.subdata(in: start..<end), width: made.width, height: made.height,
-                            kind: .reelChunk, thumbnail: made.thumbnail, name: filmName, duration: made.duration))
-                        if pending.count == PrivateMessaging.maxFiles || end == made.data.count {
-                            let reel = PrivateReel(id: reelID, start: nextIndex, count: chunkCount, bytes: made.data.count)
-                            try await ship(&pending, reel: reel)
+                    var items = [PreparedAttachment(data: data, width: files[0].width, height: files[0].height,
+                                                    kind: .mp4, thumbnail: thumbnail, name: filmName)]
+                    try await ship(&items)
+                    return
+                }
+                for start in stride(from: 0, to: files.count, by: PrivateMessaging.maxFiles) {
+                    try await waitForSlot()
+                    let end = min(files.count, start + PrivateMessaging.maxFiles)
+                    let batchFiles = Array(files[start..<end])
+                    let uploads = try (start..<end).map { index in
+                        UploadFile(name: PrivateMessaging.fileName, data: try source.sealedChunk(index),
+                                   contentType: "application/octet-stream")
+                    }
+                    try await checkUploadLimits(uploads)
+                    let note = PrivateReelNote.text(
+                        caption: sentAny ? "" : caption,
+                        reel: PrivateReel(id: reelID, start: start, count: files.count, bytes: source.totalBytes))
+                    let content = try await MainActor.run { () throws -> String in
+                        guard let chat = owner.object?.privateChat else { throw CancellationError() }
+                        return try chat.seal(note, files: batchFiles, in: channelID)
+                    }
+                    try await send(content, uploads: uploads, chunks: end - start)
+                }
+            }
+
+            do {
+                var unchanged: PreparedAttachment?
+                if await prep.sendsUnchanged(url, limit: UploadLimit.privateUnchangedReelPlaintext) {
+                    do {
+                        unchanged = try await prep.prepare(
+                            url, name: filmName,
+                            options: VideoPrep.Options(limit: UploadLimit.privateUnchangedReelPlaintext,
+                                                       compress: false, forPrivate: true)
+                        ) { fraction in
+                            DispatchQueue.main.async {
+                                owner.object?.updateJob(jobID, progress: min(0.8, max(0, fraction * 0.8)))
+                            }
                         }
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        unchanged = nil
                     }
+                }
+                if let unchanged {
+                    guard !unchanged.data.isEmpty else { throw VideoPrep.Failure.failed }
+                    if unchanged.data.count <= pieceLimit {
+                        totalChunks = 1
+                        var items = [unchanged]
+                        try await ship(&items)
+                    } else {
+                        let source = try ReelSpool(chunkBytes: pieceLimit)
+                        spool = source
+                        source.size = (unchanged.width, unchanged.height)
+                        try source.append(unchanged.data)
+                        try source.finish()
+                        try await ship(source, reelID: PrivateReelNote.newID(), thumbnail: unchanged.thumbnail)
+                    }
+                } else {
+                    let dimensions = try await prep.reelDimensions(url)
+                    let source = try ReelSpool(chunkBytes: pieceLimit)
+                    spool = source
+                    source.size = dimensions
+                    let encoded = try await prep.encodeReel(url, progress: { fraction in
+                        DispatchQueue.main.async {
+                            owner.object?.updateJob(jobID, progress: min(0.8, max(0, fraction * 0.8)))
+                        }
+                    }, output: { try source.append($0) })
+                    guard encoded.width == dimensions.width, encoded.height == dimensions.height else {
+                        throw VideoPrep.Failure.failed
+                    }
+                    try source.finish()
+                    await MainActor.run { owner.object?.updateJob(jobID, progress: 0.8) }
+                    try await ship(source, reelID: PrivateReelNote.newID(), thumbnail: encoded.thumbnail)
                 }
                 await MainActor.run {
                     guard let self = owner.object else { return }
