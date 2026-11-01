@@ -209,6 +209,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate, NSMenuIt
     /// This account is going away (switched from, logged out): its call ends and every window it opened closes.
     func closeAll() {
         switcher = nil
+        messages.cancelAllJobs()
         profiles.closeAll()
         accountPopover?.close()
         channelList.closePopovers()

@@ -207,6 +207,7 @@ private final class RangeTask: NSObject, URLSessionDataDelegate, @unchecked Send
 final class GIFAnimator {
     private var stopped = true
     private var timer: Timer?
+    private var fetchTask: Task<Void, Never>?
     private var frames: [CGImage] = []
     private var delays: [Double] = []
     private var frameIndex = 0
@@ -219,6 +220,7 @@ final class GIFAnimator {
         cache.totalCostLimit = 16 * 1024 * 1024
         return cache
     }()
+    private static let downloadLimit = 32 * 1024 * 1024
     private static let animatableTypes: Set<String> = ["com.compuserve.gif", "org.webmproject.webp", "public.png"]
 
     /// Fetches the animation through the media session (or the cache) and calls `frame` on the main thread.
@@ -229,20 +231,13 @@ final class GIFAnimator {
         failedCallback = failed
         let owner = WeakReference(self)
         let callbacks = Handoff(value: (frame: frame, failed: failed))
-        Task {
-            let data: Data
-            if let cached = Self.cache.object(forKey: url as NSURL) {
-                data = cached as Data
-            } else {
-                guard MediaRequest.isAllowedImageURL(url),
-                      let result = try? await SecureSession.media.session.data(from: url),
-                      (result.1 as? HTTPURLResponse)?.statusCode == 200 else {
-                    await MainActor.run { owner.object?.fail() }
-                    return
-                }
-                data = result.0
-                Self.cache.setObject(data as NSData, forKey: url as NSURL, cost: data.count)
+        fetchTask = Task {
+            guard let data = await Self.fetchData(from: url) else {
+                guard !Task.isCancelled else { return }
+                await MainActor.run { owner.object?.fail() }
+                return
             }
+            guard !Task.isCancelled else { return }
             let bytes = Handoff(value: data)
             await MainActor.run {
                 guard let animator = owner.object, !animator.stopped else { return }
@@ -263,8 +258,20 @@ final class GIFAnimator {
         }
     }
 
+    private static func fetchData(from url: URL) async -> Data? {
+        guard !Task.isCancelled else { return nil }
+        if let cached = cache.object(forKey: url as NSURL) { return cached as Data }
+        guard MediaRequest.isAllowedImageURL(url),
+              let data = await CappedDownload.data(from: url, limit: downloadLimit),
+              !Task.isCancelled else { return nil }
+        cache.setObject(data as NSData, forKey: url as NSURL, cost: data.count)
+        return data
+    }
+
     func cancel() {
         stopped = true
+        fetchTask?.cancel()
+        fetchTask = nil
         timer?.invalidate()
         timer = nil
         frames = []
