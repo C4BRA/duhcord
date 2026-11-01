@@ -1352,14 +1352,34 @@ final class PrivateMessagingTests: XCTestCase {
     }
 
     func testMultipartBody() throws {
-        let body = Multipart(json: Data(#"{"content":"x"}"#.utf8),
-                             files: [UploadFile(name: "encrypted.bin", data: Data([1, 2, 3]), contentType: "application/octet-stream")],
-                             boundary: "B")
-        XCTAssertEqual(body.contentType, "multipart/form-data; boundary=B")
-        let text = String(decoding: body.body, as: UTF8.self)
-        XCTAssertTrue(text.hasPrefix("--B\r\nContent-Disposition: form-data; name=\"payload_json\"\r\n"))
-        XCTAssertTrue(text.contains(#"name="files[0]"; filename="encrypted.bin""#))
-        XCTAssertTrue(text.hasSuffix("--B--\r\n"))
+        let json = Data(#"{"content":"x"}"#.utf8)
+        let files = [
+            UploadFile(name: "encrypted.bin", data: Data([1, 2, 3]), contentType: "application/octet-stream")
+        ]
+        let multipart = try Multipart(json: json, files: files, boundary: "B")
+        defer { try? FileManager.default.removeItem(at: multipart.fileURL) }
+
+        var expected = Data()
+        func line(_ text: String) { expected.append(Data((text + "\r\n").utf8)) }
+        line("--B")
+        line("Content-Disposition: form-data; name=\"payload_json\"")
+        line("Content-Type: application/json")
+        line("")
+        expected.append(json)
+        line("")
+        for (index, file) in files.enumerated() {
+            line("--B")
+            line("Content-Disposition: form-data; name=\"files[\(index)]\"; "
+                 + "filename=\"\(file.name)\"")
+            line("Content-Type: " + file.contentType)
+            line("")
+            expected.append(file.data)
+            line("")
+        }
+        line("--B--")
+
+        XCTAssertEqual(multipart.contentType, "multipart/form-data; boundary=B")
+        XCTAssertEqual(try Data(contentsOf: multipart.fileURL), expected)
     }
 
     func testSealAndOpen() throws {
