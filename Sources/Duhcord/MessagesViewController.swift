@@ -473,6 +473,10 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     private func clearAttachments() {
+        cancelAllJobs()
+    }
+
+    func cancelAllJobs() {
         jobs.values.forEach { $0.video?.cancel() }
         jobs = [:]
         jobOrder = []

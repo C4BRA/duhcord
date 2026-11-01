@@ -97,8 +97,8 @@ final class VideoPrep: @unchecked Sendable {
         let shown = natural.applying(transform)
         let display = CGSize(width: abs(shown.width), height: abs(shown.height))
         guard display.width >= 2, display.height >= 2 else { throw Failure.unreadable }
+        let fileSize = try checkSourceSize(url, options: options)
         let thumbnail = await Self.thumbnail(asset)
-        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? .max
 
         func finish(_ data: Data, size: CGSize, length: Double) -> PreparedAttachment {
             PreparedAttachment(data: data, width: Int(size.width), height: Int(size.height), kind: .mp4,
@@ -153,6 +153,14 @@ final class VideoPrep: @unchecked Sendable {
             guard videoBitrate >= VideoEncode.minVideoBitrate else { break }
         }
         throw Failure.tooLong(maxMinutes: Int(duration / 60 * 0.75))
+    }
+
+    private func checkSourceSize(_ url: URL, options: Options) throws -> Int {
+        let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? .max
+        guard options.compress || fileSize <= options.limit * 11 / 10 else {
+            throw Failure.tooLarge(limit: options.limit)
+        }
+        return fileSize
     }
 
     /// Encodes `url` into pieces that each fit `options.limit`. One piece when the whole video fits; otherwise
@@ -552,16 +560,35 @@ final class VideoPrep: @unchecked Sendable {
         }) else { throw CancellationError() }
         defer { state.withLock { $0.activeMedia = nil } }
         guard reader.startReading() else { throw Failure.failed }
-        var samples: [CMSampleBuffer] = []
-        while !cancelled, let sample = output.copyNextSampleBuffer() {
-            samples.append(Self.shifted(sample, from: origin))
+        return try readSoundPackets(from: reader, output: output, bitrate: bitrate, origin: origin)
+    }
+
+    private func readSoundPackets(from reader: AVAssetReader, output: AVAssetReaderAudioMixOutput,
+                                  bitrate: Double, origin: CMTime) throws -> [CMSampleBuffer] {
+        guard let first = output.copyNextSampleBuffer() else {
+            if cancelled {
+                reader.cancelReading()
+                throw CancellationError()
+            }
+            throw Failure.failed
+        }
+        let packets: [CMSampleBuffer]
+        do {
+            packets = try Self.aacPackets(
+                output, first: Self.shifted(first, from: origin), bitrate: bitrate, origin: origin)
+        } catch {
+            if cancelled {
+                reader.cancelReading()
+                throw CancellationError()
+            }
+            throw error
         }
         if cancelled {
             reader.cancelReading()
             throw CancellationError()
         }
-        guard reader.status == .completed, !samples.isEmpty else { throw Failure.failed }
-        return try Self.aacPackets(samples, bitrate: bitrate)
+        guard reader.status == .completed, !packets.isEmpty else { throw Failure.failed }
+        return packets
     }
 
     /// Puts the already-capped H.264 pictures, and AAC for the sound, into the same fragmented MP4 as a remux.
@@ -630,7 +657,7 @@ final class VideoPrep: @unchecked Sendable {
         }
     }
 
-    /// The sound mixed down to PCM. AAC is made from it before the picture is read.
+    /// Reads stereo PCM and makes AAC before the picture is read.
     /// Two channels even at the lowest bitrate: a mono mix came back with nothing to play.
     private static func audioReader(_ tracks: [AVAssetTrack]) -> AVAssetReaderAudioMixOutput {
         let output = AVAssetReaderAudioMixOutput(audioTracks: tracks, audioSettings: [
@@ -647,10 +674,12 @@ final class VideoPrep: @unchecked Sendable {
     }
 
     /// AAC packets starting at the first sample's time. Empty when there is nothing to encode.
-    private static func aacPackets(_ samples: [CMSampleBuffer], bitrate: Double) throws -> [CMSampleBuffer] {
-        guard let first = samples.first else { return [] }
+    private static func aacPackets(_ output: AVAssetReaderAudioMixOutput, first: CMSampleBuffer,
+                                   bitrate: Double, origin: CMTime) throws -> [CMSampleBuffer] {
         guard let sourceDescription = CMSampleBufferGetFormatDescription(first),
-              let basic = CMAudioFormatDescriptionGetStreamBasicDescription(sourceDescription) else { throw Failure.failed }
+              let basic = CMAudioFormatDescriptionGetStreamBasicDescription(sourceDescription) else {
+            throw Failure.failed
+        }
         guard let source = AVAudioFormat(streamDescription: basic),
               let destination = AVAudioFormat(settings: [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -659,7 +688,7 @@ final class VideoPrep: @unchecked Sendable {
                 AVEncoderBitRateKey: Int(bitrate),
               ]),
               let converter = AVAudioConverter(from: source, to: destination) else { throw Failure.failed }
-        let sourceBuffers = PCMSource(samples: samples, format: source)
+        let sourceBuffers = PCMSource(output: output, first: first, format: source, origin: origin)
         var encoded: [CMSampleBuffer] = []
         var failure: NSError?
         let sampleRate = basic.pointee.mSampleRate
@@ -729,17 +758,19 @@ final class VideoPrep: @unchecked Sendable {
         return sample
     }
 
-    /// PCM handed over in the pieces the converter asked for. A whole read is longer than that, and the rest of it
-    /// has to wait for the next request.
+    /// Supplies converter-sized slices from the reader as samples arrive.
     private final class PCMSource: @unchecked Sendable {
-        let samples: [CMSampleBuffer]
+        let output: AVAssetReaderAudioMixOutput
         let format: AVAudioFormat
-        var index = 0
+        let origin: CMTime
+        var sample: CMSampleBuffer?
         var offset = 0
 
-        init(samples: [CMSampleBuffer], format: AVAudioFormat) {
-            self.samples = samples
+        init(output: AVAssetReaderAudioMixOutput, first: CMSampleBuffer, format: AVAudioFormat, origin: CMTime) {
+            self.output = output
+            sample = first
             self.format = format
+            self.origin = origin
         }
 
         func next(_ outStatus: UnsafeMutablePointer<AVAudioConverterInputStatus>, packets requested: AVAudioPacketCount) -> AVAudioBuffer? {
@@ -748,10 +779,18 @@ final class VideoPrep: @unchecked Sendable {
                 outStatus.pointee = .noDataNow
                 return nil
             }
-            while index < samples.count {
-                let available = CMSampleBufferGetNumSamples(samples[index]) - offset
+            while true {
+                guard let sample else {
+                    guard let next = output.copyNextSampleBuffer() else {
+                        outStatus.pointee = .endOfStream
+                        return nil
+                    }
+                    self.sample = VideoPrep.shifted(next, from: origin)
+                    continue
+                }
+                let available = CMSampleBufferGetNumSamples(sample) - offset
                 if available <= 0 {
-                    index += 1
+                    self.sample = nil
                     offset = 0
                     continue
                 }
@@ -761,21 +800,19 @@ final class VideoPrep: @unchecked Sendable {
                     return nil
                 }
                 pcm.frameLength = AVAudioFrameCount(frames)
-                guard CMSampleBufferCopyPCMDataIntoAudioBufferList(samples[index], at: Int32(offset), frameCount: Int32(frames),
+                guard CMSampleBufferCopyPCMDataIntoAudioBufferList(sample, at: Int32(offset), frameCount: Int32(frames),
                                                                    into: pcm.mutableAudioBufferList) == noErr else {
                     outStatus.pointee = .noDataNow
                     return nil
                 }
                 offset += frames
-                if offset >= CMSampleBufferGetNumSamples(samples[index]) {
-                    index += 1
+                if offset >= CMSampleBufferGetNumSamples(sample) {
+                    self.sample = nil
                     offset = 0
                 }
                 outStatus.pointee = .haveData
                 return pcm
             }
-            outStatus.pointee = .endOfStream
-            return nil
         }
     }
 

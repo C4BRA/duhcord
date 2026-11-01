@@ -47,8 +47,10 @@ public actor RESTClient {
             return
         }
         body["attachments"] = files.enumerated().map { ["id": $0.offset, "filename": $0.element.name] as [String: Any] }
-        let multipart = Multipart(json: try JSONSerialization.data(withJSONObject: body), files: files)
-        _ = try await request("POST", "/channels/\(channelID)/messages", raw: (data: multipart.body, contentType: multipart.contentType))
+        let multipart = try Multipart(json: try JSONSerialization.data(withJSONObject: body), files: files)
+        defer { try? FileManager.default.removeItem(at: multipart.fileURL) }
+        _ = try await request("POST", "/channels/\(channelID)/messages",
+                              uploadFile: (url: multipart.fileURL, contentType: multipart.contentType))
     }
 
     /// Edits one of our messages: new text (nil leaves it), keeping only the attachments listed (the rest are
@@ -197,7 +199,7 @@ public actor RESTClient {
     }
 
     private func request(_ method: String, _ path: String, query: [URLQueryItem] = [], body: [String: Any]? = nil,
-                         raw: (data: Data, contentType: String)? = nil, attempt: Int = 0) async throws -> Data {
+                         uploadFile: (url: URL, contentType: String)? = nil, attempt: Int = 0) async throws -> Data {
         var components = URLComponents(url: ClientIdentity.apiBase.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
         if !query.isEmpty { components.queryItems = query }
 
@@ -210,12 +212,11 @@ public actor RESTClient {
         if let body {
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        } else if let raw {
-            req.httpBody = raw.data
-            req.setValue(raw.contentType, forHTTPHeaderField: "Content-Type")
+        } else if let uploadFile {
+            req.setValue(uploadFile.contentType, forHTTPHeaderField: "Content-Type")
         }
 
-        let (data, response) = try await session.data(for: req)
+        let (data, response) = try await transfer(req, from: uploadFile?.url)
         guard let http = response as? HTTPURLResponse else { throw RESTError.invalidResponse }
         if method == "POST" { rememberMessageSlot(http, path: path, body: data) }
 
@@ -231,12 +232,18 @@ public actor RESTClient {
             let wait = (try? decoder.decode(RateLimited.self, from: data).retryAfter) ?? 1
             // Clamped so a bogus value can't overflow the sleep or stall a request for hours.
             try await Task.sleep(nanoseconds: UInt64(min(max(wait, 0.1), 60) * 1_000_000_000))
-            return try await request(method, path, query: query, body: body, raw: raw, attempt: attempt + 1)
+            return try await request(
+                method, path, query: query, body: body, uploadFile: uploadFile, attempt: attempt + 1)
         default:
             let body = try? decoder.decode(ErrorBody.self, from: data)
             if body?.captchaKey != nil { throw RESTError.captchaRequired }
             throw RESTError.http(status: http.statusCode, message: body?.message)
         }
+    }
+
+    private func transfer(_ request: URLRequest, from file: URL?) async throws -> (Data, URLResponse) {
+        if let file { return try await session.upload(for: request, fromFile: file) }
+        return try await session.data(for: request)
     }
 
     /// Waits out a message bucket that is already empty, and a global limit, before another send.
@@ -282,28 +289,42 @@ public struct UploadFile: Sendable {
 
 /// A multipart/form-data body: the message as `payload_json`, then the files as `files[0]`, `files[1]`…
 struct Multipart {
-    let body: Data
+    let fileURL: URL
     let contentType: String
 
-    init(json: Data, files: [UploadFile], boundary: String = "duhcord-" + UUID().uuidString) {
-        var body = Data()
-        func line(_ text: String) { body.append(Data((text + "\r\n").utf8)) }
-        line("--" + boundary)
-        line("Content-Disposition: form-data; name=\"payload_json\"")
-        line("Content-Type: application/json")
-        line("")
-        body.append(json)
-        line("")
-        for (index, file) in files.enumerated() {
-            line("--" + boundary)
-            line("Content-Disposition: form-data; name=\"files[\(index)]\"; filename=\"\(file.name)\"")
-            line("Content-Type: " + file.contentType)
-            line("")
-            body.append(file.data)
-            line("")
+    init(json: Data, files: [UploadFile], boundary: String = "duhcord-" + UUID().uuidString) throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("duhcord-upload-\(UUID().uuidString).multipart")
+        guard FileManager.default.createFile(atPath: fileURL.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
         }
-        line("--" + boundary + "--")
-        self.body = body
+        do {
+            let handle = try FileHandle(forWritingTo: fileURL)
+            defer { try? handle.close() }
+            func line(_ text: String) throws {
+                try handle.write(contentsOf: Data((text + "\r\n").utf8))
+            }
+            try line("--" + boundary)
+            try line("Content-Disposition: form-data; name=\"payload_json\"")
+            try line("Content-Type: application/json")
+            try line("")
+            try handle.write(contentsOf: json)
+            try line("")
+            for (index, file) in files.enumerated() {
+                try line("--" + boundary)
+                try line("Content-Disposition: form-data; name=\"files[\(index)]\"; "
+                         + "filename=\"\(file.name)\"")
+                try line("Content-Type: " + file.contentType)
+                try line("")
+                try handle.write(contentsOf: file.data)
+                try line("")
+            }
+            try line("--" + boundary + "--")
+        } catch {
+            try? FileManager.default.removeItem(at: fileURL)
+            throw error
+        }
+        self.fileURL = fileURL
         contentType = "multipart/form-data; boundary=" + boundary
     }
 }
