@@ -20,11 +20,13 @@ import DuhcordCore
 /// Main thread only. Private messaging needs macOS 14 (HPKE); on macOS 13 the toggle stays switched off.
 @MainActor
 final class PrivateChatController {
-    enum Mode { case standard, `private` }
+    enum Mode { case standard, `private`, locked }
 
     enum Status: Equatable {
         /// macOS 13, a server channel or a group DM.
         case unavailable
+        /// The login keychain couldn't be opened, so the saved mode is unknown.
+        case locked
         /// Switched to Private, but no key of the other person's is trusted yet. `newKey`: one is waiting to be accepted.
         case waiting(newKey: Bool)
         /// `newKey`: a key besides the accepted ones is waiting (a new Mac of theirs, or someone in the middle).
@@ -146,6 +148,8 @@ final class PrivateChatController {
     private var firstWithSalt: [Data: Snowflake] = [:]
     private var loadedFor: Snowflake?
     private var privateKey: Curve25519.KeyAgreement.PrivateKey?
+    private(set) var keychainLocked = false
+    private var standardWhileLocked: Set<Snowflake> = []
     /// A private message as opened: its text (with any warning lines), its images, and whether its sender's key
     /// is trusted (images from a key that isn't aren't decoded).
     private struct Opened {
@@ -163,6 +167,16 @@ final class PrivateChatController {
     /// Opened private messages by ID, with the content they were opened from (an edit replaces it), nil when it
     /// couldn't be read. Cleared when keys change.
     private var opened: [Snowflake: (content: String, value: Opened?)] = [:]
+    private var openedGeneration: UInt64 = 0
+    private struct FilmChainStamp: Equatable {
+        let channelID: Snowflake
+        let author: Snowflake
+        let messageCount: Int
+        let lastMessageID: Snowflake?
+        let openedGeneration: UInt64
+    }
+    private typealias FilmChainResult = (owner: Snowflake?, start: PrivateImage?, follows: [PrivateImage])
+    private var filmChainCache: [Data: (stamp: FilmChainStamp, result: FilmChainResult)] = [:]
     /// Whether each person's current safety number is the one that was verified. Checked often (menus, the
     /// toolbar, every mouse move of a drag), so it's remembered until the keys or the directory change.
     private var verifiedCache: [Snowflake: Bool] = [:]
@@ -183,12 +197,29 @@ final class PrivateChatController {
         guard let me = store.me?.id else { return nil }
         if loadedFor != me {
             loadedFor = me
+            keychainLocked = false
+            standardWhileLocked = []
             verifiedCache = [:]
-            privateKey = Keychain.data(service: Self.keyService, account: me)
-                .flatMap { try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: $0) }
-            directory = Keychain.data(service: Self.directoryService, account: me)
-                .flatMap { try? JSONDecoder().decode(Directory.self, from: $0) } ?? Directory()
+            switch Keychain.read(service: Self.keyService, account: me) {
+            case .value(let data):
+                privateKey = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: data)
+            case .missing:
+                privateKey = nil
+            case .denied:
+                privateKey = nil
+                keychainLocked = true
+            }
+            switch Keychain.read(service: Self.directoryService, account: me) {
+            case .value(let data):
+                directory = (try? JSONDecoder().decode(Directory.self, from: data)) ?? Directory()
+            case .missing:
+                directory = Directory()
+            case .denied:
+                directory = Directory()
+                keychainLocked = true
+            }
         }
+        guard !keychainLocked else { return nil }
         if privateKey == nil, create {
             let key = Curve25519.KeyAgreement.PrivateKey()
             if Keychain.setData(key.rawRepresentation, service: Self.keyService, account: me) { privateKey = key }
@@ -199,15 +230,36 @@ final class PrivateChatController {
 
     /// Every change to the directory is saved, so this is also where remembered verification goes stale.
     private func saveDirectory() {
+        guard !keychainLocked else { return }
         verifiedCache = [:]
         guard let me = loadedFor, let data = try? JSONEncoder().encode(directory) else { return }
         Keychain.setData(data, service: Self.directoryService, account: me)
     }
 
+    func retryKeychain() {
+        AccountStore.retry()
+        loadedFor = nil
+        keychainLocked = false
+        privateKey = nil
+        directory = Directory()
+        standardWhileLocked = []
+        clearOpened()
+        firstWithSalt = [:]
+        _ = loadIfNeeded()
+        onChange?(nil)
+    }
+
+    private func clearOpened() {
+        opened = [:]
+        openedGeneration &+= 1
+        filmChainCache = [:]
+    }
+
     /// After keys were accepted, rejected or approved: messages are read again with the new set.
     private func keysChanged(in channelID: Snowflake?) {
+        guard !keychainLocked else { return }
         saveDirectory()
-        opened = [:]
+        clearOpened()
         firstWithSalt = [:]
         onChange?(channelID)
         NotificationCenter.default.post(name: Self.devicesDidChange, object: self)
@@ -224,13 +276,17 @@ final class PrivateChatController {
     }
 
     func mode(for channelID: Snowflake) -> Mode {
-        guard status(for: channelID) != .unavailable else { return .standard }
+        let state = status(for: channelID)
+        guard state != .unavailable else { return .standard }
+        if standardWhileLocked.contains(channelID) { return .standard }
+        if state == .locked { return .locked }
         return directory.privateChannels.contains(channelID) ? .private : .standard
     }
 
     func status(for channelID: Snowflake) -> Status {
         guard Self.isSupported, let peer = peer(in: channelID) else { return .unavailable }
         _ = loadIfNeeded()
+        if keychainLocked { return .locked }
         let newKey = !directory.keys(of: peer.id, .pending).isEmpty
         guard !directory.keys(of: peer.id, .accepted).isEmpty else { return .waiting(newKey: newKey) }
         let verified: Bool
@@ -251,7 +307,8 @@ final class PrivateChatController {
 
     /// Switches a DM to Private, sending our handshake first if the other person doesn't have our key yet.
     func setMode(_ mode: Mode, for channelID: Snowflake) {
-        guard status(for: channelID) != .unavailable else { return }
+        let state = status(for: channelID)
+        guard !keychainLocked, mode != .locked, state != .unavailable, state != .locked else { return }
         if mode == .private {
             directory.privateChannels.insert(channelID)
         } else {
@@ -262,9 +319,15 @@ final class PrivateChatController {
         onChange?(channelID)
     }
 
+    func useStandardWhileLocked(in channelID: Snowflake) {
+        guard keychainLocked, peer(in: channelID) != nil else { return }
+        standardWhileLocked.insert(channelID)
+        onChange?(channelID)
+    }
+
     /// Agrees to chat privately: sends our handshake, asking for theirs if we don't have it.
     private func agree(in channelID: Snowflake) {
-        guard let peer = peer(in: channelID), loadIfNeeded(create: true) != nil else { return }
+        guard !keychainLocked, let peer = peer(in: channelID), loadIfNeeded(create: true) != nil else { return }
         let firstTime = !directory.consented.contains(peer.id)
         directory.consented.insert(peer.id)
         requests.remove(peer.id)
@@ -302,7 +365,8 @@ final class PrivateChatController {
     /// changes. Returns false (and verifies nothing) if the keys changed since `number` was shown.
     @discardableResult
     func markVerified(in channelID: Snowflake, number: String) -> Bool {
-        guard let peer = peer(in: channelID), safetyNumber(for: channelID) == number else { return false }
+        _ = loadIfNeeded()
+        guard !keychainLocked, let peer = peer(in: channelID), safetyNumber(for: channelID) == number else { return false }
         directory.verified[peer.id] = Self.fingerprint(number)
         saveDirectory()
         onChange?(channelID)
@@ -327,6 +391,8 @@ final class PrivateChatController {
     /// them matched; returns false if it no longer applies (the keys changed meanwhile), and nothing is verified.
     @discardableResult
     func acceptNewKeys(_ keys: [Data], in channelID: Snowflake, comparedNumber: String?) -> Bool {
+        _ = loadIfNeeded()
+        guard !keychainLocked else { return false }
         setTrust(.accepted, forKeys: keys, in: channelID)
         guard let comparedNumber else { return true }
         return markVerified(in: channelID, number: comparedNumber)
@@ -338,7 +404,8 @@ final class PrivateChatController {
     }
 
     private func setTrust(_ trust: Trust, forKeys chosen: [Data], in channelID: Snowflake) {
-        guard let peer = peer(in: channelID), var keys = directory.people[peer.id] else { return }
+        _ = loadIfNeeded()
+        guard !keychainLocked, let peer = peer(in: channelID), var keys = directory.people[peer.id] else { return }
         for i in keys.indices where keys[i].trust == .pending && chosen.contains(keys[i].key) { keys[i].state = trust }
         directory.people[peer.id] = keys
         keysChanged(in: channelID)
@@ -362,6 +429,8 @@ final class PrivateChatController {
 
     /// Approves or denies one of our other Macs. Approved ones receive every private message we send from now on.
     func setTrust(_ trust: Trust, forDevice key: Data) {
+        _ = loadIfNeeded()
+        guard !keychainLocked else { return }
         guard let index = directory.devices.firstIndex(where: { $0.key == key }) else { return }
         if trust == .accepted, directory.devices[index].trust != .accepted, !canApproveAnotherMac { return }
         directory.devices[index].trust = trust
@@ -376,6 +445,7 @@ final class PrivateChatController {
         guard Self.isSupported, let peer = peer(in: channelID), let messages = store.messages(in: channelID),
               let first = messages.first, let last = messages.last, let me = store.me?.id else { return }
         _ = loadIfNeeded()
+        guard !keychainLocked else { return }
         var state: ScanState
         let fresh: ArraySlice<Message>
         if let previous = scans[channelID], previous.oldest == first.id {
@@ -432,6 +502,7 @@ final class PrivateChatController {
     /// Adds a key for someone: trusted if it's the first we've seen from them, else waiting to be accepted (a new
     /// Mac, a reinstall, or someone in the middle). Returns true if it was new.
     private func learn(_ key: Data, for userID: Snowflake) -> Bool {
+        guard !keychainLocked else { return false }
         guard (try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: key)) != nil else { return false }
         var keys = directory.people[userID] ?? []
         guard !keys.contains(where: { $0.key == key }) else { return false }
@@ -540,8 +611,12 @@ final class PrivateChatController {
     /// an untrusted key or a wrong-sized attachment is a gap, and playback stops at the first missing index.
     private func filmChain(of film: Data, author: Snowflake, channelID: Snowflake) -> (owner: Snowflake?, start: PrivateImage?, follows: [PrivateImage]) {
         guard #available(macOS 14, *) else { return (nil, nil, []) }
+        let messages = store.messages(in: channelID) ?? []
+        let stamp = FilmChainStamp(channelID: channelID, author: author, messageCount: messages.count,
+                                   lastMessageID: messages.last?.id, openedGeneration: openedGeneration)
+        if let cached = filmChainCache[film], cached.stamp == stamp { return cached.result }
         var chosen: [Int: (snowflake: UInt64, image: PrivateImage)] = [:]
-        for message in store.messages(in: channelID) ?? [] where message.author.id == author {
+        for message in messages where message.author.id == author {
             guard let opened = open(content: message.content, id: message.id, authorID: author,
                                     channelID: channelID, postedAt: Self.postedAt(message)),
                   let part = opened.film, part.id == film, opened.trusted,
@@ -565,7 +640,9 @@ final class PrivateChatController {
             follows.append(image)
             index += 1
         }
-        return (chosen[0]?.image.messageID, chosen[0]?.image, follows)
+        let result: FilmChainResult = (owner: chosen[0]?.image.messageID, start: chosen[0]?.image, follows: follows)
+        filmChainCache[film] = (stamp, result)
+        return result
     }
 
     private func open(content: String, id: Snowflake, authorID: Snowflake, channelID: Snowflake,
@@ -612,7 +689,7 @@ final class PrivateChatController {
                                trusted: isTrusted, film: film, salt: result.salt)
             }
         }
-        if opened.count > 2000 { opened = [:] }
+        if opened.count > 2000 { clearOpened() }
         opened[id] = (content, shown)
         return shown
     }

@@ -63,9 +63,12 @@ final class BannerView: NSView {
     enum Tone { case warning, info, secure }
 
     var onAction: (() -> Void)?
+    var onSecondaryAction: (() -> Void)?
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private let button = NSButton(title: "", target: nil, action: nil)
+    private let secondaryButton = NSButton(title: "", target: nil, action: nil)
+    private let actions = NSStackView()
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -77,7 +80,16 @@ final class BannerView: NSView {
         button.controlSize = .small
         button.target = self
         button.action = #selector(clicked)
-        [icon, label, button].forEach {
+        secondaryButton.bezelStyle = .rounded
+        secondaryButton.controlSize = .small
+        secondaryButton.target = self
+        secondaryButton.action = #selector(clickedSecondary)
+        actions.orientation = .horizontal
+        actions.alignment = .centerY
+        actions.spacing = Theme.Spacing.tight
+        actions.addArrangedSubview(button)
+        actions.addArrangedSubview(secondaryButton)
+        [icon, label, actions].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             addSubview($0)
         }
@@ -87,15 +99,15 @@ final class BannerView: NSView {
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: Theme.Spacing.related),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            button.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: Theme.Spacing.related),
-            button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.group),
-            button.centerYAnchor.constraint(equalTo: centerYAnchor),
+            actions.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: Theme.Spacing.related),
+            actions.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Theme.Spacing.group),
+            actions.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
-    func show(_ text: String, tone: Tone, action: String?) {
+    func show(_ text: String, tone: Tone, action: String?, secondaryAction: String? = nil) {
         switch tone {
         case .warning:
             icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Warning")
@@ -110,8 +122,11 @@ final class BannerView: NSView {
         label.stringValue = text
         button.title = action ?? ""
         button.isHidden = action == nil
+        secondaryButton.title = secondaryAction ?? ""
+        secondaryButton.isHidden = secondaryAction == nil
         setAccessibilityLabel(text)
     }
 
     @objc private func clicked() { onAction?() }
+    @objc private func clickedSecondary() { onSecondaryAction?() }
 }

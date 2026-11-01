@@ -40,6 +40,12 @@ enum AccountStore {
     /// The password dialog was cancelled. Stay empty for this launch rather than writing that over the vault.
     private static var unavailable = false
 
+    static func retry() {
+        unavailable = false
+        cached = nil
+        Keychain.retry()
+    }
+
     private static var saved: Saved {
         get {
             if unavailable { return Saved() }
