@@ -21,6 +21,9 @@ final class SettingsWindowController: NSWindowController {
     private let compact = NSButton(checkboxWithTitle: "Compact layout", target: nil, action: nil)
     private let mediaPreviews = NSPopUpButton()
     private let sendTyping = NSButton(checkboxWithTitle: "Show when I'm typing", target: nil, action: nil)
+    private let allowCompanionChat = NSButton(
+        checkboxWithTitle: "Allow private chat with Duhcord Private Companion users", target: nil, action: nil
+    )
     private let limitData = NSButton(checkboxWithTitle: "Limit what Discord collects", target: nil, action: nil)
     private let animateGIFs = NSPopUpButton()
     private let compressVideos = NSButton(checkboxWithTitle: "Compress to fit my upload limit", target: nil, action: nil)
@@ -223,7 +226,9 @@ final class SettingsWindowController: NSWindowController {
         compressVideos.toolTip = "Videos are re-encoded with the Mac's hardware encoder so they fit Discord's upload limit "
             + "for your account (20 MB without Nitro). One that already fits is sent at its own quality. Either way, its "
             + "location and other details are left out."
-        [sound, dockBadge, compact, checkForUpdates, sendTyping, limitData, compressVideos].forEach {
+        allowCompanionChat.toolTip = "The Companion lets people on Discord client mods (Vencord, BetterDiscord, Replugged) chat privately with you. "
+            + "It doesn't have Duhcord's Mac protections, so you approve each Companion key yourself."
+        [sound, dockBadge, compact, checkForUpdates, sendTyping, limitData, allowCompanionChat, compressVideos].forEach {
             $0.target = self
             $0.action = #selector(changed)
         }
@@ -254,6 +259,7 @@ final class SettingsWindowController: NSWindowController {
             [label("Privacy:"), limitData],
             [NSGridCell.emptyContentView, sendTyping],
             [label("Private messages:"), deviceList],
+            [NSGridCell.emptyContentView, allowCompanionChat],
         ])
         privacy.row(at: 2).topPadding = Theme.Spacing.group
 
@@ -324,6 +330,7 @@ final class SettingsWindowController: NSWindowController {
         checkForUpdates.state = Settings.checkForUpdates ? .on : .off
         mediaPreviews.selectItem(at: Settings.mediaPreviews.rawValue)
         sendTyping.state = Settings.sendTypingIndicator ? .on : .off
+        allowCompanionChat.state = Settings.allowCompanionChat ? .on : .off
         limitData.state = Settings.limitDiscordData ? .on : .off
         animateGIFs.selectItem(at: Settings.animateGIFs.rawValue)
         compressVideos.state = Settings.compressVideos ? .on : .off
@@ -338,6 +345,7 @@ final class SettingsWindowController: NSWindowController {
         Settings.checkForUpdates = checkForUpdates.state == .on
         Settings.mediaPreviews = Settings.MediaPreviews(rawValue: mediaPreviews.indexOfSelectedItem) ?? .always
         Settings.sendTypingIndicator = sendTyping.state == .on
+        Settings.allowCompanionChat = allowCompanionChat.state == .on
         let limitWasOn = Settings.limitDiscordData
         Settings.limitDiscordData = limitData.state == .on
         if Settings.limitDiscordData, !limitWasOn { onLimitData?() }
