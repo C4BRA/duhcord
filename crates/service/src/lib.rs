@@ -447,7 +447,7 @@ impl Service {
             inner.usernames.insert(user_id, info.me.username.clone());
             user_id
         };
-        self.run(user_id, Some(conn), channel, |engine| engine.on_dm(info));
+        self.run(user_id, Some(conn), |engine| engine.on_dm(info));
         // Always answer a dm with its badge, even when nothing changed (e.g. after a reconnect).
         self.push_status(user_id, channel);
     }
@@ -460,7 +460,7 @@ impl Service {
     ) {
         let user = self.lock().connections.get(&conn).map(|c| c.user_id);
         if let Some(user_id) = user {
-            self.run(user_id, Some(conn), channel, operation);
+            self.run(user_id, Some(conn), operation);
             self.emit(UiEvent::ChatChanged {
                 user_id: user_id.to_string(),
                 channel_id: channel.to_string(),
@@ -473,7 +473,6 @@ impl Service {
         &self,
         user_id: UserId,
         conn: Option<ConnectionId>,
-        channel: ChannelId,
         operation: impl FnOnce(&mut Engine) -> T,
     ) -> Option<T>
     where
@@ -489,7 +488,7 @@ impl Service {
             self.persist(engine);
             (result, actions)
         };
-        self.carry_out(user_id, conn, channel, actions);
+        self.carry_out(user_id, conn, actions);
         Some(result)
     }
 
@@ -508,13 +507,7 @@ impl Service {
         }
     }
 
-    fn carry_out(
-        &self,
-        user_id: UserId,
-        conn: Option<ConnectionId>,
-        channel: ChannelId,
-        actions: Vec<Action>,
-    ) {
+    fn carry_out(&self, user_id: UserId, conn: Option<ConnectionId>, actions: Vec<Action>) {
         let mut status_channels = Vec::new();
         for action in actions {
             match action {
@@ -522,7 +515,7 @@ impl Service {
                     let handshake = matches!(protocol::kind(&content), Kind::Handshake(_));
                     let Some(target) = self.target_connection(user_id, conn) else {
                         if handshake {
-                            self.run(user_id, None, channel, |engine| {
+                            self.run(user_id, None, |engine| {
                                 engine.handshake_send_failed(channel)
                             });
                         }
@@ -576,19 +569,17 @@ impl Service {
         }
         for changed in status_channels {
             self.push_status(user_id, changed);
-            if changed != channel {
-                self.emit(UiEvent::ChatChanged {
-                    user_id: user_id.to_string(),
-                    channel_id: changed.to_string(),
-                });
-            }
+            self.emit(UiEvent::ChatChanged {
+                user_id: user_id.to_string(),
+                channel_id: changed.to_string(),
+            });
         }
     }
 
     fn send_failed(&self, outgoing: Outgoing, error: String) {
         if outgoing.handshake {
             let channel = outgoing.channel;
-            self.run(outgoing.user_id, None, channel, |engine| {
+            self.run(outgoing.user_id, None, |engine| {
                 engine.handshake_send_failed(channel)
             });
         }
@@ -1101,7 +1092,7 @@ impl Service {
             }
         }
         let result = self
-            .run(user_id, None, channel, operation)
+            .run(user_id, None, operation)
             .ok_or(ServiceError::NoAccount(user_id))?;
         result?;
         self.emit(UiEvent::ChatChanged {
