@@ -160,6 +160,8 @@ PC shows up as a new key waiting to be accepted, as it does today for a new Mac.
 - The frame API is only on while frame mode is enabled.
 
 ### 3.6 Updates and releases
+- **Superseded by [`spec/UPDATES.md`](../../spec/UPDATES.md):** a signed manifest at a fixed URL, pinned hashes, its
+  own key, no Tauri updater plugin. The original note follows.
 - The companion updates through Tauri's updater, with Ed25519-signed manifests (same model as Duhcord's
   `UpdateVerifier`). Signing happens in a `release` GitHub Environment job that builds no third-party code, as in
   Duhcord.
