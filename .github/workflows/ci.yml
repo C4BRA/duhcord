@@ -52,7 +52,7 @@ jobs:
       - name: Print Swift interop vectors
         run: |
           echo BEGIN-SWIFT-VECTORS
-          cat build/swift-vectors.json
+          python3 -c 'import json; print(json.dumps(json.load(open("build/swift-vectors.json", encoding="utf-8")), ensure_ascii=True, indent=2))'
           echo END-SWIFT-VECTORS
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
