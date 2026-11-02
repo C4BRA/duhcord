@@ -12,25 +12,78 @@ final class CompanionInteropTests: XCTestCase {
         })
     }
 
-    func testCompanionHandshakeParsing() {
-        func content(_ bytes: [UInt8]) -> String {
-            PrivateMessaging.prefix + DenseText.encode(Data(bytes))
-        }
+    /// The required rejects (spec/VECTORS.md), in order. Must match the Rust side's list exactly.
+    static let rejectReasons = [
+        "handshake one byte too long",
+        "handshake one byte too short",
+        "handshake with n = 9",
+        "handshake with flags 0x02",
+        "handshake with client 2",
+        "message with n = 0",
+        "v2 message (type 0x21, dhc2: prefix)",
+        "v3 message with type byte 0x21",
+    ]
 
-        var bytes: [UInt8] = [0x23, 1, 1, 0xFF, 0, 2]
-        bytes.append(contentsOf: repeatElement(0x42, count: 32))
-        guard case .companionHandshake(_, true, 0xFF, PeerFeatures.openImages) =
-                PrivateMessaging.kind(of: content(bytes)) else {
-            return XCTFail("Expected a companion handshake")
+    /// Builds the rejects from bob's fixed handshake and the `short` message, as the Rust side does.
+    static func rejectContents(bobHandshake: PrivateHandshake, shortMessage: String) throws -> [String] {
+        let base = PrivateMessaging.handshakeFrame(bobHandshake)
+        var tooLong = base
+        tooLong.append(0)
+        let tooShort = base.dropLast()
+        var nine = Data(base.prefix(39))
+        nine.append(9)
+        nine.append(Data(count: 36))
+        var badFlags = base
+        badFlags[1] = 0x02
+        var badClient = base
+        badClient[3] = 2
+        guard case .encrypted(let message) = PrivateMessaging.kind(of: shortMessage) else {
+            throw XCTSkip("the short message didn't parse")
         }
-        XCTAssertEqual(PrivateMessaging.kind(of: content(Array(bytes.dropLast()))), .plain)
-        XCTAssertEqual(PrivateMessaging.kind(of: content(bytes + [0])), .plain)
-        var invalidClass = bytes
-        invalidClass[2] = 0
-        XCTAssertEqual(PrivateMessaging.kind(of: content(invalidClass)), .plain)
-        var invalidFlags = bytes
-        invalidFlags[1] = 2
-        XCTAssertEqual(PrivateMessaging.kind(of: content(invalidFlags)), .plain)
+        var noRecipients = Data(message.prefix(27))
+        noRecipients[26] = 0
+        noRecipients.append(Data(count: 16))
+        var v2Type = message
+        v2Type[0] = 0x21
+        return [
+            PrivateMessaging.content(for: tooLong),
+            PrivateMessaging.content(for: Data(tooShort)),
+            PrivateMessaging.content(for: nine),
+            PrivateMessaging.content(for: badFlags),
+            PrivateMessaging.content(for: badClient),
+            PrivateMessaging.content(for: noRecipients),
+            PrivateMessaging.notice + "\ndhc2:" + DenseText.encode(v2Type),
+            PrivateMessaging.content(for: v2Type),
+        ]
+    }
+
+    func testHandshakesRoundTripAndMalformedFramesAreRejected() {
+        let key = Data(repeating: 0x42, count: 32)
+        let handshake = PrivateHandshake(key: key, wantsReply: true, client: .companion, host: 0xFF,
+                                         features: .openImages,
+                                         acceptedKeyIDs: [Data([9, 9, 9, 9]), Data([1, 2, 3, 4]), Data([9, 9, 9, 9])])
+        let frame = PrivateMessaging.handshakeFrame(handshake)
+        XCTAssertEqual(frame.count, 40 + 4 * 2)
+        XCTAssertEqual(Array(frame.prefix(7)), [0x32, 1, 3, 1, 0xFF, 0, 2])
+        guard case .handshake(let decoded) = PrivateMessaging.kind(of: PrivateMessaging.handshake(handshake)) else {
+            return XCTFail("Expected a handshake")
+        }
+        XCTAssertEqual(decoded.key, key)
+        XCTAssertEqual(decoded.host, 0xFF)
+        XCTAssertEqual(decoded.acceptedKeyIDs, [Data([1, 2, 3, 4]), Data([9, 9, 9, 9])])
+
+        var newer = frame
+        newer[2] = 4
+        newer.append(contentsOf: [0xAA, 0xAA])
+        XCTAssertEqual(PrivateMessaging.kind(of: PrivateMessaging.content(for: newer)), .newerHandshake(version: 4))
+        var older = frame
+        older[2] = 2
+        XCTAssertEqual(PrivateMessaging.kind(of: PrivateMessaging.content(for: older)), .plain)
+        XCTAssertEqual(PrivateMessaging.kind(of: PrivateMessaging.content(for: frame.dropLast())), .plain)
+        var badFlags = frame
+        badFlags[1] = 2
+        XCTAssertEqual(PrivateMessaging.kind(of: PrivateMessaging.content(for: badFlags)), .plain)
+        XCTAssertEqual(PrivateMessaging.kind(of: "dhc3:!"), .plain)
     }
 
     func testClassAwareSafetyNumbers() {
@@ -62,6 +115,7 @@ final class CompanionInteropTests: XCTestCase {
         let data = try Data(contentsOf: url)
         let vectors = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(vectors["impl"] as? String, "rust")
+        XCTAssertEqual(vectors["version"] as? Int, 3)
         XCTAssertNotNil(vectors["messages"])
         XCTAssertNotNil(vectors["handshakes"])
         XCTAssertNotNil(vectors["safetyNumbers"])
@@ -69,26 +123,14 @@ final class CompanionInteropTests: XCTestCase {
         let keys = try XCTUnwrap(vectors["publicKeys"] as? [String: String]).mapValues(bytes)
         for vector in try XCTUnwrap(vectors["handshakes"] as? [[String: Any]]) {
             let content = try XCTUnwrap(vector["content"] as? String)
-            let keyName = try XCTUnwrap(vector["key"] as? String)
-            let expectedKey = try XCTUnwrap(keys[keyName])
-            let wantsReply = try XCTUnwrap(vector["wantsReply"] as? Bool)
-            let clientClass = try XCTUnwrap(vector["class"] as? Int)
-            if clientClass == 0 {
-                guard case .handshake(let key, let reply) = PrivateMessaging.kind(of: content) else {
-                    return XCTFail("Expected a Duhcord handshake")
-                }
-                XCTAssertEqual(key, expectedKey)
-                XCTAssertEqual(reply, wantsReply)
-                XCTAssertEqual(content, PrivateMessaging.handshake(publicKey: key, wantsReply: reply))
-            } else {
-                guard case .companionHandshake(let key, let reply, let host, let features) = PrivateMessaging.kind(of: content) else {
-                    return XCTFail("Expected a Companion handshake")
-                }
-                XCTAssertEqual(key, expectedKey)
-                XCTAssertEqual(reply, wantsReply)
-                XCTAssertEqual(Int(host), vector["host"] as? Int)
-                XCTAssertEqual(features.rawValue, UInt16(try XCTUnwrap(vector["features"] as? Int)))
-            }
+            let expected = try handshake(from: vector, keys: keys)
+            XCTAssertEqual(PrivateMessaging.handshake(expected), content, "our encoding of \(vector["key"] ?? "?")")
+            XCTAssertEqual(PrivateMessaging.kind(of: content), .handshake(expected))
+        }
+        let rejects = try XCTUnwrap(vectors["rejects"] as? [[String: String]])
+        XCTAssertEqual(rejects.compactMap { $0["why"] }, Self.rejectReasons)
+        for reject in rejects {
+            XCTAssertEqual(PrivateMessaging.kind(of: try XCTUnwrap(reject["content"])), .plain, reject["why"] ?? "")
         }
         for vector in try XCTUnwrap(vectors["denseText"] as? [[String: String]]) {
             let data = bytes(try XCTUnwrap(vector["bytes"]))
@@ -160,23 +202,15 @@ final class CompanionInteropTests: XCTestCase {
         vectors["fileBlobs"] = [["file": hex(blobFile.encoded()), "sealed": hex(blobSealed), "plain": hex(plain)]]
         var handshakes = try XCTUnwrap(vectors["handshakes"] as? [[String: Any]])
         let publicKeys = Dictionary(uniqueKeysWithValues: privateKeys.map { ($0.key, $0.value.publicKey.rawRepresentation) })
+        var bobHandshake: PrivateHandshake?
         for index in handshakes.indices {
-            let item = handshakes[index]
-            let name = try XCTUnwrap(item["key"] as? String)
-            let key = try XCTUnwrap(publicKeys[name])
-            let wantsReply = try XCTUnwrap(item["wantsReply"] as? Bool)
-            let clientClass = try XCTUnwrap(item["class"] as? Int)
-            if clientClass == 0 {
-                handshakes[index]["content"] = PrivateMessaging.handshake(publicKey: key, wantsReply: wantsReply)
-            } else {
-                let host = try XCTUnwrap(item["host"] as? Int)
-                let features = try XCTUnwrap(item["features"] as? Int)
-                var frame: [UInt8] = [0x23, wantsReply ? 1 : 0, 1, UInt8(truncatingIfNeeded: host),
-                                      UInt8(truncatingIfNeeded: features >> 8), UInt8(truncatingIfNeeded: features)]
-                frame.append(contentsOf: key)
-                handshakes[index]["content"] = PrivateMessaging.notice + "\n" + PrivateMessaging.prefix + DenseText.encode(Data(frame))
-            }
+            let parsed = try handshake(from: handshakes[index], keys: publicKeys)
+            handshakes[index]["content"] = PrivateMessaging.handshake(parsed)
+            if handshakes[index]["key"] as? String == "bob" { bobHandshake = parsed }
         }
+        let short = try XCTUnwrap(messages.first { $0["name"] as? String == "short" }?["content"] as? String)
+        let rejects = try Self.rejectContents(bobHandshake: try XCTUnwrap(bobHandshake), shortMessage: short)
+        vectors["rejects"] = zip(Self.rejectReasons, rejects).map { ["why": $0, "content": $1] }
         vectors["handshakes"] = handshakes
         let safety = try XCTUnwrap(vectors["safetyNumbers"] as? [[String: Any]])
         vectors["safetyNumbers"] = try safety.map { item in
@@ -249,4 +283,16 @@ final class CompanionInteropTests: XCTestCase {
     }
 
     private func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+
+    /// A vector's handshake fields, with its accepted keys as key IDs.
+    private func handshake(from vector: [String: Any], keys: [String: Data]) throws -> PrivateHandshake {
+        let name = try XCTUnwrap(vector["key"] as? String)
+        return PrivateHandshake(
+            key: try XCTUnwrap(keys[name]),
+            wantsReply: try XCTUnwrap(vector["wantsReply"] as? Bool),
+            client: try XCTUnwrap(PeerClient(rawValue: UInt8(try XCTUnwrap(vector["client"] as? Int)))),
+            host: UInt8(try XCTUnwrap(vector["host"] as? Int)),
+            features: PeerFeatures(rawValue: UInt16(try XCTUnwrap(vector["features"] as? Int))),
+            acceptedKeyIDs: try XCTUnwrap(vector["acceptedKeyIds"] as? [String]).map(bytes))
+    }
 }

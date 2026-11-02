@@ -2,20 +2,13 @@ import AppKit
 import CryptoKit
 import DuhcordCore
 
-/// Private messaging in DMs (see PrivateMessaging for the cryptography).
+/// Private messaging in DMs, protocol v3 (spec/PROTOCOL.md; cryptography in PrivateMessaging).
 ///
-/// - Every Duhcord install has one key pair, made the first time it's needed and kept in the login keychain.
-/// - Keys reach the other person in a handshake message. Their Duhcord picks it up from the DM, and answers with
-///   its own once its user has agreed to chat privately with them (by switching the DM to Private, or accepting
-///   the request). After that, handshakes between the two are answered automatically.
-/// - Keys learned from handshakes are kept in the keychain too. Discord carries the handshakes, so it could slip in
-///   a key of its own; no key receives messages until it's trusted:
-///   - The other person's first key is trusted on first use. Any later one waits until it's accepted, after
-///     comparing safety numbers; until then messages go only to the keys already accepted.
-///   - A key that seems to be another of our own Macs waits for approval in Settings (rejections are remembered).
-/// - The safety number covers every key on both sides, and "verified" holds only for the exact keys compared.
-/// - Private messages are sealed to the other person's accepted keys, to ours (so we can read what we sent) and
-///   to our approved Macs.
+/// Every trust decision is made by `PrivateTrustEngine` (DuhcordCore), the same rules the Duhcord Private Companion
+/// runs; the shared scenarios in spec/scenarios check both. This controller adds what the engine doesn't do:
+/// - the account's key and the engine's directory live in the login keychain (one vault item, see Keychain);
+/// - it feeds the engine the DM's loaded messages and posts the handshakes the engine asks for;
+/// - it shapes opened messages for the message list: warning lines, images, split videos and reels.
 ///
 /// Main thread only. Private messaging needs macOS 14 (HPKE); on macOS 13 the toggle stays switched off.
 @MainActor
@@ -27,29 +20,31 @@ final class PrivateChatController {
         case unavailable
         /// The login keychain couldn't be opened, so the saved mode is unknown.
         case locked
-        /// Switched to Private, but no key of the other person's is trusted yet. `newKey`: one is waiting to be accepted.
+        /// No key of the other person's counts yet. `newKey`: one is waiting to be accepted.
         case waiting(newKey: Bool)
-        /// `newKey`: a key besides the accepted ones is waiting (a new Mac of theirs, or someone in the middle).
+        /// We have their key, but they haven't accepted ours yet (no receipt), so they can't read us.
+        case unconfirmed(newKey: Bool)
+        /// Both sides have each other's key. `newKey`: another key of theirs is waiting.
         case ready(verified: Bool, newKey: Bool)
+        /// Their newest handshake is from a newer version of private messaging.
+        case outdated
     }
 
-    /// Whether a key may receive our messages.
-    enum Trust: String, Codable {
-        case accepted, pending, rejected
-    }
+    typealias Trust = PrivateTrustEngine.Trust
 
-    /// One of our other Macs, as listed in Settings.
+    /// One of our other devices (a Mac, or a Companion), as listed in Settings.
     struct Device {
         let key: Data
         let code: String
         let trust: Trust
+        let client: PeerClient
         let added: Date
     }
 
-    /// Our Macs or anyone's keys changed (Settings lists them).
+    /// Our devices or anyone's keys changed (Settings lists them).
     static let devicesDidChange = Notification.Name("DuhcordPrivateDevicesDidChange")
-    /// Other Macs that may be approved besides this one, leaving room in each message for the other person's.
-    static let maxOtherMacs = 3
+    /// Other devices that may be approved besides this Mac, leaving room in each message for the other person's.
+    static let maxOtherMacs = PrivateTrustEngine.maxApprovedDevices
 
     /// Something about a DM's private chat changed (a key arrived, a mode switched): nil for every DM.
     var onChange: ((Snowflake?) -> Void)?
@@ -59,102 +54,18 @@ final class PrivateChatController {
         return false
     }
 
-    private struct PeerKey: Codable {
-        var key: Data
-        var added: Date
-        /// Missing in directories from before keys needed accepting: those were already in use.
-        var state: Trust?
-        var client: PeerClient?
-        var features: PeerFeatures?
-
-        var trust: Trust { state ?? .accepted }
-    }
-
-    private struct OwnDevice: Codable {
-        var key: Data
-        var added: Date
-        var trust: Trust
-    }
-
-    /// What's kept in the keychain besides our private key: everyone's public keys, our other Macs, who we agreed
-    /// to chat with, which DMs are in Private (so a relaunch doesn't quietly switch a DM back to unencrypted
-    /// messages), and which safety numbers were compared.
-    private struct Directory: Codable {
-        var people: [Snowflake: [PeerKey]] = [:]
-        /// Our own other Duhcord installs (other Macs). Approved ones can read what we send.
-        var devices: [OwnDevice] = []
-        var consented: Set<Snowflake> = []
-        var privateChannels: Set<Snowflake> = []
-        /// A hash of the safety number each person was verified with: it no longer matches once a key changes.
-        var verified: [Snowflake: Data] = [:]
-        var duhcordOnly: Set<Snowflake> = []
-
-        init() {}
-
-        private enum CodingKeys: String, CodingKey {
-            case people, devices, consented, privateChannels, verified, duhcordOnly
-            /// Before approval, other Macs were added as soon as their handshake appeared.
-            case ownDevices
-        }
-
-        // Fields added later are optional when reading, so an older directory keeps its keys.
-        init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: CodingKeys.self)
-            people = try c.decodeIfPresent([Snowflake: [PeerKey]].self, forKey: .people) ?? [:]
-            devices = try c.decodeIfPresent([OwnDevice].self, forKey: .devices) ?? []
-            consented = try c.decodeIfPresent(Set<Snowflake>.self, forKey: .consented) ?? []
-            privateChannels = try c.decodeIfPresent(Set<Snowflake>.self, forKey: .privateChannels) ?? []
-            verified = try c.decodeIfPresent([Snowflake: Data].self, forKey: .verified) ?? [:]
-            duhcordOnly = try c.decodeIfPresent(Set<Snowflake>.self, forKey: .duhcordOnly) ?? []
-            // Macs added without approval wait for it now.
-            for key in try c.decodeIfPresent([Data].self, forKey: .ownDevices) ?? []
-            where !devices.contains(where: { $0.key == key }) {
-                devices.append(OwnDevice(key: key, added: Date(), trust: .pending))
-            }
-        }
-
-        func encode(to encoder: Encoder) throws {
-            var c = encoder.container(keyedBy: CodingKeys.self)
-            try c.encode(people, forKey: .people)
-            try c.encode(devices, forKey: .devices)
-            try c.encode(consented, forKey: .consented)
-            try c.encode(privateChannels, forKey: .privateChannels)
-            try c.encode(verified, forKey: .verified)
-            try c.encode(duhcordOnly, forKey: .duhcordOnly)
-        }
-
-        func keys(of userID: Snowflake, _ trust: Trust) -> [Data] {
-            (people[userID] ?? []).filter { $0.trust == trust }.map(\.key)
-        }
-
-        func deviceKeys(_ trust: Trust) -> [Data] {
-            devices.filter { $0.trust == trust }.map(\.key)
-        }
-    }
-
-    /// Where the handshake scan of a DM got to, so a new message is read on its own instead of the whole history.
-    private struct ScanState {
-        var oldest: Snowflake
-        var newest: Snowflake
-        var lastOwnHandshake: Snowflake?
-        var unansweredRequest = false
-    }
-
+    /// v3 is a clean break: v2 keys and directories (com.duhcord.private-key / -directory) are never read again.
     private static let keyService = Keychain.privateKeyService
     private static let directoryService = Keychain.privateDirectoryService
-    /// New keys waiting per person; more are ignored rather than pushing out the ones already there.
-    private static let maxPendingKeys = 4
 
     private let session: DiscordSession
     private var store: Store { session.store }
-    private var directory = Directory()
-    private var scans: [Snowflake: ScanState] = [:]
-    /// Which message first carried each private message's salt: a later one with the same salt is a copy.
-    private var firstWithSalt: [Data: Snowflake] = [:]
+    private var engine: PrivateTrustEngine?
     private var loadedFor: Snowflake?
-    private var privateKey: Curve25519.KeyAgreement.PrivateKey?
+    private var savedDirectory: PrivateTrustEngine.Directory?
     private(set) var keychainLocked = false
     private var standardWhileLocked: Set<Snowflake> = []
+
     /// A private message as opened: its text (with any warning lines), its images, and whether its sender's key
     /// is trusted (images from a key that isn't aren't decoded).
     private struct Opened {
@@ -184,16 +95,7 @@ final class PrivateChatController {
     }
     private typealias FilmChainResult = (owner: Snowflake?, start: PrivateImage?, follows: [PrivateImage])
     private var filmChainCache: [Data: (stamp: FilmChainStamp, result: FilmChainResult)] = [:]
-    /// Whether each person's current safety number is the one that was verified. Checked often (menus, the
-    /// toolbar, every mouse move of a drag), so it's remembered until the keys or the directory change.
-    private var verifiedCache: [Snowflake: Bool] = [:]
-    private var seenHandshakes: Set<Snowflake> = []
-    private var companionNotices: Set<Snowflake> = []
     private var settingsObserver: NSObjectProtocol?
-    /// People who sent a handshake we haven't agreed to yet.
-    private(set) var requests: Set<Snowflake> = []
-    /// Handshakes we've sent that Discord hasn't echoed back yet, by channel, so a request isn't answered twice.
-    private var pendingHandshakes: [Snowflake: Date] = [:]
 
     init(session: DiscordSession) {
         self.session = session
@@ -204,69 +106,78 @@ final class PrivateChatController {
         ) { [weak self] notification in
             guard notification.userInfo?[settingInfo] as? String == settingKey else { return }
             Task { @MainActor [weak self] in
-                self?.scans = [:]
-                if Settings.allowCompanionChat { self?.companionNotices.removeAll() }
-                self?.keysChanged(in: nil)
+                guard let self, let engine = self.loadIfNeeded() else { return }
+                self.post(engine.setAllowCompanionChat(Settings.allowCompanionChat))
+                self.keysChanged(in: nil)
             }
         }
     }
 
     // MARK: - Keys
 
-    /// Loads (or, with `create`, makes) our key and the directory for the logged-in account.
-    private func loadIfNeeded(create: Bool = false) -> Curve25519.KeyAgreement.PrivateKey? {
-        guard let me = store.me?.id else { return nil }
+    /// Loads (or, with `create`, makes) our key and the engine for the logged-in account.
+    @discardableResult
+    private func loadIfNeeded(create: Bool = false) -> PrivateTrustEngine? {
+        guard Self.isSupported, let me = store.me?.id else { return nil }
         if loadedFor != me {
             loadedFor = me
             keychainLocked = false
             standardWhileLocked = []
-            verifiedCache = [:]
+            engine = nil
+            savedDirectory = nil
+            var key: Curve25519.KeyAgreement.PrivateKey?
             switch Keychain.read(service: Self.keyService, account: me) {
             case .value(let data):
-                privateKey = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: data)
+                key = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: data)
             case .missing:
-                privateKey = nil
+                key = nil
             case .denied:
-                privateKey = nil
                 keychainLocked = true
             }
             switch Keychain.read(service: Self.directoryService, account: me) {
             case .value(let data):
-                directory = (try? JSONDecoder().decode(Directory.self, from: data)) ?? Directory()
+                savedDirectory = (try? JSONDecoder().decode(PrivateTrustEngine.Directory.self, from: data))
             case .missing:
-                directory = Directory()
+                savedDirectory = nil
             case .denied:
-                directory = Directory()
                 keychainLocked = true
             }
+            if let key, !keychainLocked { makeEngine(key: key, me: me) }
         }
         guard !keychainLocked else { return nil }
-        if privateKey == nil, create {
+        if engine == nil, create {
             let key = Curve25519.KeyAgreement.PrivateKey()
-            if Keychain.setData(key.rawRepresentation, service: Self.keyService, account: me) { privateKey = key }
-            verifiedCache = [:]
+            if Keychain.setData(key.rawRepresentation, service: Self.keyService, account: me) {
+                // A new key: anything kept for an older one no longer applies.
+                savedDirectory = nil
+                makeEngine(key: key, me: me)
+            }
         }
-        return privateKey
+        return engine
     }
 
-    /// Every change to the directory is saved, so this is also where remembered verification goes stale.
-    private func saveDirectory() {
-        guard !keychainLocked else { return }
-        verifiedCache = [:]
-        guard let me = loadedFor, let data = try? JSONEncoder().encode(directory) else { return }
-        Keychain.setData(data, service: Self.directoryService, account: me)
+    private func makeEngine(key: Curve25519.KeyAgreement.PrivateKey, me: Snowflake) {
+        engine = PrivateTrustEngine(privateKey: key, userID: me,
+                                    directory: savedDirectory ?? PrivateTrustEngine.Directory(),
+                                    config: .duhcord(allowCompanionChat: Settings.allowCompanionChat))
+        clearOpened()
+    }
+
+    /// Saves the directory if the engine changed it.
+    private func saveIfNeeded() {
+        guard !keychainLocked, let engine, engine.isDirty, let me = loadedFor,
+              let data = try? JSONEncoder().encode(engine.directory) else { return }
+        if Keychain.setData(data, service: Self.directoryService, account: me) { engine.isDirty = false }
     }
 
     func retryKeychain() {
         AccountStore.retry()
         loadedFor = nil
         keychainLocked = false
-        privateKey = nil
-        directory = Directory()
+        engine = nil
         standardWhileLocked = []
         clearOpened()
-        firstWithSalt = [:]
-        _ = loadIfNeeded()
+        loadIfNeeded()
         onChange?(nil)
     }
 
@@ -279,14 +190,28 @@ final class PrivateChatController {
     /// After keys were accepted, rejected or approved: messages are read again with the new set.
     private func keysChanged(in channelID: Snowflake?) {
         guard !keychainLocked else { return }
-        saveDirectory()
+        saveIfNeeded()
         clearOpened()
-        firstWithSalt = [:]
         onChange?(channelID)
         NotificationCenter.default.post(name: Self.devicesDidChange, object: self)
     }
 
-    private var myPublicKey: Data? { loadIfNeeded()?.publicKey.rawRepresentation }
+    /// Posts the handshakes the engine asked for. A failed post frees the DM for another try.
+    private func post(_ sends: [PrivateTrustEngine.Outgoing]) {
+        for send in sends {
+            session.send(send.content, to: send.channelID) { [weak self] error in
+                guard error != nil else { return }
+                Task { @MainActor [weak self] in self?.engine?.handshakeSendFailed(in: send.channelID) }
+            }
+        }
+    }
+
+    /// The engine with this DM registered, if it's a one-to-one DM and we have a key.
+    private func trust(in channelID: Snowflake, create: Bool = false) -> PrivateTrustEngine? {
+        guard let peer = peer(in: channelID), let engine = loadIfNeeded(create: create) else { return nil }
+        engine.setDM(channelID: channelID, peerID: peer.id)
+        return engine
+    }
 
     // MARK: - Per DM
 
@@ -296,100 +221,81 @@ final class PrivateChatController {
         return channel.recipients?.first
     }
 
-    private func countedPeerKeys(in channelID: Snowflake) -> [PeerKey] {
-        guard let peer = peer(in: channelID) else { return [] }
-        let companionAllowed = Settings.allowCompanionChat && !directory.duhcordOnly.contains(peer.id)
-        return (directory.people[peer.id] ?? []).filter {
-            $0.trust == .accepted && ($0.client != .companion || companionAllowed)
-        }
-    }
-
-    private func excludedCompanionKeys(in channelID: Snowflake) -> [Data] {
-        guard let peer = peer(in: channelID) else { return [] }
-        let counted = Set(countedPeerKeys(in: channelID).map(\.key))
-        return (directory.people[peer.id] ?? []).filter {
-            $0.trust == .accepted && $0.client == .companion && !counted.contains($0.key)
-        }.map(\.key)
-    }
-
     func mode(for channelID: Snowflake) -> Mode {
         let state = status(for: channelID)
         guard state != .unavailable else { return .standard }
         if standardWhileLocked.contains(channelID) { return .standard }
         if state == .locked { return .locked }
-        return directory.privateChannels.contains(channelID) ? .private : .standard
+        return trust(in: channelID)?.directory.privateChannels.contains(channelID) == true ? .private : .standard
     }
 
     func status(for channelID: Snowflake) -> Status {
-        guard Self.isSupported, let peer = peer(in: channelID) else { return .unavailable }
-        _ = loadIfNeeded()
+        guard Self.isSupported, peer(in: channelID) != nil else { return .unavailable }
+        loadIfNeeded()
         if keychainLocked { return .locked }
-        let newKey = !directory.keys(of: peer.id, .pending).isEmpty
-        guard !countedPeerKeys(in: channelID).isEmpty else { return .waiting(newKey: newKey) }
-        let verified: Bool
-        if let cached = verifiedCache[peer.id] {
-            verified = cached
-        } else {
-            verified = safetyNumber(for: channelID).map { directory.verified[peer.id] == Self.fingerprint($0) } ?? false
-            verifiedCache[peer.id] = verified
-        }
-        return .ready(verified: verified, newKey: newKey)
+        guard let engine = trust(in: channelID) else { return .waiting(newKey: false) }
+        if engine.peerUsesNewerVersion(in: channelID) { return .outdated }
+        let status = engine.status(for: channelID)
+        if engine.countedKeys(in: channelID).isEmpty { return .waiting(newKey: status.newKey) }
+        if !engine.hasOurKey(in: channelID) { return .unconfirmed(newKey: status.newKey) }
+        return .ready(verified: status.verified, newKey: status.newKey)
     }
 
     /// Whether the other person has asked to chat privately and we haven't answered.
     func hasRequest(in channelID: Snowflake) -> Bool {
-        guard let peer = peer(in: channelID) else { return false }
-        return requests.contains(peer.id)
+        trust(in: channelID)?.status(for: channelID).state == .request
     }
 
     func usesCompanion(in channelID: Snowflake) -> Bool {
-        countedPeerKeys(in: channelID).contains { $0.client == .companion }
+        trust(in: channelID)?.countedKeys(in: channelID).contains { $0.client == .companion } ?? false
     }
 
+    /// They use the Companion, but Companion chat is off in Settings.
     func hasCompanionNotice(in channelID: Snowflake) -> Bool {
-        guard let peer = peer(in: channelID) else { return false }
-        return companionNotices.contains(peer.id)
+        guard !Settings.allowCompanionChat, let engine = trust(in: channelID) else { return false }
+        return engine.peerKeys(in: channelID).contains { $0.client == .companion && $0.trust != .rejected }
     }
 
+    /// "Only their Duhcord Macs": their Companion keys are left out of this chat (spec §6).
     func isDuhcordOnly(in channelID: Snowflake) -> Bool {
-        guard let peer = peer(in: channelID) else { return false }
-        return directory.duhcordOnly.contains(peer.id)
+        trust(in: channelID)?.companionExcluded(in: channelID) ?? false
     }
 
     func setDuhcordOnly(_ on: Bool, in channelID: Snowflake) {
-        guard let peer = peer(in: channelID), !keychainLocked else { return }
-        let changed = on ? directory.duhcordOnly.insert(peer.id).inserted
-                         : directory.duhcordOnly.remove(peer.id) != nil
-        if changed { keysChanged(in: channelID) }
+        guard let engine = trust(in: channelID) else { return }
+        post(engine.setCompanionExcluded(on, in: channelID))
+        keysChanged(in: channelID)
     }
 
     func recipientsCanOpen(_ features: PeerFeatures, in channelID: Snowflake) -> Bool {
-        let keys = countedPeerKeys(in: channelID)
-        return !keys.isEmpty && keys.allSatisfy { ($0.features ?? .duhcord).isSuperset(of: features) }
+        let keys = trust(in: channelID)?.countedKeys(in: channelID) ?? []
+        return !keys.isEmpty && keys.allSatisfy { $0.features.isSuperset(of: features) }
     }
 
     func newKeysIncludeCompanion(in channelID: Snowflake) -> Bool {
-        guard let peer = peer(in: channelID) else { return false }
-        return (directory.people[peer.id] ?? []).contains { $0.trust == .pending && $0.client == .companion }
+        trust(in: channelID)?.pendingKeys(in: channelID).contains { $0.client == .companion } ?? false
     }
 
     func hasDuhcordAndCompanionKeys(in channelID: Snowflake) -> Bool {
-        guard let peer = peer(in: channelID) else { return false }
-        let accepted = (directory.people[peer.id] ?? []).filter { $0.trust == .accepted }
+        let accepted = trust(in: channelID)?.peerKeys(in: channelID).filter { $0.trust == .accepted } ?? []
         return accepted.contains { $0.client != .companion } && accepted.contains { $0.client == .companion }
     }
 
-    /// Switches a DM to Private, sending our handshake first if the other person doesn't have our key yet.
+    /// Switches a DM to Private, sending our handshake first if needed (spec §3 rule 1).
     func setMode(_ mode: Mode, for channelID: Snowflake) {
         let state = status(for: channelID)
-        guard !keychainLocked, mode != .locked, state != .unavailable, state != .locked else { return }
-        if mode == .private {
-            directory.privateChannels.insert(channelID)
-        } else {
-            directory.privateChannels.remove(channelID)
-        }
-        saveDirectory()
-        if mode == .private { agree(in: channelID) }
+        guard !keychainLocked, mode != .locked, state != .unavailable, state != .locked,
+              let engine = trust(in: channelID, create: mode == .private) else { return }
+        post(engine.setPrivate(mode == .private, in: channelID))
+        saveIfNeeded()
+        onChange?(channelID)
+    }
+
+    /// "Re-send my key" (spec §3 rule 4): the way out of any confusion about who has whose key.
+    func resendKey(in channelID: Snowflake) {
+        guard let engine = trust(in: channelID, create: true) else { return }
+        post(engine.resendKey(in: channelID))
+        saveIfNeeded()
         onChange?(channelID)
     }
 
@@ -399,259 +305,129 @@ final class PrivateChatController {
         onChange?(channelID)
     }
 
-    /// Agrees to chat privately: sends our handshake, asking for theirs if we don't have it.
-    private func agree(in channelID: Snowflake) {
-        guard !keychainLocked, let peer = peer(in: channelID), loadIfNeeded(create: true) != nil else { return }
-        let firstTime = !directory.consented.contains(peer.id)
-        directory.consented.insert(peer.id)
-        requests.remove(peer.id)
-        saveDirectory()
-        let haveTheirKey = !countedPeerKeys(in: channelID).isEmpty
-        if firstTime || !haveTheirKey { sendHandshake(in: channelID, wantsReply: !haveTheirKey) }
-    }
-
-    private func sendHandshake(in channelID: Snowflake, wantsReply: Bool) {
-        guard let key = myPublicKey, pendingHandshakes[channelID] == nil else { return }
-        pendingHandshakes[channelID] = Date()
-        session.send(PrivateMessaging.handshake(publicKey: key, wantsReply: wantsReply), to: channelID) { [weak self] error in
-            // Not sent: allow another try.
-            if error != nil { self?.pendingHandshakes[channelID] = nil }
-        }
-    }
-
-    /// Our keys: this Mac's and the other Macs we approved. Messages we send go to all of them.
-    private var ownKeys: [Data] {
-        guard let mine = myPublicKey else { return [] }
-        return [mine] + directory.deviceKeys(.accepted)
-    }
-
     /// The 60-digit number to compare with the other person, over every key each side encrypts to, or nil before
     /// their key arrives.
     func safetyNumber(for channelID: Snowflake) -> String? {
-        safetyNumber(for: channelID, accepting: [])
+        trust(in: channelID)?.safetyNumber(for: channelID)
     }
 
-    private static func fingerprint(_ safetyNumber: String) -> Data {
-        Data(SHA256.hash(data: Data(safetyNumber.utf8)))
+    /// The key codes behind the safety number: ours (this Mac first, then approved devices) and theirs, each with
+    /// its client. When two numbers differ, these show which key does.
+    func keyCodes(for channelID: Snowflake) -> (ours: [(code: String, client: PeerClient)],
+                                               theirs: [(code: String, client: PeerClient)]) {
+        guard let engine = trust(in: channelID) else { return ([], []) }
+        return (engine.ourSide.map { (PrivateMessaging.keyCode($0.key), $0.client) },
+                engine.countedKeys(in: channelID).map { (PrivateMessaging.keyCode($0.key), $0.client) })
     }
 
-    /// The safety number `number`, which the person compared, matched. Verified until a key on either side
-    /// changes. Returns false (and verifies nothing) if the keys changed since `number` was shown.
+    /// The safety number `number`, which the person compared, matched. Returns false (and verifies nothing) if
+    /// the keys changed since `number` was shown.
     @discardableResult
     func markVerified(in channelID: Snowflake, number: String) -> Bool {
-        _ = loadIfNeeded()
-        guard !keychainLocked, let peer = peer(in: channelID), safetyNumber(for: channelID) == number else { return false }
-        directory.verified[peer.id] = Self.fingerprint(number)
-        saveDirectory()
+        guard !keychainLocked, let engine = trust(in: channelID), engine.safetyNumber(for: channelID) == number,
+              engine.markVerified(in: channelID) else { return false }
+        saveIfNeeded()
         onChange?(channelID)
         return true
     }
 
     /// The other person's keys waiting to be accepted, as shown for review.
     func newKeys(in channelID: Snowflake) -> [Data] {
-        guard let peer = peer(in: channelID) else { return [] }
-        return directory.keys(of: peer.id, .pending)
+        trust(in: channelID)?.pendingKeys(in: channelID).map(\.key) ?? []
     }
 
     /// The safety number if `keys` (waiting ones) were accepted too.
     func safetyNumber(for channelID: Snowflake, accepting keys: [Data]) -> String? {
-        guard let peer = peer(in: channelID), myPublicKey != nil else { return nil }
-        let known = directory.people[peer.id] ?? []
-        let theirs = countedPeerKeys(in: channelID) + keys.compactMap { key in
-            known.first(where: { $0.key == key })
-        }
-        guard !theirs.isEmpty else { return nil }
-        let ourKeys = ownKeys.map { (key: $0, client: PeerClient.duhcord) }
-        let theirKeys = theirs.map { (key: $0.key, client: $0.client ?? .duhcord) }
-        return PrivateMessaging.safetyNumber(ourKeys, theirKeys)
+        trust(in: channelID)?.safetyNumber(for: channelID, accepting: keys)
     }
 
-    /// Trusts exactly `keys`, the waiting keys that were shown, so they receive messages from now on. A key that
-    /// arrived while they were being reviewed stays waiting. With `comparedNumber`, the safety number shown with
-    /// them matched; returns false if it no longer applies (the keys changed meanwhile), and nothing is verified.
+    /// Trusts exactly `keys`, the waiting keys that were shown. With `comparedNumber`, the safety number shown with
+    /// them matched; returns false if it no longer applies (the keys changed meanwhile), and nothing changes.
     @discardableResult
     func acceptNewKeys(_ keys: [Data], in channelID: Snowflake, comparedNumber: String?) -> Bool {
-        _ = loadIfNeeded()
-        guard !keychainLocked else { return false }
-        setTrust(.accepted, forKeys: keys, in: channelID)
-        guard let comparedNumber else { return true }
-        return markVerified(in: channelID, number: comparedNumber)
+        guard !keychainLocked, let engine = trust(in: channelID) else { return false }
+        switch engine.accept(keys, in: channelID, compared: comparedNumber) {
+        case .success(let sends):
+            post(sends)
+            keysChanged(in: channelID)
+            return true
+        case .failure:
+            return false
+        }
     }
 
     /// Refuses `keys` for good: they never receive messages, and what was sent from them isn't shown.
     func rejectNewKeys(_ keys: [Data], in channelID: Snowflake) {
-        setTrust(.rejected, forKeys: keys, in: channelID)
-    }
-
-    private func setTrust(_ trust: Trust, forKeys chosen: [Data], in channelID: Snowflake) {
-        _ = loadIfNeeded()
-        guard !keychainLocked, let peer = peer(in: channelID), var keys = directory.people[peer.id] else { return }
-        for i in keys.indices where keys[i].trust == .pending && chosen.contains(keys[i].key) { keys[i].state = trust }
-        directory.people[peer.id] = keys
+        guard let engine = trust(in: channelID) else { return }
+        post(engine.reject(keys, in: channelID))
         keysChanged(in: channelID)
     }
 
-    // MARK: - Our other Macs
+    // MARK: - Our other devices
 
-    /// The code for this Mac's key, to compare with the list on another Mac; nil before private messaging is used.
-    var thisMacCode: String? { myPublicKey.map(PrivateMessaging.keyCode) }
+    /// The code for this Mac's key, to compare with the list on another device; nil before private messaging is used.
+    var thisMacCode: String? { loadIfNeeded().map { PrivateMessaging.keyCode($0.publicKey) } }
 
-    /// Our other Macs, waiting ones first.
+    /// Our other devices, waiting ones first.
     var devices: [Device] {
-        _ = loadIfNeeded()
         let order: [Trust] = [.pending, .accepted, .rejected]
-        return directory.devices
-            .map { Device(key: $0.key, code: PrivateMessaging.keyCode($0.key), trust: $0.trust, added: $0.added) }
+        return (loadIfNeeded()?.devices ?? [])
+            .map { Device(key: $0.key, code: PrivateMessaging.keyCode($0.key), trust: $0.trust, client: $0.client,
+                          added: $0.added) }
             .sorted { (order.firstIndex(of: $0.trust)!, $0.added) < (order.firstIndex(of: $1.trust)!, $1.added) }
     }
 
-    var canApproveAnotherMac: Bool { directory.deviceKeys(.accepted).count < Self.maxOtherMacs }
+    var canApproveAnotherMac: Bool { loadIfNeeded()?.canApproveAnotherDevice ?? false }
 
-    /// Approves or denies one of our other Macs. Approved ones receive every private message we send from now on.
+    /// Approves or denies one of our other devices. Approved ones receive every private message we send from now on.
     func setTrust(_ trust: Trust, forDevice key: Data) {
-        _ = loadIfNeeded()
-        guard !keychainLocked else { return }
-        guard let index = directory.devices.firstIndex(where: { $0.key == key }) else { return }
-        if trust == .accepted, directory.devices[index].trust != .accepted, !canApproveAnotherMac { return }
-        directory.devices[index].trust = trust
+        guard !keychainLocked, let engine = loadIfNeeded(), engine.setDevice(key, trust: trust) else { return }
         keysChanged(in: nil)
     }
 
-    // MARK: - Handshakes
+    // MARK: - Reading the DM
 
-    /// Reads the handshakes in a DM's loaded messages: learns keys, notes requests, answers where agreed.
-    /// New messages at the bottom are read on their own; the whole history only when older messages were loaded.
+    /// Feeds the DM's loaded messages to the engine: it learns keys, notes requests and receipts, and says which
+    /// handshakes to send.
     func scan(channelID: Snowflake) {
-        guard Self.isSupported, let peer = peer(in: channelID), let messages = store.messages(in: channelID),
-              let first = messages.first, let last = messages.last, let me = store.me?.id else { return }
-        _ = loadIfNeeded()
-        guard !keychainLocked else { return }
-        var state: ScanState
-        let fresh: ArraySlice<Message>
-        if let previous = scans[channelID], previous.oldest == first.id {
-            guard previous.newest != last.id else { return }
-            state = previous
-            fresh = messages.drop { $0.id.snowflakeValue <= previous.newest.snowflakeValue }
-        } else {
-            state = ScanState(oldest: first.id, newest: first.id)
-            fresh = messages[...]
-        }
-        state.newest = last.id
-        var changed = false
-        for message in fresh {
-            let handshake: (key: Data, wantsReply: Bool, client: PeerClient, features: PeerFeatures?)
-            switch PrivateMessaging.kind(of: message.content) {
-            case .handshake(let key, let wantsReply):
-                handshake = (key, wantsReply, .duhcord, nil)
-            case .companionHandshake(let key, let wantsReply, _, let features):
-                if message.author.id == me { continue }
-                guard message.author.id == peer.id else { continue }
-                guard Settings.allowCompanionChat else {
-                    if companionNotices.insert(peer.id).inserted { changed = true }
-                    continue
-                }
-                handshake = (key, wantsReply, .companion, features)
-            case .plain, .encrypted:
-                continue
-            }
-            if handshake.client == .duhcord, message.author.id == me {
-                state.lastOwnHandshake = message.id
-                // Our handshake came back from Discord: no longer pending.
-                if let sent = pendingHandshakes[channelID], Self.date(of: message.id) >= sent.addingTimeInterval(-30) {
-                    pendingHandshakes[channelID] = nil
-                }
-                state.unansweredRequest = false
-                // Another Mac of ours, or Discord pretending to be one: it waits for approval in Settings.
-                if handshake.key != myPublicKey, !directory.devices.contains(where: { $0.key == handshake.key }),
-                   (try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: handshake.key)) != nil,
-                   directory.deviceKeys(.pending).count < Self.maxPendingKeys {
-                    directory.devices.append(OwnDevice(key: handshake.key, added: Date(), trust: .pending))
-                    changed = true
-                }
-                continue
-            }
-            guard message.author.id == peer.id else { continue }
-            if seenHandshakes.insert(message.id).inserted,
-               learn(handshake.key, for: peer.id, client: handshake.client, features: handshake.features) {
-                changed = true
-            }
-            // A request still open: theirs came after our last handshake.
-            if handshake.wantsReply, state.lastOwnHandshake.map({ $0.snowflakeValue < message.id.snowflakeValue }) ?? true {
-                state.unansweredRequest = true
-            }
-        }
-        scans[channelID] = state
-        if state.unansweredRequest, pendingHandshakes[channelID] == nil {
-            if directory.consented.contains(peer.id), loadIfNeeded(create: true) != nil {
-                sendHandshake(in: channelID, wantsReply: false)
-            } else if requests.insert(peer.id).inserted {
-                changed = true
-            }
-        }
-        if changed { keysChanged(in: channelID) }
+        guard Self.isSupported, let messages = store.messages(in: channelID), !messages.isEmpty else { return }
+        // Someone's request has to show even before we used private messaging, so a DM with private content makes
+        // our key.
+        let hasPrivate = messages.contains { PrivateMessaging.kind(of: $0.content) != .plain }
+        guard let engine = trust(in: channelID, create: hasPrivate) else { return }
+        let (sends, changed) = engine.read(channelID: channelID, messages: messages.map(Self.engineMessage))
+        post(sends)
+        if changed { keysChanged(in: channelID) } else { saveIfNeeded() }
     }
 
-    /// When a message was sent, from its ID.
-    private static func date(of id: Snowflake) -> Date {
-        Date(timeIntervalSince1970: TimeInterval((id.snowflakeValue >> 22) + 1_420_070_400_000) / 1000)
-    }
-
-    /// Adds a key for someone: trusted if it's the first we've seen from them, else waiting to be accepted (a new
-    /// Mac, a reinstall, or someone in the middle). Returns true if it was new.
-    private func learn(_ key: Data, for userID: Snowflake, client: PeerClient = .duhcord,
-                       features: PeerFeatures? = nil) -> Bool {
-        guard !keychainLocked else { return false }
-        guard (try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: key)) != nil else { return false }
-        var keys = directory.people[userID] ?? []
-        if let index = keys.firstIndex(where: { $0.key == key }) {
-            guard client == .companion else { return false }
-            var changed = false
-            if keys[index].client != .companion {
-                keys[index].client = .companion
-                // Accepted as a Duhcord key: a Companion key needs its own approval.
-                if keys[index].trust == .accepted { keys[index].state = .pending }
-                changed = true
-            }
-            if keys[index].features != features {
-                keys[index].features = features
-                changed = true
-            }
-            if changed {
-                directory.people[userID] = keys
-                verifiedCache.removeValue(forKey: userID)
-            }
-            return changed
-        }
-        let trust: Trust = client == .companion || !keys.isEmpty ? .pending : .accepted
-        if trust == .pending, keys.filter({ $0.trust == .pending }).count >= Self.maxPendingKeys { return false }
-        keys.append(PeerKey(key: key, added: Date(), state: trust,
-                            client: client == .companion ? .companion : nil,
-                            features: client == .companion ? features : nil))
-        directory.people[userID] = keys
-        return true
+    private static func engineMessage(_ message: Message) -> PrivateTrustEngine.Message {
+        PrivateTrustEngine.Message(id: message.id, authorID: message.author.id, content: message.content,
+                                   editedAt: message.editedTimestamp.flatMap(DiscordDate.parse))
     }
 
     // MARK: - Messages
 
-    /// The message content for `text`, sealed to the other person's accepted keys, to us and our approved Macs.
-    /// Keys still waiting to be accepted or approved get nothing.
+    /// The message content for `text`, sealed to the other person's counted keys, to us and our approved devices.
+    /// Only once they have our key (spec §6).
     func seal(_ text: String, files: [PrivateFile] = [], in channelID: Snowflake) throws -> String {
-        guard #available(macOS 14, *), peer(in: channelID) != nil, let key = loadIfNeeded(create: true) else {
+        guard #available(macOS 14, *), let engine = trust(in: channelID, create: true) else {
             throw PrivateMessagingError.noRecipients
         }
-        let theirs = countedPeerKeys(in: channelID).map(\.key)
-        guard !theirs.isEmpty else { throw PrivateMessagingError.noRecipients }
-        let recipients = (theirs + ownKeys)
-            .compactMap { try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: $0) }
-        return try PrivateCrypto.seal(text, files: files, channelID: channelID, sender: key, recipients: recipients)
+        do {
+            return try engine.seal(text, files: files, in: channelID)
+        } catch PrivateTrustEngine.SendError.notReady {
+            throw PrivateMessagingError.notReady
+        } catch PrivateTrustEngine.SendError.tooManyRecipients {
+            throw PrivateMessagingError.tooManyRecipients
+        }
     }
 
     /// One of our private messages without its image at `index`, sealed again (to the keys trusted now) for an
     /// edit that also deletes that attachment. Nil when nothing would be left, so the message should be deleted.
     func content(of message: Message, removingImage index: Int) throws -> String? {
-        guard let opened = open(content: message.content, id: message.id, authorID: message.author.id,
-                                channelID: message.channelId, postedAt: Self.postedAt(message)),
-              opened.files.indices.contains(index) else { throw PrivateMessagingError.noRecipients }
+        guard let opened = open(message), opened.files.indices.contains(index) else {
+            throw PrivateMessagingError.noRecipients
+        }
         // A split video's pieces are one film. Resealing without one of them would leave a hole that still played.
         if opened.film != nil { return nil }
         var files = opened.files
@@ -662,34 +438,31 @@ final class PrivateChatController {
 
     /// Whether this private message is one part of a split video. Removing a single piece would break the film.
     func isFilm(_ message: Message) -> Bool {
-        open(content: message.content, id: message.id, authorID: message.author.id,
-             channelID: message.channelId, postedAt: Self.postedAt(message))?.film != nil
+        open(message)?.film != nil
     }
 
     /// The text of a private message, or nil if it isn't one or can't be read with our key. A copy that Discord
-    /// could have reposted (sealed long before it appeared, or carrying an earlier message's salt), or one sent
-    /// from a key that isn't trusted yet, starts with a warning line. Rejected keys' messages aren't shown.
+    /// could have reposted, or one sent from a key that isn't trusted yet, starts with a warning line. Rejected
+    /// and excluded keys' messages aren't shown.
     func plaintext(of message: Message) -> String? {
-        open(content: message.content, id: message.id, authorID: message.author.id, channelID: message.channelId,
-             postedAt: Self.postedAt(message))?.text
+        open(message)?.text
     }
 
-    /// When a message's current content appeared: an edit replaces it (removing an image re-seals the text).
-    private static func postedAt(_ message: Message) -> Date {
-        message.editedTimestamp.flatMap(DiscordDate.parse) ?? date(of: message.id)
-    }
-
-    /// The same for a message known only by its parts (the message a reply quotes).
     /// The text of a quoted private message, for a reply's preview line: as sent, without warnings (the message
     /// itself shows those).
     func plaintext(content: String, id: Snowflake, authorID: Snowflake, channelID: Snowflake) -> String? {
-        open(content: content, id: id, authorID: authorID, channelID: channelID)?.original
+        open(PrivateTrustEngine.Message(id: id, authorID: authorID, content: content), in: channelID)?.original
+    }
+
+    /// Whether `id` is the first message that carried this salt (so not a copy).
+    private func isFirst(salt: Data, id: Snowflake) -> Bool {
+        let hex = salt.map { String(format: "%02x", $0) }.joined()
+        return engine?.directory.firstWithSalt[hex] == id
     }
 
     /// The images in a private message, matched to its attachments. Empty if it has none or can't be read.
     func images(of message: Message) -> [PrivateImage] {
-        guard let opened = open(content: message.content, id: message.id, authorID: message.author.id,
-                                channelID: message.channelId, postedAt: Self.postedAt(message)) else { return [] }
+        guard let opened = open(message) else { return [] }
         let film = opened.film
         var images = opened.files.enumerated().map { index, file in
             // The attachment at the same position, if it's the size this image's attachment must be.
@@ -723,8 +496,7 @@ final class PrivateChatController {
     func reelChunks(for image: PrivateImage, in channelID: Snowflake) -> [PrivateImage]? {
         guard image.reel != nil, image.reelPart == 0,
               let message = store.messages(in: channelID)?.first(where: { $0.id == image.messageID }),
-              let opened = open(content: message.content, id: message.id, authorID: message.author.id,
-                                channelID: channelID, postedAt: Self.postedAt(message)),
+              let opened = open(message),
               let reel = opened.reel, reel.start == 0 else { return nil }
         let parts = reelParts(reel, author: message.author.id, channelID: channelID)
         guard parts.count == reel.count,
@@ -737,10 +509,9 @@ final class PrivateChatController {
         guard #available(macOS 14, *) else { return [:] }
         var chosen: [Int: (snowflake: UInt64, image: PrivateImage)] = [:]
         for message in store.messages(in: channelID) ?? [] where message.author.id == author {
-            guard let opened = open(content: message.content, id: message.id, authorID: author,
-                                    channelID: channelID, postedAt: Self.postedAt(message)),
+            guard let opened = open(message),
                   let part = opened.reel, part.id == reel.id, part.count == reel.count,
-                  part.bytes == reel.bytes, opened.trusted, firstWithSalt[opened.salt] == message.id,
+                  part.bytes == reel.bytes, opened.trusted, isFirst(salt: opened.salt, id: message.id),
                   part.start + opened.files.count <= part.count else { continue }
             for (offset, file) in opened.files.enumerated() {
                 let index = part.start + offset
@@ -762,8 +533,7 @@ final class PrivateChatController {
     func playbackQueue(forFilmOf image: PrivateImage, in channelID: Snowflake) -> [PrivateImage] {
         guard image.filmID != nil,
               let message = store.messages(in: channelID)?.first(where: { $0.id == image.messageID }),
-              let opened = open(content: message.content, id: message.id, authorID: message.author.id,
-                                channelID: channelID, postedAt: Self.postedAt(message)),
+              let opened = open(message),
               let film = opened.film, film.start == 0 else { return [] }
         let chain = filmChain(of: film.id, author: message.author.id, channelID: channelID)
         guard chain.owner == message.id, let start = chain.start else { return [] }
@@ -780,10 +550,9 @@ final class PrivateChatController {
         if let cached = filmChainCache[film], cached.stamp == stamp { return cached.result }
         var chosen: [Int: (snowflake: UInt64, image: PrivateImage)] = [:]
         for message in messages where message.author.id == author {
-            guard let opened = open(content: message.content, id: message.id, authorID: author,
-                                    channelID: channelID, postedAt: Self.postedAt(message)),
+            guard let opened = open(message),
                   let part = opened.film, part.id == film, opened.trusted,
-                  firstWithSalt[opened.salt] == message.id else { continue }
+                  isFirst(salt: opened.salt, id: message.id) else { continue }
             for (offset, file) in opened.files.enumerated() {
                 let index = part.start + offset
                 guard file.kind.isVideo else { continue }
@@ -808,40 +577,31 @@ final class PrivateChatController {
         return result
     }
 
-    private func open(content: String, id: Snowflake, authorID: Snowflake, channelID: Snowflake,
-                      postedAt: Date? = nil) -> Opened? {
-        if let cached = opened[id], cached.content == content { return cached.value }
-        guard #available(macOS 14, *), case .encrypted(let payload) = PrivateMessaging.kind(of: content),
-              let key = loadIfNeeded() else { return nil }
-        let fromMe = authorID == store.me?.id
-        let trusted = fromMe ? ownKeys : countedPeerKeys(in: channelID).map(\.key)
-        let waiting = fromMe ? directory.deviceKeys(.pending)
-            : directory.keys(of: authorID, .pending) + excludedCompanionKeys(in: channelID)
-        func attempt(_ senders: [Data]) -> PrivateCrypto.Opened? {
-            PrivateCrypto.open(payload, channelID: channelID, recipient: key,
-                               senders: senders.compactMap { try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: $0) },
-                               fromSelf: fromMe)
-        }
-        var warnings: [String] = []
-        var result = attempt(trusted)
-        let isTrusted = result != nil
-        if result == nil, !waiting.isEmpty, let fromWaiting = attempt(waiting) {
-            result = fromWaiting
-            warnings.append(fromMe ? "⚠️ *Sent from a Mac you haven't approved in Settings.*"
-                                   : "⚠️ *Sent from a new key you haven't accepted. It may not be them.*")
-        }
-        if let result {
-            let posted = postedAt ?? Self.date(of: id)
-            let warning = replayWarning(result, id: id, postedAt: posted)
-            if let warning { warnings.append(warning) }
-            let shown = openedResult(result, trusted: isTrusted, warnings: warnings)
-            if opened.count > 2000 { clearOpened() }
-            opened[id] = (content, shown)
-            return shown
+    private func open(_ message: Message) -> Opened? {
+        open(Self.engineMessage(message), in: message.channelId)
+    }
+
+    private func open(_ message: PrivateTrustEngine.Message, in channelID: Snowflake) -> Opened? {
+        if let cached = opened[message.id], cached.content == message.content { return cached.value }
+        guard #available(macOS 14, *), case .encrypted = PrivateMessaging.kind(of: message.content),
+              let engine = trust(in: channelID) else { return nil }
+        let shown = engine.open(message, in: channelID).map {
+            openedResult($0.message, trusted: $0.trusted, warnings: $0.warnings.map(Self.warningText))
         }
         if opened.count > 2000 { clearOpened() }
-        opened[id] = (content, nil)
-        return nil
+        opened[message.id] = (message.content, shown)
+        return shown
+    }
+
+    private static func warningText(_ warning: PrivateTrustEngine.Warning) -> String {
+        switch warning {
+        case .untrustedSender: return "⚠️ *Sent from a new key you haven't accepted. It may not be them.*"
+        case .unapprovedDevice: return "⚠️ *Sent from a device you haven't approved in Settings.*"
+        case .copy: return "⚠️ *A copy of an earlier private message. Discord may have resent it.*"
+        case .writtenEarlier(let sentAt):
+            return "⚠️ *Written \(ProfileText.clockFormatter.string(from: sentAt)), not when it appeared. "
+                + "Discord may have resent it.*"
+        }
     }
 
     @available(macOS 14, *)
@@ -879,26 +639,6 @@ final class PrivateChatController {
     private func rejectedVideo(_ salt: Data) -> Opened {
         Opened(text: "This private video's description was rejected, so it isn't shown.",
                original: "", files: [], trusted: false, film: nil, reel: nil, salt: salt)
-    }
-
-    /// Ten minutes covers clocks that are a little off and messages that took a while to send.
-    private static let replayTolerance: TimeInterval = 10 * 60
-
-    @available(macOS 14, *)
-    private func replayWarning(_ opened: PrivateCrypto.Opened, id: Snowflake, postedAt posted: Date) -> String? {
-        if let first = firstWithSalt[opened.salt], first != id {
-            if first.snowflakeValue < id.snowflakeValue {
-                return "⚠️ *A copy of an earlier private message. Discord may have resent it.*"
-            }
-            // This one is older: it's the original, and the one seen first is the copy; redraw that one.
-            self.opened[first] = nil
-        }
-        firstWithSalt[opened.salt] = id
-        if abs(posted.timeIntervalSince(opened.sentAt)) > Self.replayTolerance {
-            return "⚠️ *Written \(ProfileText.clockFormatter.string(from: opened.sentAt)), not when it appeared. "
-                + "Discord may have resent it.*"
-        }
-        return nil
     }
 }
 

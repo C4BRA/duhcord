@@ -13,12 +13,14 @@ import Foundation
 /// Both kinds of message are a styled note line for people on other clients, then one line of data:
 ///
 ///     -# encrypted messaging by C4BRA/duhcord 🤫
-///     dhc2:<DenseText>
+///     dhc3:<DenseText>
+///
+/// The wire format is spec/PROTOCOL.md (protocol v3), shared with the Duhcord Private Companion.
 ///
 /// Discord limits messages by their JavaScript string length (UTF-16 code units), so DenseText packs 15 bits
 /// into each character, about 2.5 times what base64 fits, and the text is compressed before it's encrypted.
 public enum PrivateMessaging {
-    public static let prefix = "dhc2:"
+    public static let prefix = "dhc3:"
     /// Shown as small grey text ("-#" is Discord's subtext Markdown) on other clients.
     public static let notice = "-# encrypted messaging by C4BRA/duhcord 🤫"
 
@@ -42,48 +44,96 @@ public enum PrivateMessaging {
     /// What an encrypted image is called on Discord. It says nothing about what's inside.
     public static let fileName = "encrypted.bin"
 
-    static let messageType: UInt8 = 0x21
-    static let handshakeType: UInt8 = 0x22
-    static let companionHandshakeType: UInt8 = 0x23
+    /// The protocol version this build speaks (spec §3).
+    public static let protocolVersion: UInt8 = 3
+    static let messageType: UInt8 = 0x31
+    static let handshakeType: UInt8 = 0x32
+    /// type, flags, version, client, host, features(2), key(32), n.
+    static let handshakeFixedSize = 40
+    /// What every later version keeps: type, flags, version, client, host, features(2).
+    static let handshakeStablePrefix = 7
+    /// Most accepted key IDs one handshake carries.
+    public static let maxAcceptedKeyIDs = 8
 
     public enum Kind: Equatable {
         case plain
-        /// A handshake announcing `key`; `wantsReply` when the sender doesn't have our key yet.
-        case handshake(key: Data, wantsReply: Bool)
-        case companionHandshake(key: Data, wantsReply: Bool, host: UInt8, features: PeerFeatures)
+        case handshake(PrivateHandshake)
+        /// A handshake from a newer protocol version: nothing in it is learned (spec §3 "Versions").
+        case newerHandshake(version: UInt8)
+        /// A `0x31` frame whose shape is valid; opening it is a separate step.
         case encrypted(payload: Data)
     }
 
     /// What a message is, from its last line. Cheap for ordinary messages: only the last line is looked at, and
-    /// nothing is decoded unless it starts with the prefix.
+    /// nothing is decoded unless it starts with the prefix. Anything that isn't exactly a valid frame is `.plain`.
     public static func kind(of content: String) -> Kind {
         let start = content.lastIndex(of: "\n").map { content.index(after: $0) } ?? content.startIndex
         let last = content[start...]
-        guard last.hasPrefix(prefix), let data = DenseText.decode(last.dropFirst(prefix.count)),
-              let type = data.first else { return .plain }
+        guard last.hasPrefix(prefix), let decoded = DenseText.decode(last.dropFirst(prefix.count)),
+              let type = decoded.first else { return .plain }
+        let data = Data(decoded)
         switch type {
-        case handshakeType where data.count == 34:
-            return .handshake(key: Data(data[2..<34]), wantsReply: data[1] & 1 != 0)
-        case companionHandshakeType where data.count == 38 && data[2] == PeerClient.companion.rawValue
-                && data[1] & 0xFE == 0:
-            let features = UInt16(data[4]) << 8 | UInt16(data[5])
-            return .companionHandshake(key: Data(data[6..<38]), wantsReply: data[1] & 1 != 0,
-                                       host: data[3], features: PeerFeatures(rawValue: features))
         case messageType:
-            return .encrypted(payload: data)
+            return validMessageShape(data) ? .encrypted(payload: data) : .plain
+        case handshakeType:
+            return parseHandshake(data)
         default:
             return .plain
         }
     }
 
-    /// The handshake message announcing `publicKey` (32 raw bytes).
-    public static func handshake(publicKey: Data, wantsReply: Bool) -> String {
-        var data = Data([handshakeType, wantsReply ? 1 : 0])
-        data.append(publicKey)
-        return content(for: data)
+    private static func validMessageShape(_ data: Data) -> Bool {
+        guard data.count >= 27, data[1] & ~UInt8(0b11) == 0 else { return false }
+        let count = Int(data[26])
+        return (1...maxRecipients).contains(count) && data.count >= 27 + 68 * count + 16
     }
 
-    static func content(for data: Data) -> String {
+    private static func parseHandshake(_ data: Data) -> Kind {
+        guard data.count >= handshakeStablePrefix else { return .plain }
+        let version = data[2]
+        // Later versions keep the first 7 bytes; nothing else in them is understood.
+        if version > protocolVersion { return .newerHandshake(version: version) }
+        guard version == protocolVersion, data.count >= handshakeFixedSize, data[1] & ~UInt8(1) == 0,
+              let client = PeerClient(rawValue: data[3]) else { return .plain }
+        let count = Int(data[handshakeFixedSize - 1])
+        guard count <= maxAcceptedKeyIDs, data.count == handshakeFixedSize + 4 * count else { return .plain }
+        var ids = Set<Data>()
+        for index in 0..<count {
+            let start = handshakeFixedSize + 4 * index
+            ids.insert(Data(data[start..<(start + 4)]))
+        }
+        return .handshake(PrivateHandshake(
+            key: Data(data[7..<39]), wantsReply: data[1] & 1 != 0, client: client, host: data[4],
+            features: PeerFeatures(rawValue: UInt16(data[5]) << 8 | UInt16(data[6])),
+            acceptedKeyIDs: ids.sorted(by: { $0.lexicographicallyPrecedes($1) })))
+    }
+
+    /// The frame bytes of a handshake (spec §3). Accepted key IDs are sorted and de-duplicated, at most 8.
+    public static func handshakeFrame(_ handshake: PrivateHandshake) -> Data {
+        let ids = Array(Set(handshake.acceptedKeyIDs).sorted(by: { $0.lexicographicallyPrecedes($1) })
+            .prefix(maxAcceptedKeyIDs))
+        var data = Data([handshakeType, handshake.wantsReply ? 1 : 0, protocolVersion, handshake.client.rawValue,
+                         handshake.host, UInt8(handshake.features.rawValue >> 8),
+                         UInt8(truncatingIfNeeded: handshake.features.rawValue)])
+        data.append(handshake.key)
+        data.append(UInt8(ids.count))
+        for id in ids { data.append(id) }
+        return data
+    }
+
+    /// The full Discord message content of a handshake.
+    public static func handshake(_ handshake: PrivateHandshake) -> String {
+        content(for: handshakeFrame(handshake))
+    }
+
+    /// A Duhcord handshake announcing `publicKey` (32 raw bytes) with no receipts.
+    public static func handshake(publicKey: Data, wantsReply: Bool) -> String {
+        handshake(PrivateHandshake(key: publicKey, wantsReply: wantsReply, client: .duhcord, host: 0,
+                                   features: .duhcord, acceptedKeyIDs: []))
+    }
+
+    /// Any frame as message content: the notice line, then the prefix and the DenseText.
+    public static func content(for data: Data) -> String {
         notice + "\n" + prefix + DenseText.encode(data)
     }
 
@@ -136,14 +186,12 @@ public enum PrivateMessaging {
                      b.map { (key: $0, client: PeerClient.duhcord) })
     }
 
+    /// spec §8: one formula, always including each key's client, so Discord relabelling a key changes the number
+    /// on one side only. A key listed twice keeps the weaker label (Companion).
     public static func safetyNumber(
         _ a: [(key: Data, client: PeerClient)],
         _ b: [(key: Data, client: PeerClient)]
     ) -> String {
-        guard a.contains(where: { $0.client == .companion }) || b.contains(where: { $0.client == .companion }) else {
-            return safetyNumberV2(a.map(\.key), b.map(\.key))
-        }
-
         func side(_ keys: [(key: Data, client: PeerClient)]) -> Data {
             var clients: [Data: PeerClient] = [:]
             for item in keys {
@@ -163,20 +211,6 @@ public enum PrivateMessaging {
         let (x, y) = (side(a), side(b))
         let (first, second) = x.lexicographicallyPrecedes(y) ? (x, y) : (y, x)
         var input = Data("duhcord-safety-number-v3".utf8)
-        input.append(first)
-        input.append(second)
-        return digits(of: input, groups: 12)
-    }
-
-    private static func safetyNumberV2(_ a: [Data], _ b: [Data]) -> String {
-        func side(_ keys: [Data]) -> Data {
-            var data = Data([UInt8(clamping: Set(keys).count)])
-            for key in Set(keys).sorted(by: { $0.lexicographicallyPrecedes($1) }) { data.append(key) }
-            return data
-        }
-        let (x, y) = (side(a), side(b))
-        let (first, second) = x.lexicographicallyPrecedes(y) ? (x, y) : (y, x)
-        var input = Data("duhcord-safety-number-v2".utf8)
         input.append(first)
         input.append(second)
         return digits(of: input, groups: 12)
@@ -206,6 +240,29 @@ public enum PrivateMessaging {
 public enum PeerClient: UInt8, Codable, Sendable {
     case duhcord = 0
     case companion = 1
+}
+
+/// A v3 handshake (spec §3).
+public struct PrivateHandshake: Equatable, Sendable {
+    public var key: Data
+    public var wantsReply: Bool
+    public var client: PeerClient
+    /// Where the sender runs (shown only): 0 Duhcord / unknown, 1 Vencord, 2 Vesktop, 3 Replugged, 4 BetterDiscord,
+    /// 5 Dorion.
+    public var host: UInt8
+    public var features: PeerFeatures
+    /// `keyID`s of the recipient's keys the sender counts, sorted: proof that they arrived and were accepted.
+    public var acceptedKeyIDs: [Data]
+
+    public init(key: Data, wantsReply: Bool, client: PeerClient, host: UInt8, features: PeerFeatures,
+                acceptedKeyIDs: [Data]) {
+        self.key = key
+        self.wantsReply = wantsReply
+        self.client = client
+        self.host = host
+        self.features = features
+        self.acceptedKeyIDs = acceptedKeyIDs
+    }
 }
 
 public struct PeerFeatures: OptionSet, Codable, Sendable {
@@ -417,6 +474,8 @@ public enum PrivateMessagingError: Error, LocalizedError, Equatable {
     case tooManyRecipients
     case tooManyFiles
     case filesTooLarge
+    /// spec §6: they don't have our key yet (or we don't have theirs), so they couldn't read it.
+    case notReady
 
     public var errorDescription: String? {
         switch self {
@@ -427,6 +486,8 @@ public enum PrivateMessagingError: Error, LocalizedError, Equatable {
                 + "or ask the other person to."
         case .tooManyFiles: return "A message can carry up to \(PrivateMessaging.maxFiles) images and videos."
         case .filesTooLarge: return "These files are too large to send together. Send fewer at a time."
+        case .notReady:
+            return "They haven't accepted your key yet, so they couldn't read this. Wait for them, or re-send your key."
         }
     }
 }
@@ -459,7 +520,7 @@ public enum PrivateCrypto {
     private static let fixedHeader = 1 + 1 + 4 + 4 + 16 + 1
 
     /// An opened private message.
-    public struct Opened: Equatable {
+    public struct Opened: Equatable, Sendable {
         public let text: String
         /// When the sender sealed it.
         public let sentAt: Date
@@ -467,6 +528,8 @@ public enum PrivateCrypto {
         public let salt: Data
         /// Images, in the order of the message's attachments.
         public var files: [PrivateFile] = []
+        /// `keyID`s of every recipient entry: a receipt that the sender counts those keys (spec §6).
+        public var recipientKeyIDs: [Data] = []
     }
     private static let exportContext = Data("duhcord-message-key".utf8)
     private static let zeroNonce = try! ChaChaPoly.Nonce(data: Data(count: 12))
@@ -533,12 +596,13 @@ public enum PrivateCrypto {
         let data = Data(payload)
         guard data.count > fixedHeader, data[0] == PrivateMessaging.messageType else { return nil }
         let flags = data[1]
+        guard flags & ~UInt8(0b11) == 0 else { return nil }
         let senderID = data[2..<6]
         let sentAt = data[6..<10].reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
         let salt = data[10..<26]
         let count = Int(data[26])
         let headerEnd = fixedHeader + count * entrySize
-        guard count <= PrivateMessaging.maxRecipients, data.count >= headerEnd + 16 else { return nil }
+        guard (1...PrivateMessaging.maxRecipients).contains(count), data.count >= headerEnd + 16 else { return nil }
 
         let myID = PrivateMessaging.keyID(recipient.publicKey.rawRepresentation)
         // Possible message keys: re-derived for our own message, else one per sender key with this ID (an ID
@@ -572,7 +636,12 @@ public enum PrivateCrypto {
             bytes = Data(bytes.dropFirst(1 + count * PrivateFile.encodedSize))
         }
         guard let text = String(data: bytes, encoding: .utf8) else { return nil }
-        return Opened(text: text, sentAt: Date(timeIntervalSince1970: TimeInterval(sentAt)), salt: Data(salt), files: files)
+        let recipientKeyIDs = (0..<count).map { index -> Data in
+            let start = fixedHeader + index * entrySize
+            return Data(data[start..<(start + 4)])
+        }
+        return Opened(text: text, sentAt: Date(timeIntervalSince1970: TimeInterval(sentAt)), salt: Data(salt), files: files,
+                      recipientKeyIDs: recipientKeyIDs)
     }
 
     // MARK: - Images

@@ -26,8 +26,10 @@ enum Keychain {
     static let accountListAccount = "list"
     /// Where builds before account switching kept their one token.
     static let legacyTokenAccount = "default"
-    static let privateKeyService = "com.duhcord.private-key"
-    static let privateDirectoryService = "com.duhcord.private-directory"
+    /// Private messaging v3 (spec/PROTOCOL.md). A clean break: v2's "com.duhcord.private-key" and
+    /// "com.duhcord.private-directory" entries are never read again, so v3 starts with a new key and directory.
+    static let privateKeyService = "com.duhcord.private-key-v3"
+    static let privateDirectoryService = "com.duhcord.private-directory-v3"
 
     enum Read {
         case value(Data)
