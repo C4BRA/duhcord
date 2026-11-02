@@ -128,7 +128,10 @@ async fn approve(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<BridgeEvent>,
     socket: &mut ClientSocket,
 ) -> Vec<u8> {
-    let (conn, _) = pairing_requested(events).await;
+    let (conn, code) = pairing_requested(events).await;
+    let pairing = next_json(socket).await.unwrap();
+    assert_eq!(pairing["t"], "pairing");
+    assert_eq!(pairing["code"], code);
     handle.approve_pairing(conn).unwrap();
     let paired = next_json(socket).await.unwrap();
     assert_eq!(paired["t"], "paired");
@@ -184,6 +187,7 @@ async fn unpaired_frames_receive_error_and_unknown_types_are_ignored_after_pairi
     send_json(&mut socket, json!({"t":"dm"})).await;
     assert_eq!(next_json(&mut socket).await.unwrap()["code"], "unpaired");
 
+    send_json(&mut socket, hello(None)).await;
     let token = approve(&handle, &mut events, &mut socket).await;
     assert_eq!(token.len(), 32);
     assert!(matches!(
