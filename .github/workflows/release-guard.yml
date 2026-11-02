@@ -1,0 +1,52 @@
+name: Release guard
+
+# Duhcord's in-app updater downloads update.json from this repository's *latest* release. Companion releases live
+# here too (companion-v* tags), always as pre-releases, which GitHub never makes "latest". If a release is ever
+# published or edited so that "latest" isn't a Duhcord release (v1.2.3), this puts the newest Duhcord release back as
+# latest and fails, so the change is noticed.
+#
+# (Even then, a companion release couldn't ship an update: Duhcord only installs an update.json signed with its update
+# key. Without this guard, update checks would just fail.)
+
+on:
+  release:
+    types: [published, released, prereleased, edited]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  latest-is-duhcord:
+    runs-on: ubuntu-latest
+    permissions:
+      # To move "latest" back. No checkout and no third-party code in this job.
+      contents: write
+    steps:
+      - name: Keep the latest release a Duhcord release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          is_duhcord() { [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+          latest="$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          if [[ -z "$latest" ]] || is_duhcord "$latest"; then
+            echo "latest release: ${latest:-none} (ok)"
+            exit 0
+          fi
+          echo "::error::The latest release is $latest, not a Duhcord release; Duhcord's updater reads the latest release."
+          # The newest published, non-pre-release Duhcord release.
+          duhcord="$(gh api "repos/$REPO/releases" --paginate \
+            --jq '.[] | select(.draft == false and .prerelease == false) | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | "\(.id) \(.tag_name)"' | head -1)"
+          if [[ -n "$duhcord" ]]; then
+            gh api -X PATCH "repos/$REPO/releases/${duhcord%% *}" -f make_latest=true >/dev/null
+            echo "::error::Moved \"latest\" back to ${duhcord#* }."
+          fi
+          # Companion releases belong among the pre-releases.
+          if [[ "$latest" == companion-v* ]]; then
+            id="$(gh api "repos/$REPO/releases/tags/$latest" --jq .id)"
+            gh api -X PATCH "repos/$REPO/releases/$id" -F prerelease=true -f make_latest=false >/dev/null
+            echo "::error::Marked $latest as a pre-release again."
+          fi
+          exit 1

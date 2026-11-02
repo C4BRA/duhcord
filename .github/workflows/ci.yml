@@ -2,7 +2,14 @@ name: CI
 
 on:
   push:
+    # The companion (companion/) has its own workflows; a change only there doesn't rebuild Duhcord.
+    paths-ignore:
+      - "companion/**"
+      - ".github/workflows/companion-*.yml"
   pull_request:
+    paths-ignore:
+      - "companion/**"
+      - ".github/workflows/companion-*.yml"
 
 # CI only reads the repository.
 permissions:
@@ -35,7 +42,10 @@ jobs:
           # CI never pushes, so don't leave a GitHub token in the checkout.
           persist-credentials: false
       # libdave and its dependencies for the voice helper, rebuilt only when the pinned versions change.
+      # Builds that get signed start clean: any workflow in this repository (including the companion's, which run
+      # npm and cargo packages) can write cache entries, so a signed build never restores one.
       - uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        if: needs.signing-context.outputs.release_build != 'true'
         with:
           path: Vendor/libdave
           key: libdave-${{ runner.os }}-${{ hashFiles('scripts/build-libdave.sh', 'Sources/CDave/include/dave.h') }}

@@ -1,0 +1,170 @@
+name: Companion CI
+
+# Checks for the Duhcord Private Companion and its plugins (companion/). They run npm and cargo packages, so they
+# never touch Duhcord's secrets or release environment. Duhcord's own CI is in ci.yml.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "companion/**"
+      - "spec/**"
+      - ".github/workflows/companion-*.yml"
+      - ".github/workflows/interop.yml"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-guard.yml"
+  pull_request:
+    paths:
+      - "companion/**"
+      - "spec/**"
+      - ".github/workflows/companion-*.yml"
+      - ".github/workflows/interop.yml"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-guard.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: companion
+
+jobs:
+  isolation:
+    name: Duhcord and the companion stay apart
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the workflow boundaries
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$1"; exit 1; }
+          companion=(.github/workflows/companion-*.yml .github/workflows/interop.yml)
+          # Companion workflows run third-party npm and cargo code: no Duhcord secrets, no Duhcord release environment.
+          if grep -nE 'secrets\.DUHCORD_|environment:[[:space:]]*release[[:space:]]*$' "${companion[@]}"; then
+            fail "a companion workflow references Duhcord's signing/update secrets or its release environment"
+          fi
+          # Every action is pinned to a commit, as in Duhcord's workflows.
+          if grep -nE '^\s*-?\s*uses:\s*[^ ]+@' .github/workflows/*.yml | grep -vE '@[0-9a-f]{40}( |$)'; then
+            fail "an action isn't pinned to a full commit SHA"
+          fi
+          # Companion tags must never trigger Duhcord's release (which fires on v* tags), and vice versa.
+          grep -qE "tags: \['v\*'\]" .github/workflows/release.yml || fail "Duhcord's release trigger changed; re-check tag separation"
+          grep -qE 'companion-v\*' .github/workflows/companion-release.yml || fail "companion releases must use companion-v* tags"
+          # Companion releases live in this repository too: they must never become the "latest" release that
+          # Duhcord's updater reads.
+          grep -q -- '--prerelease --latest=false' .github/workflows/companion-release.yml \
+            || fail "companion releases must be created with --prerelease --latest=false"
+          test -f .github/workflows/release-guard.yml || fail "release-guard.yml is missing"
+          # Duhcord's signed builds must not restore caches that companion jobs could have written.
+          if grep -n 'actions/cache' .github/workflows/release.yml; then
+            fail "Duhcord's release workflow must not restore CI caches"
+          fi
+          # Duhcord's Swift package must not reach into companion/.
+          if grep -n 'companion' Package.swift; then fail "Package.swift references companion/"; fi
+          echo "boundaries ok"
+
+  rust:
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Linux system libraries (keyring, Tauri)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - name: Toolchain (from rust-toolchain.toml)
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: companion
+          prefix-key: companion-rust
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --locked
+      - name: Interop (committed Swift vectors)
+        run: cargo run -q --locked -p duhcord-interop -- check interop/swift-vectors.json
+
+  plugins:
+    name: Plugins
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Linux system libraries (bridge test server)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: companion
+          prefix-key: companion-rust
+      # No install scripts: nothing in node_modules runs during install.
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+        env:
+          CI: "1"
+      - name: UI script parses
+        run: node --check ui/app.js
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: companion-plugins
+          path: companion/plugins/dist
+
+  vencord:
+    name: Vencord userplugin compiles
+    needs: plugins
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: companion-plugins
+          path: dist
+      - name: Build Vencord with the userplugin
+        run: |
+          git clone --depth 1 https://github.com/Vendicated/Vencord
+          # src/userplugins is gitignored, so a fresh clone doesn't have it: without mkdir, cp would
+          # turn the plugin folder itself into userplugins/ and Vencord would load its files as plugins.
+          mkdir -p Vencord/src/userplugins
+          cp -r dist/vencord/duhcordPrivate Vencord/src/userplugins/
+          test -f Vencord/src/userplugins/duhcordPrivate/index.ts
+          cd Vencord
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm build
+          pnpm exec tsc --noEmit -p . 2>&1 | tee tsc.log || true
+          if grep -n "userplugins/duhcordPrivate" tsc.log; then
+            echo "::error::TypeScript errors in the Duhcord Private userplugin"
+            exit 1
+          fi
