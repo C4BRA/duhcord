@@ -1,0 +1,24 @@
+{
+  "name": "duhcord-private-plugin",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Duhcord Private Companion UI and the thin Vencord / Replugged / BetterDiscord plugins",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-plugins.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test --experimental-strip-types plugins/shared/*.test.ts",
+    "tauri": "tauri",
+    "app:dev": "tauri dev --config crates/app/tauri.conf.json",
+    "app:build": "npm run build && tauri build --config crates/app/tauri.conf.json"
+  },
+  "devDependencies": {
+    "@electron/asar": "4.3.1",
+    "@tauri-apps/cli": "2.12.4",
+    "@types/node": "24.10.1",
+    "@types/ws": "^8.18.1",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3",
+    "ws": "8.18.3"
+  }
+}
