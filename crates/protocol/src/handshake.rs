@@ -97,7 +97,7 @@ pub fn kind(content: &str) -> Kind {
                 2 => Host::Vesktop,
                 3 => Host::Replugged,
                 4 => Host::BetterDiscord,
-                _ => return Kind::Plain,
+                _ => Host::Unknown,
             };
             let features = u16::from_be_bytes([frame[4], frame[5]]);
             let mut key = [0u8; 32];

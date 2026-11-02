@@ -32,7 +32,7 @@ the other side's file. CI on macOS runs both directions; nothing ships unless bo
   "fileBlobs": [ { "file": "<45-byte hex>", "sealed": "<hex>", "plain": "<hex>" } ],
   "handshakes": [ { "key": "alice", "wantsReply": true, "content": "<content>" } ],
   "denseText": [ { "bytes": "<hex>", "text": "<string>" } ],
-  "padme": [ [0, 1], [1, 1], [2, 2], [9, 10], [1000, 1024], [70000, 70656] ],
+  "padme": [ [0, 1], [1, 1], [2, 2], [9, 10], [1000, 1024], [70000, 71680] ],
   "safetyNumbers": [ { "a": ["alice"], "b": ["bob"], "number": "<60 digits>" },
                       { "a": ["alice", "carol"], "b": ["bob"], "number": "…" } ],
   "keyCodes": [ { "key": "alice", "code": "<30 digits>" } ]

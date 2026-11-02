@@ -194,6 +194,12 @@ fn handshake_and_malformed_frames_follow_wire_lengths() {
         kind(&handshake_content(&companion)),
         Kind::Handshake(decoded) if decoded == companion
     ));
+    let mut unknown_host = vec![0x23, 0, 1, 0xff, 0, 3];
+    unknown_host.extend_from_slice(&key);
+    assert!(matches!(
+        kind(&format!("dhc2:{}", dense_text::encode(&unknown_host))),
+        Kind::Handshake(decoded) if decoded.host == Host::Unknown
+    ));
 
     for size in [33, 35] {
         let mut frame = vec![0x22, 0];
