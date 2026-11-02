@@ -33,6 +33,7 @@ var targets: [Target] = [
     .executableTarget(name: "DuhcordMediaDecoder", dependencies: ["DuhcordMediaKit", "DuhcordUpdateKit"],
                       swiftSettings: strictConcurrency),
     .testTarget(name: "DuhcordCoreTests", dependencies: ["DuhcordCore", "DuhcordUpdateKit", "DuhcordVoiceKit", "DuhcordMediaKit"],
+                resources: [.copy("Fixtures")],
                 swiftSettings: strictConcurrency),
 ]
 

@@ -44,11 +44,13 @@ public enum PrivateMessaging {
 
     static let messageType: UInt8 = 0x21
     static let handshakeType: UInt8 = 0x22
+    static let companionHandshakeType: UInt8 = 0x23
 
     public enum Kind: Equatable {
         case plain
         /// A handshake announcing `key`; `wantsReply` when the sender doesn't have our key yet.
         case handshake(key: Data, wantsReply: Bool)
+        case companionHandshake(key: Data, wantsReply: Bool, host: UInt8, features: PeerFeatures)
         case encrypted(payload: Data)
     }
 
@@ -62,6 +64,11 @@ public enum PrivateMessaging {
         switch type {
         case handshakeType where data.count == 34:
             return .handshake(key: Data(data[2..<34]), wantsReply: data[1] & 1 != 0)
+        case companionHandshakeType where data.count == 38 && data[2] == PeerClient.companion.rawValue
+                && data[1] & 0xFE == 0:
+            let features = UInt16(data[4]) | UInt16(data[5]) << 8
+            return .companionHandshake(key: Data(data[6..<38]), wantsReply: data[1] & 1 != 0,
+                                       host: data[3], features: PeerFeatures(rawValue: features))
         case messageType:
             return .encrypted(payload: data)
         default:
@@ -125,6 +132,43 @@ public enum PrivateMessaging {
     /// The same over every key on each side: one person's Macs, and the other's. It only matches when both
     /// people's Duhcord encrypt to exactly the same keys, so a key slipped in on either side changes it.
     public static func safetyNumber(_ a: [Data], _ b: [Data]) -> String {
+        safetyNumber(a.map { (key: $0, client: PeerClient.duhcord) },
+                     b.map { (key: $0, client: PeerClient.duhcord) })
+    }
+
+    public static func safetyNumber(
+        _ a: [(key: Data, client: PeerClient)],
+        _ b: [(key: Data, client: PeerClient)]
+    ) -> String {
+        guard a.contains(where: { $0.client == .companion }) || b.contains(where: { $0.client == .companion }) else {
+            return safetyNumberV2(a.map(\.key), b.map(\.key))
+        }
+
+        func side(_ keys: [(key: Data, client: PeerClient)]) -> Data {
+            var clients: [Data: PeerClient] = [:]
+            for item in keys {
+                if let existing = clients[item.key], existing != item.client {
+                    clients[item.key] = .companion
+                } else {
+                    clients[item.key] = item.client
+                }
+            }
+            var data = Data([UInt8(clamping: clients.count)])
+            for key in clients.keys.sorted(by: { $0.lexicographicallyPrecedes($1) }) {
+                data.append(key)
+                data.append(clients[key]!.rawValue)
+            }
+            return data
+        }
+        let (x, y) = (side(a), side(b))
+        let (first, second) = x.lexicographicallyPrecedes(y) ? (x, y) : (y, x)
+        var input = Data("duhcord-safety-number-v3".utf8)
+        input.append(first)
+        input.append(second)
+        return digits(of: input, groups: 12)
+    }
+
+    private static func safetyNumberV2(_ a: [Data], _ b: [Data]) -> String {
         func side(_ keys: [Data]) -> Data {
             var data = Data([UInt8(clamping: Set(keys).count)])
             for key in Set(keys).sorted(by: { $0.lexicographicallyPrecedes($1) }) { data.append(key) }
@@ -157,6 +201,27 @@ public enum PrivateMessaging {
             return String(repeating: "0", count: 5 - digits.count) + digits
         }.joined(separator: " ")
     }
+}
+
+public enum PeerClient: UInt8, Codable, Sendable {
+    case duhcord = 0
+    case companion = 1
+}
+
+public struct PeerFeatures: OptionSet, Codable, Sendable {
+    public let rawValue: UInt16
+
+    public init(rawValue: UInt16) {
+        self.rawValue = rawValue
+    }
+
+    public static let text = Self(rawValue: 1)
+    public static let openImages = Self(rawValue: 2)
+    public static let openVideo = Self(rawValue: 4)
+    public static let openReels = Self(rawValue: 8)
+    public static let sendImages = Self(rawValue: 0x100)
+    public static let sendVideo = Self(rawValue: 0x200)
+    public static let duhcord: Self = [.text, .openImages, .openVideo, .openReels, .sendImages, .sendVideo]
 }
 
 /// An encrypted image that came with a private message: its key and what it is. Listed inside the message, so

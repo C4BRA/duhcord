@@ -61,6 +61,7 @@ enum Settings {
         static let mediaPreviews = "mediaPreviews"
         static let animateGIFs = "animateGIFs"
         static let sendTyping = "sendTypingIndicator"
+        static let allowCompanionChat = "allowCompanionPrivateChat"
         static let limitDiscordData = "limitDiscordData"
         static let compressVideos = "compressVideos"
         static let inputDevice = "inputDeviceUID"
@@ -79,6 +80,7 @@ enum Settings {
             Key.mediaPreviews: MediaPreviews.always.rawValue,
             Key.animateGIFs: AnimateGIFs.onHover.rawValue,
             Key.sendTyping: true,
+            Key.allowCompanionChat: false,
             Key.limitDiscordData: true,
             Key.compressVideos: true,
             Key.inputVolume: 1.0,
@@ -123,6 +125,11 @@ enum Settings {
     static var sendTypingIndicator: Bool {
         get { defaults.bool(forKey: Key.sendTyping) }
         set { set(newValue, for: Key.sendTyping) }
+    }
+
+    static var allowCompanionChat: Bool {
+        get { defaults.bool(forKey: Key.allowCompanionChat) }
+        set { set(newValue, for: Key.allowCompanionChat) }
     }
 
     /// Turn off Discord's data collection, tracking and marketing settings on each account (on by default).

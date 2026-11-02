@@ -633,9 +633,28 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     /// Sends the attached images with the text. In Private, each image is encrypted with a key of its own, the
     /// keys go in the private message, and the encrypted images are uploaded as its attachments; otherwise they're
     /// uploaded as they were prepared. The row clears once Discord has the message.
+    private func rejectUnsupportedPrivateFeature(_ feature: PeerFeatures, in channelID: Snowflake) {
+        let name = privateChat?.peer(in: channelID)?.displayName ?? "This person"
+        let kind = feature == .openImages ? "images" : "videos"
+        showSendError("Private message not sent",
+                      detail: "\(name) uses the Duhcord Private Companion, which can't open private \(kind) yet.")
+    }
+
     private func sendWithImages(_ text: String, in channelID: Snowflake) {
         guard let key = draftKey else { return }
         let images = attached
+        if key.isPrivate, let privateChat {
+            if images.contains(where: { $0.sourceURL != nil || $0.kind.isVideo }),
+               !privateChat.recipientsCanOpen(.openVideo, in: channelID) {
+                rejectUnsupportedPrivateFeature(.openVideo, in: channelID)
+                return
+            }
+            if images.contains(where: { $0.sourceURL == nil && !$0.kind.isVideo }),
+               !privateChat.recipientsCanOpen(.openImages, in: channelID) {
+                rejectUnsupportedPrivateFeature(.openImages, in: channelID)
+                return
+            }
+        }
         if key.isPrivate, images.contains(where: { $0.sourceURL != nil }) {
             guard images.count == 1, let url = images[0].sourceURL, #available(macOS 14, *) else {
                 showSendError("Private message not sent", detail: "A video that has to be split is sent on its own.")
@@ -802,7 +821,11 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                         caption: sentAny ? "" : caption,
                         reel: PrivateReel(id: reelID, start: start, count: files.count, bytes: source.totalBytes))
                     let content = try await MainActor.run { () throws -> String in
-                        guard let chat = owner.object?.privateChat else { throw CancellationError() }
+                        guard let object = owner.object, let chat = object.privateChat else { throw CancellationError() }
+                        guard chat.recipientsCanOpen(.openReels, in: channelID) else {
+                            object.rejectUnsupportedPrivateFeature(.openReels, in: channelID)
+                            throw CancellationError()
+                        }
                         return try chat.seal(note, files: batchFiles, in: channelID)
                     }
                     try await send(content, uploads: uploads, chunks: end - start)
@@ -941,7 +964,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         if let reply = message.referencedMessage {
             switch PrivateMessaging.kind(of: reply.content) {
             case .plain: break
-            case .handshake: shown.referencedMessage?.content = "🔒 Offer to chat privately"
+            case .handshake, .companionHandshake: shown.referencedMessage?.content = "🔒 Offer to chat privately"
             case .encrypted:
                 let text = isPrivate ? privateChat?.plaintext(content: reply.content, id: reply.id, authorID: reply.author.id,
                                                               channelID: message.channelId) : nil
@@ -951,7 +974,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         switch PrivateMessaging.kind(of: message.content) {
         case .plain:
             return shown
-        case .handshake:
+        case .handshake, .companionHandshake:
             shown.content = message.author.id == store.me?.id ? "🔒 *You offered to chat privately.*" : "🔒 *Wants to chat privately.*"
         case .encrypted:
             // Its attachments are the encrypted images: shown decrypted below the text in Private, never as files.
@@ -1001,6 +1024,11 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             }
             return
         }
+        if !Settings.allowCompanionChat, privateChat.hasCompanionNotice(in: channelID) {
+            setPrivateBar("\(name) wants to chat privately using the Duhcord Private Companion. Private chat with Companion users is off.",
+                          tone: .warning, action: "Settings…", then: .settings)
+            return
+        }
         if isPrivate {
             switch privateChat.status(for: channelID) {
             case .unavailable:
@@ -1009,18 +1037,32 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 setPrivateBar(nil)
             case .waiting(let newKey):
                 if newKey {
-                    setPrivateBar("\(name) has a new key. Accept it before it receives your messages.",
-                                  tone: .warning, action: "Review…", then: .reviewKey)
+                    if privateChat.newKeysIncludeCompanion(in: channelID) {
+                        setPrivateBar("\(name) uses the Duhcord Private Companion (a Discord client mod). Review their key before chatting privately.",
+                                      tone: .warning, action: "Review…", then: .reviewKey)
+                    } else {
+                        setPrivateBar("\(name) has a new key. Accept it before it receives your messages.",
+                                      tone: .warning, action: "Review…", then: .reviewKey)
+                    }
                 } else {
                     setPrivateBar("Waiting for \(name) to set up private chat. They need Duhcord to read private messages.", tone: .info)
                 }
             case .ready(let verified, let newKey):
                 if newKey {
-                    setPrivateBar("\(name) has a new key: a new Mac, a reinstall, or someone in the middle. Verify it before it "
-                                  + "receives your messages.", tone: .warning, action: "Review…", then: .reviewKey)
+                    if privateChat.newKeysIncludeCompanion(in: channelID) {
+                        setPrivateBar("\(name) uses the Duhcord Private Companion (a Discord client mod). Review their key before chatting privately.",
+                                      tone: .warning, action: "Review…", then: .reviewKey)
+                    } else {
+                        setPrivateBar("\(name) has a new key: a new Mac, a reinstall, or someone in the middle. Verify it before it "
+                                      + "receives your messages.", tone: .warning, action: "Review…", then: .reviewKey)
+                    }
                 } else if privateChat.devices.contains(where: { $0.trust == .pending }) {
                     setPrivateBar("Another Mac on your account wants to read your private messages.", tone: .warning,
                                   action: "Review in Settings…", then: .settings)
+                } else if privateChat.usesCompanion(in: channelID) {
+                    setPrivateBar("Private chat with \(name), who uses the Duhcord Private Companion. "
+                                  + (verified ? "Verified." : "Compare safety numbers…"),
+                                  tone: .secure, action: verified ? "Safety Number" : "Verify", then: .verify)
                 } else if !verified {
                     setPrivateBar("Private chat with \(name). Compare safety numbers to make sure no one is in the middle.",
                                   tone: .secure, action: "Verify…", then: .verify)
@@ -1068,16 +1110,30 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         case .verify:
             guard let number = privateChat.safetyNumber(for: channelID), let window = view.window else { return }
             let name = privateChat.peer(in: channelID)?.displayName ?? "them"
+            let hasCompanion = privateChat.usesCompanion(in: channelID)
+                || privateChat.hasDuhcordAndCompanionKeys(in: channelID)
             let alert = NSAlert()
             alert.messageText = "Safety number with \(name)"
             alert.informativeText = number + "\n\nCompare this with \(name)'s, in person or in a voice call (Duhcord's calls are end-to-end "
-                + "encrypted). It covers every Mac on both sides: if the numbers match, only your Macs and theirs can read your "
-                + "private messages. If either of you adds or removes a Mac, compare again."
+                + "encrypted). It covers every \(hasCompanion ? "device" : "Mac") on both sides: if the numbers match, only your Macs and their "
+                + (hasCompanion ? "devices" : "Macs") + " can read your "
+                + "private messages. If either of you adds or removes a \(hasCompanion ? "device" : "Mac"), compare again."
             alert.addButton(withTitle: "Mark as Verified")
             alert.addButton(withTitle: "Cancel")
+            let canChooseDuhcordOnly = privateChat.hasDuhcordAndCompanionKeys(in: channelID)
+            if canChooseDuhcordOnly {
+                alert.addButton(withTitle: privateChat.isDuhcordOnly(in: channelID)
+                                ? "Include Their Companion" : "Only Their Duhcord Macs")
+            }
             alert.beginSheetModal(for: window) { [weak self] response in
-                guard response == .alertFirstButtonReturn else { return }
-                if !privateChat.markVerified(in: channelID, number: number) { self?.keysChangedWhileComparing() }
+                switch response {
+                case .alertFirstButtonReturn:
+                    if !privateChat.markVerified(in: channelID, number: number) { self?.keysChangedWhileComparing() }
+                case .alertThirdButtonReturn where canChooseDuhcordOnly:
+                    privateChat.setDuhcordOnly(!privateChat.isDuhcordOnly(in: channelID), in: channelID)
+                default:
+                    break
+                }
             }
         }
     }
@@ -1095,12 +1151,15 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         let keys = privateChat.newKeys(in: channelID)
         guard !keys.isEmpty, let number = privateChat.safetyNumber(for: channelID, accepting: keys) else { return }
         let name = privateChat.peer(in: channelID)?.displayName ?? "them"
+        let companion = privateChat.newKeysIncludeCompanion(in: channelID)
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "\(name) has a new key"
-        alert.informativeText = "It could be a new Mac of theirs, a reinstall, or someone in the middle. Until you accept it, "
-            + "your private messages go only to the keys you already trust.\n\nWith it, your safety number is:\n\(number)\n\n"
-            + "Compare it with \(name)'s, in person or in a voice call. If it matches, the new key is theirs."
+        alert.messageText = companion ? "\(name)'s key is from the Duhcord Private Companion" : "\(name) has a new key"
+        alert.informativeText = companion
+            ? "The Companion is a separate app used with a Discord client mod. It doesn't have Duhcord's protections: on Windows and Linux, other apps on their computer, including Discord's own app, could read its key or your messages.\n\nWith it, your safety number is:\n\(number)\n\nCompare it with \(name)'s, in person or in a voice call. If it matches, the key is theirs."
+            : "It could be a new Mac of theirs, a reinstall, or someone in the middle. Until you accept it, "
+                + "your private messages go only to the keys you already trust.\n\nWith it, your safety number is:\n\(number)\n\n"
+                + "Compare it with \(name)'s, in person or in a voice call. If it matches, the new key is theirs."
         alert.addButton(withTitle: "Numbers Match")
         alert.addButton(withTitle: "Accept Without Comparing…")
         alert.addButton(withTitle: "Reject Key…")
@@ -1112,7 +1171,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             case .alertSecondButtonReturn:
                 self?.confirm("Accept \(name)'s new key without comparing?",
                               detail: "Your private messages will go to it from now on. If it isn't really theirs, whoever "
-                                + "holds it can read them. You can compare safety numbers later with Verify.",
+                                + "holds it can read them. You can compare safety numbers later with Verify."
+                                + (companion ? " It's a Companion key, without Duhcord's protections." : ""),
                               button: "Accept Key", destructive: false) {
                     privateChat.acceptNewKeys(keys, in: channelID, comparedNumber: nil)
                 }

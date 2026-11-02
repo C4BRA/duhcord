@@ -413,7 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, DiscordSessionDelegate
         let text: String
         switch PrivateMessaging.kind(of: message.content) {
         case .plain: text = Markdown.plainText(message.content, resolver: session.store.resolver(for: message))
-        case .handshake: text = "🔒 Wants to chat privately"
+        case .handshake, .companionHandshake: text = "🔒 Wants to chat privately"
         case .encrypted: text = "🔒 Private message"
         }
         content.body = text.isEmpty ? (message.attachments.isEmpty ? "Sent a message" : "Sent an attachment") : text
