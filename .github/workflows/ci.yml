@@ -46,9 +46,9 @@ jobs:
       - name: Test
         run: swift test
       - name: Write Swift interop vectors
-        env:
-          DUHCORD_WRITE_VECTORS: ${{ github.workspace }}/build/swift-vectors.json
-        run: swift test --filter CompanionInteropTests/testWriteVectors
+        run: |
+          mkdir -p build
+          DUHCORD_WRITE_VECTORS="$PWD/build/swift-vectors.json" swift test --filter CompanionInteropTests/testWriteVectors
       - name: Print Swift interop vectors
         run: |
           echo BEGIN-SWIFT-VECTORS
