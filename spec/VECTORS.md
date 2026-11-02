@@ -32,7 +32,7 @@ the other side's file. CI on macOS runs both directions; nothing ships unless bo
   "fileBlobs": [ { "file": "<45-byte hex>", "sealed": "<hex>", "plain": "<hex>" } ],
   "handshakes": [ { "key": "alice", "wantsReply": true, "content": "<content>" } ],
   "denseText": [ { "bytes": "<hex>", "text": "<string>" } ],
-  "padme": [ [0, 1], [1, 1], [2, 2], [9, 10], [1000, 1024], [70000, 70656] ],
+  "padme": [ [0, 1], [1, 1], [2, 2], [9, 10], [1000, 1024], [70000, 71680] ],
   "safetyNumbers": [ { "a": ["alice"], "b": ["bob"], "number": "<60 digits>" },
                       { "a": ["alice", "carol"], "b": ["bob"], "number": "…" } ],
   "keyCodes": [ { "key": "alice", "code": "<30 digits>" } ]
@@ -50,3 +50,14 @@ The `padme` pairs above are expectations both sides must reproduce, not inputs t
 - `fileBlobs`: our `openFile(sealed, file)` returns `plain`.
 - `handshakes`, `denseText`, `padme`, `safetyNumbers`, `keyCodes`: our output equals theirs exactly, and our decoder
   reads their handshake contents back to the same key/flag.
+
+## Companion extensions (version 1, additive)
+- `handshakes` entries carry `"class": 0|1`, `"host": <u8>`, `"features": <u16>` (0x22 entries: class 0, host 0,
+  features 0x030F). Required entries: alice 0x22 wantsReply true; bob 0x22 wantsReply false; carol 0x23 wantsReply
+  true host 4 features 0x0003; dave 0x23 wantsReply false host 255 features 0x0003 (unknown host must still parse).
+- `safetyNumbers` entries may carry `"aCompanion"` / `"bCompanion"`: names (subset of that side) whose keys are class 1.
+  Absent = none (v2). Required extra entries: a=[alice], b=[carol], bCompanion=[carol] (v3); a=[alice, bob],
+  b=[carol, dave], bCompanion=[dave] (v3, mixed); a=[alice], b=[alice], aCompanion=[alice] (duplicate key across
+  sides with mixed class).
+- CI handoff: the Swift writer (`DUHCORD_WRITE_VECTORS=<path> swift test --filter CompanionInteropTests`) output is
+  committed here as `interop/swift-vectors.json`; `cargo test -p duhcord-interop` checks it alongside the self-check.

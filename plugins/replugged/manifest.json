@@ -1,0 +1,18 @@
+{
+  "id": "dev.c4bra.DuhcordPrivate",
+  "name": "Duhcord Private",
+  "description": "Chat in Duhcord's Private mode. Your key and decrypted messages stay in the Duhcord Companion app, never in Discord.",
+  "author": {
+    "name": "C4BRA",
+    "github": "C4BRA"
+  },
+  "version": "0.0.0",
+  "updater": {
+    "type": "github",
+    "id": "C4BRA/duhcord-private-plugin"
+  },
+  "license": "MIT",
+  "type": "replugged-plugin",
+  "renderer": "renderer.js",
+  "source": "https://github.com/C4BRA/duhcord-private-plugin"
+}
