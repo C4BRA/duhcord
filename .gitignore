@@ -1,3 +1,7 @@
 /target/
 /node_modules/
 /dist/
+/crates/app/gen/
+/crates/app/resources/plugins/*.js
+/crates/app/resources/plugins/*.asar
+/plugins/dist/

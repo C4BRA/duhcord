@@ -12,7 +12,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
-use directories::ProjectDirs;
+use directories::BaseDirs;
 use duhcord_companion_engine::{AccountKeys, Directory};
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
@@ -75,8 +75,11 @@ impl Store {
     }
 
     pub fn default_config_dir() -> Result<PathBuf, StoreError> {
-        ProjectDirs::from("", "", "DuhcordCompanion")
-            .map(|dirs| dirs.config_dir().to_path_buf())
+        // `spec/BRIDGE.md`: %APPDATA%\DuhcordCompanion, ~/Library/Application Support/DuhcordCompanion,
+        // $XDG_CONFIG_HOME/DuhcordCompanion or ~/.config/DuhcordCompanion. (`ProjectDirs` would
+        // lowercase the name on Linux and add `\config` on Windows, which plugins can't find.)
+        BaseDirs::new()
+            .map(|dirs| dirs.config_dir().join("DuhcordCompanion"))
             .ok_or_else(|| StoreError::Io(std::io::Error::other("no config directory available")))
     }
 
