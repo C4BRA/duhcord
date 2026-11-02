@@ -283,8 +283,17 @@ impl Bridge {
         config_dir: impl AsRef<Path>,
         config: BridgeConfig,
     ) -> Result<(BridgeHandle, mpsc::UnboundedReceiver<BridgeEvent>), BridgeError> {
+        let store = Arc::new(Store::open(config_dir.as_ref())?);
+        Self::start_with_store(config_dir, store, config).await
+    }
+
+    /// Starts the bridge with a store shared with the rest of the companion.
+    pub async fn start_with_store(
+        config_dir: impl AsRef<Path>,
+        store: Arc<Store>,
+        config: BridgeConfig,
+    ) -> Result<(BridgeHandle, mpsc::UnboundedReceiver<BridgeEvent>), BridgeError> {
         let config_dir = config_dir.as_ref();
-        let store = Arc::new(Store::open(config_dir)?);
         let (listener, local_addr) = bind_listener().await?;
         let config_file = json!({"port": local_addr.port(), "version": 1});
         std::fs::write(

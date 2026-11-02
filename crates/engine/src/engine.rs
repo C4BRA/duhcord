@@ -270,6 +270,7 @@ pub struct Engine {
     views: HashMap<ChannelId, Vec<MessageView>>,
     requests: HashSet<UserId>,
     handshakes: HashMap<ChannelId, HandshakeState>,
+    host: protocol::Host,
 }
 
 impl Engine {
@@ -284,7 +285,47 @@ impl Engine {
             views: HashMap::new(),
             requests: HashSet::new(),
             handshakes: HashMap::new(),
+            host: protocol::Host::Unknown,
         }
+    }
+
+    pub fn user_id(&self) -> UserId {
+        self.account.user_id
+    }
+
+    pub fn public_key(&self) -> PublicKey {
+        self.account.public_key()
+    }
+
+    pub fn account(&self) -> &AccountKeys {
+        &self.account
+    }
+
+    /// The mod our handshakes name (shown to the peer). Set from the plugin's `hello`.
+    pub fn set_host(&mut self, host: protocol::Host) {
+        self.host = host;
+    }
+
+    pub fn dm(&self, channel: ChannelId) -> Option<&DmInfo> {
+        self.dms.get(&channel)
+    }
+
+    pub fn dms(&self) -> impl Iterator<Item = &DmInfo> {
+        self.dms.values()
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.locked
+    }
+
+    pub fn own_macs(&self) -> &[OwnMac] {
+        &self.directory.own_macs
+    }
+
+    /// Drops every decrypted view and loaded ciphertext (used when the user locks the session).
+    pub fn forget_messages(&mut self) {
+        self.views.clear();
+        self.messages.clear();
     }
 
     pub fn directory(&self) -> &Directory {
@@ -822,7 +863,7 @@ impl Engine {
             key: self.account.public_key(),
             wants_reply,
             class: ClientClass::Companion,
-            host: protocol::Host::Unknown,
+            host: self.host,
             features: Features::COMPANION_V1,
         });
         if matches!(protocol::kind(&content), Kind::Handshake(_)) {
