@@ -205,6 +205,7 @@ final class PrivateChatController {
             guard notification.userInfo?[settingInfo] as? String == settingKey else { return }
             Task { @MainActor [weak self] in
                 self?.scans = [:]
+                if Settings.allowCompanionChat { self?.companionNotices.removeAll() }
                 self?.keysChanged(in: nil)
             }
         }
@@ -609,11 +610,18 @@ final class PrivateChatController {
                 keys[index].client = .companion
                 changed = true
             }
+            if keys[index].trust == .accepted {
+                keys[index].state = .pending
+                changed = true
+            }
             if keys[index].features != features {
                 keys[index].features = features
                 changed = true
             }
-            if changed { directory.people[userID] = keys }
+            if changed {
+                directory.people[userID] = keys
+                verifiedCache.removeValue(forKey: userID)
+            }
             return changed
         }
         let trust: Trust = client == .companion || !keys.isEmpty ? .pending : .accepted

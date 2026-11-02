@@ -66,7 +66,7 @@ public enum PrivateMessaging {
             return .handshake(key: Data(data[2..<34]), wantsReply: data[1] & 1 != 0)
         case companionHandshakeType where data.count == 38 && data[2] == PeerClient.companion.rawValue
                 && data[1] & 0xFE == 0:
-            let features = UInt16(data[4]) | UInt16(data[5]) << 8
+            let features = UInt16(data[4]) << 8 | UInt16(data[5])
             return .companionHandshake(key: Data(data[6..<38]), wantsReply: data[1] & 1 != 0,
                                        host: data[3], features: PeerFeatures(rawValue: features))
         case messageType:

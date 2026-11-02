@@ -45,6 +45,20 @@ jobs:
         run: swift build
       - name: Test
         run: swift test
+      - name: Write Swift interop vectors
+        env:
+          DUHCORD_WRITE_VECTORS: ${{ github.workspace }}/build/swift-vectors.json
+        run: swift test --filter CompanionInteropTests/testWriteVectors
+      - name: Print Swift interop vectors
+        run: |
+          echo BEGIN-SWIFT-VECTORS
+          cat build/swift-vectors.json
+          echo END-SWIFT-VECTORS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: swift-vectors.json
+          path: build/swift-vectors.json
+          archive: false
       - name: Bundle app
         # Zipped with ditto so the executable bit and signature survive the artifact upload.
         run: |
