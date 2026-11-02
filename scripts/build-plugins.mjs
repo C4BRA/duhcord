@@ -68,7 +68,7 @@ const fixImports = (text) =>
 for (const file of ["index.ts", "native.ts"]) {
   writeFileSync(join(vcDir, file), fixImports(readFileSync(join(root, "plugins/vencord/duhcordPrivate", file), "utf8")));
 }
-for (const file of ["bridge.ts", "bridgeFile.ts", "plugin.ts"]) {
+for (const file of ["bridge.ts", "bridgeFile.ts", "plugin.ts", "webpack.ts"]) {
   writeFileSync(join(vcDir, "shared", file), fixImports(readFileSync(join(root, "plugins/shared", file), "utf8")));
 }
 
