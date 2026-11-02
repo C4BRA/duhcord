@@ -636,7 +636,7 @@ final class PrivateChatController {
     /// The message content for `text`, sealed to the other person's accepted keys, to us and our approved Macs.
     /// Keys still waiting to be accepted or approved get nothing.
     func seal(_ text: String, files: [PrivateFile] = [], in channelID: Snowflake) throws -> String {
-        guard #available(macOS 14, *), let peer = peer(in: channelID), let key = loadIfNeeded(create: true) else {
+        guard #available(macOS 14, *), peer(in: channelID) != nil, let key = loadIfNeeded(create: true) else {
             throw PrivateMessagingError.noRecipients
         }
         let theirs = countedPeerKeys(in: channelID).map(\.key)

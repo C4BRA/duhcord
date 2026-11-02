@@ -105,8 +105,12 @@ final class CompanionInteropTests: XCTestCase {
             let bNames = try XCTUnwrap(vector["b"] as? [String])
             let aCompanion = Set(vector["aCompanion"] as? [String] ?? [])
             let bCompanion = Set(vector["bCompanion"] as? [String] ?? [])
-            let a = try aNames.map { (key: try XCTUnwrap(publicKeys[$0]), client: aCompanion.contains($0) ? .companion : .duhcord) }
-            let b = try bNames.map { (key: try XCTUnwrap(publicKeys[$0]), client: bCompanion.contains($0) ? .companion : .duhcord) }
+            let a: [(key: Data, client: PeerClient)] = try aNames.map {
+                (key: try XCTUnwrap(publicKeys[$0]), client: aCompanion.contains($0) ? .companion : .duhcord)
+            }
+            let b: [(key: Data, client: PeerClient)] = try bNames.map {
+                (key: try XCTUnwrap(publicKeys[$0]), client: bCompanion.contains($0) ? .companion : .duhcord)
+            }
             XCTAssertEqual(PrivateMessaging.safetyNumber(a, b), vector["number"] as? String)
         }
         for vector in try XCTUnwrap(vectors["keyCodes"] as? [[String: String]]) {
