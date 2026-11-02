@@ -964,7 +964,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         if let reply = message.referencedMessage {
             switch PrivateMessaging.kind(of: reply.content) {
             case .plain: break
-            case .handshake, .companionHandshake: shown.referencedMessage?.content = "🔒 Offer to chat privately"
+            case .handshake, .newerHandshake: shown.referencedMessage?.content = "🔒 Offer to chat privately"
             case .encrypted:
                 let text = isPrivate ? privateChat?.plaintext(content: reply.content, id: reply.id, authorID: reply.author.id,
                                                               channelID: message.channelId) : nil
@@ -974,7 +974,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         switch PrivateMessaging.kind(of: message.content) {
         case .plain:
             return shown
-        case .handshake, .companionHandshake:
+        case .handshake, .newerHandshake:
             shown.content = message.author.id == store.me?.id ? "🔒 *You offered to chat privately.*" : "🔒 *Wants to chat privately.*"
         case .encrypted:
             // Its attachments are the encrypted images: shown decrypted below the text in Private, never as files.
