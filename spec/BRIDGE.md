@@ -23,6 +23,11 @@ text typed into its own window.
    `{"t":"paired","token":"<32 random bytes, base64url>"}` then `ready`. Deny → `{"t":"error","code":"denied"}`, close.
    The companion stores only SHA-256(token). Plugins store the token in their settings.
 4. Before `ready`, every other frame → `{"t":"error","code":"unpaired"}`.
+5. Versions: `v` in `hello` is the bridge version (1). If it's lower than the companion accepts, the companion answers
+   `{"t":"error","code":"plugin-outdated"}` and closes; if higher, `{"t":"error","code":"companion-outdated"}` and
+   closes. The plugin shows which side to update and doesn't retry until it's restarted. `plugin` (the plugin's version)
+   never blocks a connection; when it's older than the plugin bundled with the companion, the companion offers to
+   update it (UPDATES.md §4).
 
 ## Plugin → companion
 - `dm`: `{"t":"dm","channelId","peer":{"id","username","globalName","avatarUrl"},"me":{"id","username"}}` — a 1:1

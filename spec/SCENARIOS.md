@@ -99,8 +99,9 @@ Each is one file in `spec/scenarios/`; both CIs fail if any file is missing or f
    `verified`.
 8. **reject**: alice rejects bob's new key: it gets nothing from her, its messages aren't shown, and bob's new device
    sees `hasOurKey: false` (`unconfirmed`).
-9. **own-devices**: alice adds a second device. It's `pending` in her first device's `devices` until approved; then
-   messages to bob are sealed to it, its messages open as alice's own, and both sides' safety numbers change (and match).
+9. **own-devices**: alice (Duhcord) adds a second device, a Companion. It's `pending` in her Mac's `devices` until
+   approved; then messages to bob are sealed to it, its messages open as alice's own, and both sides' safety numbers
+   change (and match, with the device counted as a Companion key).
 10. **exclude-companion**: alice excludes bob's Companion keys: bob becomes `unconfirmed`, alice's safety number drops
     them; turning the exclusion off restores `ready`.
 11. **replay-and-delay**: a replayed copy shows `copy`; a message delivered 11 minutes after it was written shows

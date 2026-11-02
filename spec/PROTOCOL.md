@@ -195,7 +195,7 @@ list lacks our ID clears it (they rejected or excluded us).
 | `off` | not in Private | — |
 | `request` | the other person asked and the user hasn't agreed | — |
 | `waiting` | in Private, no key of theirs counts yet | disabled |
-| `unconfirmed` | a key of theirs counts, but they don't have our key yet (no receipt) | disabled; "Re-send my key" offered |
+| `unconfirmed` | a key of theirs counts, but they don't have our key yet (no receipt) | disabled (§11, decision 2); "Re-send my key" offered |
 | `ready` | a key of theirs counts **and** they have our key | enabled |
 | `outdated` | their newest handshake's `version` is higher than ours | disabled; "update to chat privately" |
 | `locked` | our key store is unavailable | disabled |
@@ -232,7 +232,9 @@ install has its own key.
   be approved.
 - Each device's key is listed with its key code (§8) and client, so the user can compare it with what that device shows
   as its own code.
-- See §11, decision 1, for whether a Companion may be one of a Duhcord user's devices.
+- A device of either client may be approved: a Duhcord user can approve their Companion, and a Companion user their
+  Macs. A Companion device is labelled as such wherever devices are listed, and counted with `client = 1` in the
+  safety number (§11, decision 1).
 
 ## 8. Safety numbers and key codes
 
@@ -268,13 +270,12 @@ and a substituted or relabelled key changes the safety number. It never sees a p
 - Versions: a too-new handshake shows `outdated` instead of being silently ignored.
 - No migration: v2 messages read as plain text, v2 directories are discarded, and keys are regenerated.
 
-## 11. Open decisions
+## 11. Decisions
 
-1. **May a Companion be one of a Duhcord user's own devices?** v2 Duhcord ignored its own Companion handshakes so a
-   Companion could never read what a Mac sends. Proposed for v3: allowed, but only after approval, labelled
-   "Companion", and counted with its client in the safety number — the same rule as for a Mac. The alternative keeps
-   the v2 rule (Duhcord ignores its own Companion handshakes; Companion users can't list Macs as their devices either).
-2. **Should `unconfirmed` block sending?** Proposed: yes. Messages sent before the other side accepted our key can't be
-   opened as trusted by them until they do, which looks broken. The alternative allows sending with a banner.
-3. **Should "Private chat with Duhcord Companion" stay off by default in Duhcord?** Proposed: yes (v2 behaviour). With
-   receipts, a Companion user now sees `unconfirmed` while it's off, instead of a chat that looks ready.
+1. **A Companion may be one of a Duhcord user's own devices** (and Macs may be a Companion user's devices). Only after
+   approval, labelled "Companion", and counted with its client in the safety number, the same rule as for a Mac. (v2
+   Duhcord ignored its own Companion handshakes.)
+2. **`unconfirmed` blocks sending.** Messages sent before the other side accepted our key can't be opened as trusted by
+   them until they do, which looks broken.
+3. **"Private chat with Duhcord Companion" stays off by default in Duhcord.** With receipts, a Companion user sees
+   `unconfirmed` while it's off, instead of a chat that looks ready.
