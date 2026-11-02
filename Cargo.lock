@@ -169,6 +169,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "duhcord-companion-bridge"
+version = "0.1.0"
+dependencies = [
+ "duhcord-companion-engine",
+ "duhcord-companion-store",
+ "duhcord-private-protocol",
+]
+
+[[package]]
+name = "duhcord-companion-engine"
+version = "0.1.0"
+dependencies = [
+ "duhcord-private-protocol",
+]
+
+[[package]]
+name = "duhcord-companion-store"
+version = "0.1.0"
+dependencies = [
+ "duhcord-companion-engine",
+]
+
+[[package]]
 name = "duhcord-interop"
 version = "0.1.0"
 dependencies = [

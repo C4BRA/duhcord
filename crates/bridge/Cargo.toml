@@ -1,0 +1,9 @@
+[package]
+name = "duhcord-companion-bridge"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+duhcord-companion-engine = { path = "../engine" }
+duhcord-companion-store = { path = "../store" }
+duhcord-private-protocol = { path = "../protocol" }
