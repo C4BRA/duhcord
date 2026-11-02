@@ -17,13 +17,15 @@ import {
   type Status,
   type WireMessage,
 } from "./bridge.ts";
+import { byFunctions, type Filter, findModule } from "./webpack.ts";
 
 export type FindByProps = (...props: string[]) => any;
 
 export interface PluginOptions {
   host: Host;
   pluginVersion: string;
-  findByProps: FindByProps;
+  /** The mod's module finder. Optional: the plugin falls back to its own search. */
+  findByProps?: FindByProps;
   loadToken(userId: string): Promise<string | null> | string | null;
   saveToken(userId: string, token: string | null): Promise<void> | void;
   /** Port from `bridge.json`, where the mod can read files. */
@@ -68,20 +70,50 @@ const CSS = `
 #${PILL_ID}[data-tone="ok"] { background: var(--status-positive, #23a55a); }
 `;
 
-function findDiscord(findByProps: FindByProps): Discord {
-  const find = (...props: string[]) => {
-    const module = findByProps(...props);
-    if (!module) throw new Error(`Duhcord Private: Discord module with ${props.join(", ")} not found`);
+export function findDiscord(findByProps: FindByProps | undefined): Discord {
+  const missing: string[] = [];
+  // The mod's own finder first (if its result really has what we need), then a deep search of
+  // webpack's cache, which also looks inside each module's named exports.
+  const find = (label: string, filter: Filter, ...props: string[]) => {
+    let module: any = null;
+    try {
+      module = findByProps?.(...props) ?? null;
+    } catch {
+      module = null;
+    }
+    if (!module || !safeTest(filter, module)) module = findModule(filter);
+    if (!module) missing.push(label);
     return module;
   };
-  return {
-    UserStore: find("getCurrentUser", "getUser"),
-    ChannelStore: find("getChannel", "getDMFromUserId"),
-    SelectedChannelStore: find("getChannelId", "getVoiceChannelId"),
-    MessageStore: find("getMessages", "getMessage"),
-    Dispatcher: find("dispatch", "subscribe", "unsubscribe"),
-    RestAPI: find("getAPIBaseURL", "get", "post"),
-  };
+  const UserStore = find("UserStore", byFunctions("getCurrentUser", "getUser"), "getCurrentUser", "getUser");
+  const ChannelStore = find("ChannelStore", byFunctions("getChannel", "getDMFromUserId"), "getChannel", "getDMFromUserId");
+  const SelectedChannelStore = find(
+    "SelectedChannelStore",
+    byFunctions("getChannelId", "getVoiceChannelId"),
+    "getChannelId",
+    "getVoiceChannelId",
+  );
+  const MessageStore = find("MessageStore", byFunctions("getMessages", "getMessage"), "getMessages", "getMessage");
+  // Every Flux store keeps a reference to the dispatcher, which is the most reliable route to it.
+  const isDispatcher = byFunctions("dispatch", "subscribe", "unsubscribe");
+  const storeDispatcher = [UserStore, ChannelStore, MessageStore]
+    .map((store) => store?._dispatcher)
+    .find((candidate) => safeTest(isDispatcher, candidate));
+  const Dispatcher = storeDispatcher ?? find("Dispatcher", isDispatcher, "dispatch", "subscribe", "unsubscribe");
+  const RestAPI = find("RestAPI", byFunctions("get", "post", "patch", "del"), "get", "post", "patch", "del");
+  if (missing.length) {
+    throw new Error(`Duhcord Private: couldn't find Discord's ${missing.join(", ")}. Discord may have changed; please report this.`);
+  }
+  return { UserStore, ChannelStore, SelectedChannelStore, MessageStore, Dispatcher, RestAPI };
+}
+
+function safeTest(filter: Filter, candidate: unknown): boolean {
+  if (candidate === null || (typeof candidate !== "object" && typeof candidate !== "function")) return false;
+  try {
+    return filter(candidate);
+  } catch {
+    return false;
+  }
 }
 
 function toIso(value: unknown): string | null {

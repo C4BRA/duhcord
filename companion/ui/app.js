@@ -442,7 +442,8 @@ async function renderChat() {
     }
   });
 
-  root.replaceChildren(
+  // replaceChildren() would print a missing banner as the text "null", so drop empty parts.
+  const parts = [
     h(
       "header",
       {},
@@ -454,7 +455,8 @@ async function renderChat() {
     list,
     error,
     h("div", { class: "composer" }, input, h("button", { class: "primary", disabled: !canSend, onClick: send }, "Send")),
-  );
+  ];
+  root.replaceChildren(...parts.filter(Boolean));
   if (stickToBottom) list.scrollTop = list.scrollHeight;
   else if (oldList) list.scrollTop = oldList.scrollTop;
   if (canSend && document.hasFocus()) input.focus();
