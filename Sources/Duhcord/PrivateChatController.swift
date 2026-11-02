@@ -608,10 +608,8 @@ final class PrivateChatController {
             var changed = false
             if keys[index].client != .companion {
                 keys[index].client = .companion
-                changed = true
-            }
-            if keys[index].trust == .accepted {
-                keys[index].state = .pending
+                // Accepted as a Duhcord key: a Companion key needs its own approval.
+                if keys[index].trust == .accepted { keys[index].state = .pending }
                 changed = true
             }
             if keys[index].features != features {
