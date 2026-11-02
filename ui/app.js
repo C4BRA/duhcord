@@ -206,7 +206,7 @@ async function renderMain() {
       h("div", { class: "row" }, h("span", { class: "grow" }, h("strong", {}, "Replugged")), h("button", { onClick: () => install("replugged") }, "Install plugin")),
       h("p", { class: "muted" }, "Then: Settings → Replugged → Plugins → Duhcord Private → on."),
       h("div", { class: "row" }, h("span", { class: "grow" }, h("strong", {}, "Vencord / Vesktop"))),
-      h("p", { class: "muted" }, "Vencord compiles plugins in. Copy plugins/vencord/duhcordPrivate from the release into Vencord's src/userplugins, then run pnpm build && pnpm inject (Vesktop: point it at that build)."),
+      h("p", { class: "muted" }, "Vencord compiles plugins in. Unzip the Vencord zip from the release into Vencord's src/userplugins (create it if missing) so you get src/userplugins/duhcordPrivate, then run pnpm build && pnpm inject (Vesktop: point it at that build)."),
       installed,
       installError,
     ),
