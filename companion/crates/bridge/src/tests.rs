@@ -236,17 +236,31 @@ async fn oversized_text_frame_closes_the_connection() {
     let _guard = TEST_LOCK.lock().await;
     let (handle, _events, path) = start("oversized").await;
     let mut socket = connect(&handle, None, None).await.unwrap();
-    socket
+    // The bridge may close the connection while the oversized frame is still being written, so the send itself can
+    // fail with a broken pipe or reset. That's the behaviour under test, not a failure.
+    let sent = socket
         .send(Message::Text("x".repeat(MAX_FRAME_SIZE + 1).into()))
-        .await
-        .unwrap();
-    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
-        .await
-        .unwrap();
-    assert!(matches!(
-        frame,
-        Some(Ok(Message::Close(_))) | Some(Err(_)) | None
-    ));
+        .await;
+    if sent.is_ok() {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+            .await
+            .unwrap();
+        assert!(matches!(
+            frame,
+            Some(Ok(Message::Close(_))) | Some(Err(_)) | None
+        ));
+    }
+    // Either way, the bridge must not still be accepting frames on this connection.
+    let after = socket.send(Message::Text("{}".into())).await;
+    let next = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next()).await;
+    assert!(
+        after.is_err()
+            || matches!(
+                next,
+                Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_))))
+            ),
+        "connection stayed open after an oversized frame"
+    );
     handle.shutdown().await;
     std::fs::remove_dir_all(path).unwrap();
 }
