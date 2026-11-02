@@ -20,8 +20,9 @@ async fn main() {
         key: protocol::PrivateKey::generate().public_key(),
         wants_reply: true,
         class: ClientClass::Companion,
-        host: Host::BetterDiscord,
+        host: Host::BETTERDISCORD,
         features: Features::COMPANION_V1,
+        accepted_key_ids: Vec::new(),
     });
     while let Some(event) = events.recv().await {
         let line = match event {

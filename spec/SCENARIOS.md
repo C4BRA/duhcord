@@ -59,7 +59,7 @@ fails on one side and passes on the other is a bug in that side, or in this spec
 | `drop` | `device` | Discord silently drops everything in that device's outbox. |
 | `relabel` | `device`, `client` (0 or 1) | Discord rewrites the `client` byte of the handshakes in that device's outbox. |
 | `replay` | `index` (log position, negative from the end) | Discord posts a copy of that log message again. |
-| `inject` | `person`, `handshake` (fields as in VECTORS.md, plus `version`) | Discord posts a handshake as that person, e.g. one with `version: 4`. |
+| `inject` | `person`, `handshake` (`key` = any device name, `wantsReply`, `client`, `host`, `features`, `acceptedKeys` = device names, `version`) | Discord posts a handshake as that person, e.g. one with `version: 4`. The key name needn't be a declared device. |
 | `delay` | `seconds` | The next delivered messages get snowflake times that much later. |
 
 ### Expectations (`expect`)
@@ -73,10 +73,10 @@ Per device, any of:
 | `keys` | map of device name → `accepted` / `pending` / `rejected` / `excluded` / `unknown` for the **other** person's keys. |
 | `devices` | map of device name → `accepted` / `pending` / `rejected` / `unknown` for **our own** other devices. |
 | `hasOurKey` | boolean: the receipt (§6) says the other person has accepted this device's key. |
-| `outbox` | list, in order, of what the device has queued: `"handshake"` (with `wantsReply`, `acceptedKeys` as device names) or `"message"`. |
+| `outbox` | list, in order, of what the device has queued and Discord hasn't delivered yet: `"message"`, `"handshake"`, or `{ "handshake": { "wantsReply": …, "acceptedKeys": [device names] } }` (fields present are checked; `acceptedKeys` in any order). |
 | `messages` | the private messages this device shows, oldest first: `{ "from": device, "text": …, "warnings": [codes] }`. Warning codes: `untrusted-sender`, `unapproved-device`, `copy`, `written-earlier`. |
 | `sendRefused` | the last `send` was refused, with a reason code: `not-ready`, `too-many-recipients`. |
-| `safetyNumber` | `"same-as": "<other device>"` or `"differs-from": "<other device>"`. |
+| `safetyNumber` | `{ "same-as": "<other device>" }`, `{ "differs-from": "<other device>" }`, or `{ "none": "" }` (no key of theirs counts). |
 
 ## Required scenarios
 
@@ -93,12 +93,14 @@ Each is one file in `spec/scenarios/`; both CIs fail if any file is missing or f
 5. **relabel-first-handshake**: Discord rewrites bob's Companion handshake as Duhcord. Alice trusts it on first use as a
    Duhcord key, so the safety numbers **differ** between alice and bob — the attack is visible when they compare.
 6. **relabel-known-key**: a known Duhcord key later appears as Companion: it becomes Companion and `pending`, alice's
-   `verified` is cleared, and she stops sending to it until she accepts it again.
-7. **new-key**: bob reinstalls (new device, same person). His new key is `pending` on alice; his messages from it show
-   `untrusted-sender`; accepting with a wrong number changes nothing; accepting with the shown number makes alice
-   `verified`.
-8. **reject**: alice rejects bob's new key: it gets nothing from her, its messages aren't shown, and bob's new device
-   sees `hasOurKey: false` (`unconfirmed`).
+   `verified` is cleared, she stops sending to it, and a message bob sent before hearing about it shows
+   `untrusted-sender`. A later Duhcord claim for the same key changes nothing. Re-accepting makes her ready; the
+   safety numbers stay different (the relabelling stays visible).
+7. **new-key**: bob adds an install (a new key, same person). It's `pending` on alice and that install is
+   `unconfirmed`; accepting with a wrong number changes nothing; accepting with the shown number makes alice
+   `verified`; once bob's two installs approve each other, all three safety numbers match.
+8. **reject**: alice rejects bob's new key: her next handshake no longer lists it, so that install sees
+   `hasOurKey: false` (`unconfirmed`), and her messages go only to bob's accepted key.
 9. **own-devices**: alice (Duhcord) adds a second device, a Companion. It's `pending` in her Mac's `devices` until
    approved; then messages to bob are sealed to it, its messages open as alice's own, and both sides' safety numbers
    change (and match, with the device counted as a Companion key).
@@ -114,7 +116,8 @@ Each is one file in `spec/scenarios/`; both CIs fail if any file is missing or f
 
 ## Runners
 
-- **Companion** (Rust): a test in `companion/crates/engine` drives one `Engine` per device.
-- **Duhcord** (Swift): an XCTest drives the trust logic per device. That logic has to live in `DuhcordCore`, apart from
-  AppKit and the network session, so that the runner can drive the same code the app runs.
+- **Companion** (Rust): `companion/crates/engine/tests/scenarios.rs` drives one `Engine` per device, configured as a
+  Duhcord or a Companion device as the scenario says. `SCENARIO=<name> cargo test -p duhcord-companion-engine` runs one.
+- **Duhcord** (Swift): `Tests/DuhcordCoreTests/PrivateScenarioTests.swift` drives `PrivateTrustEngine` (in
+  `DuhcordCore`, the code `PrivateChatController` runs) per device, configured the same way.
 - Both runners read the files from `spec/scenarios/` directly; nothing is copied.

@@ -308,3 +308,22 @@ async fn ten_bad_frames_close_the_connection() {
     handle.shutdown().await;
     std::fs::remove_dir_all(path).unwrap();
 }
+
+#[tokio::test]
+async fn mismatched_bridge_versions_say_which_side_to_update() {
+    let _guard = TEST_LOCK.lock().await;
+    let (handle, _events, path) = start("versions").await;
+    for (version, code) in [(0, "plugin-outdated"), (2, "companion-outdated")] {
+        let mut socket = connect(&handle, None, None).await.unwrap();
+        let mut frame = hello(None);
+        frame["v"] = json!(version);
+        send_json(&mut socket, frame).await;
+        assert_eq!(next_json(&mut socket).await.unwrap()["code"], code);
+        assert!(
+            next_json(&mut socket).await.is_none(),
+            "connection should close"
+        );
+    }
+    handle.shutdown().await;
+    std::fs::remove_dir_all(path).unwrap();
+}

@@ -1,12 +1,14 @@
 // Bridge client shared by the Vencord, Replugged and BetterDiscord plugins (spec/BRIDGE.md).
 //
-// The plugin is a ciphertext pipe: it reports private messages (last line starts with `dhc2:`)
+// The plugin is a ciphertext pipe: it reports private messages (last line starts with `dhc3:`)
 // to the companion and posts what the companion asks it to post. It has no key, does no crypto
 // and never sees plaintext, so nothing here is secret (the pairing token only keeps other local
 // apps off the bridge).
 
-export type Host = "vencord" | "vesktop" | "replugged" | "betterdiscord";
-export type State = "off" | "request" | "waiting" | "ready" | "locked";
+export type Host = "vencord" | "vesktop" | "replugged" | "betterdiscord" | "dorion";
+export type State = "off" | "request" | "waiting" | "unconfirmed" | "ready" | "outdated" | "locked";
+/** Which side to update when the bridge versions differ (spec/BRIDGE.md "Versions"). */
+export type Outdated = "plugin" | "companion";
 
 export interface WireAttachment {
   id: string;
@@ -82,12 +84,14 @@ export interface Adapter {
   onPairing?(code: string | null): void;
   onStatus?(status: Status): void;
   onConnection?(connected: boolean): void;
+  /** The plugin and companion speak different bridge versions; nothing works until that side is updated. */
+  onOutdated?(side: Outdated): void;
   log?(...args: unknown[]): void;
 }
 
 export const PROTOCOL_VERSION = 1;
 export const DEFAULT_PORTS = [47823, 47824, 47825, 47826, 47827];
-const PREFIX = "dhc2:";
+const PREFIX = "dhc3:";
 const SNOWFLAKE = /^\d{1,20}$/;
 const OPEN = 1;
 
@@ -303,6 +307,10 @@ export class DuhcordBridge {
           if (this.userId) await this.adapter.saveToken(this.userId, null);
           // Don't nag: wait for the next start() (Discord restart or plugin toggle).
           this.stop();
+        } else if (frame.code === "plugin-outdated" || frame.code === "companion-outdated") {
+          // Retrying can't help until one side is updated: stop until the plugin is restarted.
+          this.stop();
+          this.adapter.onOutdated?.(frame.code === "plugin-outdated" ? "plugin" : "companion");
         }
         return;
       case "status":
@@ -321,7 +329,7 @@ export class DuhcordBridge {
   }
 
   private onStatus(frame: Record<string, unknown>): void {
-    const states: State[] = ["off", "request", "waiting", "ready", "locked"];
+    const states: State[] = ["off", "request", "waiting", "unconfirmed", "ready", "outdated", "locked"];
     if (!isSnowflake(frame.channelId) || !states.includes(frame.state as State)) return;
     const status: Status = {
       channelId: frame.channelId,

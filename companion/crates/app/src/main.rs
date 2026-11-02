@@ -110,6 +110,31 @@ fn set_private(
 }
 
 #[tauri::command]
+fn resend_key(
+    state: State<'_, AppState>,
+    user_id: String,
+    channel_id: String,
+) -> CommandResult<()> {
+    state
+        .service
+        .resend_key(id(&user_id)?, id(&channel_id)?)
+        .map_err(err)
+}
+
+#[tauri::command]
+fn set_companion_excluded(
+    state: State<'_, AppState>,
+    user_id: String,
+    channel_id: String,
+    excluded: bool,
+) -> CommandResult<()> {
+    state
+        .service
+        .set_companion_excluded(id(&user_id)?, id(&channel_id)?, excluded)
+        .map_err(err)
+}
+
+#[tauri::command]
 fn safety_number(
     state: State<'_, AppState>,
     user_id: String,
@@ -452,6 +477,8 @@ fn main() {
             chat,
             send_text,
             set_private,
+            resend_key,
+            set_companion_excluded,
             safety_number,
             accept_keys,
             reject_keys,

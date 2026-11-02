@@ -1,0 +1,46 @@
+{
+  "name": "too-many-recipients",
+  "description": "Six accepted keys of bob plus three approved devices of alice would need nine recipients: sending is refused and nothing is queued, never sent with one left out.",
+  "devices": {
+    "alice-mac": { "person": "alice", "client": "duhcord" },
+    "alice-2": { "person": "alice", "client": "duhcord" },
+    "alice-3": { "person": "alice", "client": "duhcord" },
+    "alice-4": { "person": "alice", "client": "companion" },
+    "bob-1": { "person": "bob", "client": "duhcord" },
+    "bob-2": { "person": "bob", "client": "duhcord" },
+    "bob-3": { "person": "bob", "client": "duhcord" },
+    "bob-4": { "person": "bob", "client": "duhcord" },
+    "bob-5": { "person": "bob", "client": "duhcord" },
+    "bob-6": { "person": "bob", "client": "duhcord" }
+  },
+  "steps": [
+    { "do": "setPrivate", "device": "alice-mac", "on": true },
+    { "do": "setPrivate", "device": "alice-2", "on": true },
+    { "do": "setPrivate", "device": "alice-3", "on": true },
+    { "do": "setPrivate", "device": "alice-4", "on": true },
+    { "do": "deliver" },
+    { "do": "setDevice", "device": "alice-mac", "key": "alice-2", "trust": "accepted" },
+    { "do": "setDevice", "device": "alice-mac", "key": "alice-3", "trust": "accepted" },
+    { "do": "setDevice", "device": "alice-mac", "key": "alice-4", "trust": "accepted" },
+    { "expect": { "alice-mac": { "devices": { "alice-2": "accepted", "alice-3": "accepted", "alice-4": "accepted" } } } },
+    { "do": "setPrivate", "device": "bob-1", "on": true },
+    { "do": "setPrivate", "device": "bob-2", "on": true },
+    { "do": "setPrivate", "device": "bob-3", "on": true },
+    { "do": "setPrivate", "device": "bob-4", "on": true },
+    { "do": "setPrivate", "device": "bob-5", "on": true },
+    { "do": "deliver" },
+    { "do": "accept", "device": "alice-mac", "keys": ["bob-2", "bob-3", "bob-4", "bob-5"] },
+    { "do": "setPrivate", "device": "bob-6", "on": true },
+    { "do": "deliver" },
+    { "do": "accept", "device": "alice-mac", "keys": ["bob-6"] },
+    { "expect": { "alice-mac": { "state": "ready", "keys": {
+        "bob-1": "accepted", "bob-2": "accepted", "bob-3": "accepted", "bob-4": "accepted", "bob-5": "accepted", "bob-6": "accepted"
+    } } } },
+    { "do": "deliver" },
+    { "do": "deliver" },
+    { "do": "deliver" },
+    { "expect": { "alice-mac": { "outbox": [] } } },
+    { "do": "send", "device": "alice-mac", "text": "nine recipients" },
+    { "expect": { "alice-mac": { "sendRefused": "too-many-recipients", "outbox": [] } } }
+  ]
+}

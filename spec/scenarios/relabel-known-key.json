@@ -1,0 +1,37 @@
+{
+  "name": "relabel-known-key",
+  "description": "A key alice accepted as a Duhcord key later appears in a Companion handshake. It becomes a Companion key waiting for approval, her verification is cleared, she stops sending to it, and a message sent from it meanwhile is marked. Re-accepting it makes her ready again; the relabelling stays visible in the safety numbers.",
+  "devices": {
+    "alice-mac": { "person": "alice", "client": "duhcord" },
+    "bob-mac": { "person": "bob", "client": "duhcord" }
+  },
+  "steps": [
+    { "do": "setPrivate", "device": "alice-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "setPrivate", "device": "bob-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "deliver" },
+    { "do": "markVerified", "device": "alice-mac" },
+    { "expect": { "alice-mac": { "state": "ready", "verified": true }, "bob-mac": { "state": "ready" } } },
+    { "do": "inject", "person": "bob", "handshake": { "key": "bob-mac", "wantsReply": false, "client": 1, "host": 4, "features": 3, "acceptedKeys": ["alice-mac"] } },
+    { "expect": {
+        "alice-mac": { "state": "waiting", "verified": false, "newKey": true, "canSend": false, "keys": { "bob-mac": "pending" },
+                       "outbox": [ { "handshake": { "wantsReply": false, "acceptedKeys": [] } } ] }
+    } },
+    { "do": "send", "device": "bob-mac", "text": "sent before bob heard" },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "messages": [ { "from": "bob-mac", "text": "sent before bob heard", "warnings": ["untrusted-sender"] } ] },
+        "bob-mac": { "state": "unconfirmed", "hasOurKey": false }
+    } },
+    { "do": "inject", "person": "bob", "handshake": { "key": "bob-mac", "wantsReply": false, "client": 0, "acceptedKeys": ["alice-mac"] } },
+    { "expect": { "alice-mac": { "keys": { "bob-mac": "pending" }, "outbox": [] } } },
+    { "do": "accept", "device": "alice-mac", "keys": ["bob-mac"], "compared": "shown" },
+    { "expect": { "alice-mac": { "state": "ready", "verified": true, "keys": { "bob-mac": "accepted" } } } },
+    { "do": "deliver" },
+    { "expect": {
+        "bob-mac": { "state": "ready" },
+        "alice-mac": { "safetyNumber": { "differs-from": "bob-mac" } }
+    } }
+  ]
+}

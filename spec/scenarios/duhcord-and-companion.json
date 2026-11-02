@@ -1,0 +1,39 @@
+{
+  "name": "duhcord-and-companion",
+  "description": "A Duhcord user and a Companion user. The Companion key waits for approval on Duhcord even though it's the first; the Companion stays unconfirmed until Duhcord accepts, then both are ready with matching safety numbers.",
+  "devices": {
+    "alice-mac": { "person": "alice", "client": "duhcord" },
+    "bob-pc": { "person": "bob", "client": "companion", "host": "betterdiscord" }
+  },
+  "steps": [
+    { "do": "setPrivate", "device": "alice-mac", "on": true },
+    { "do": "deliver" },
+    { "expect": { "bob-pc": { "state": "request", "keys": { "alice-mac": "accepted" } } } },
+    { "do": "setPrivate", "device": "bob-pc", "on": true },
+    { "expect": { "bob-pc": { "state": "unconfirmed", "outbox": [ { "handshake": { "wantsReply": false, "acceptedKeys": ["alice-mac"] } } ] } } },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "state": "waiting", "newKey": true, "canSend": false, "hasOurKey": true, "keys": { "bob-pc": "pending" }, "outbox": [] },
+        "bob-pc": { "state": "unconfirmed", "hasOurKey": false }
+    } },
+    { "do": "send", "device": "alice-mac", "text": "too early" },
+    { "expect": { "alice-mac": { "sendRefused": "not-ready", "outbox": [] } } },
+    { "do": "accept", "device": "alice-mac", "keys": ["bob-pc"], "compared": "shown" },
+    { "expect": {
+        "alice-mac": { "state": "ready", "verified": true, "newKey": false, "keys": { "bob-pc": "accepted" },
+                       "outbox": [ { "handshake": { "wantsReply": false, "acceptedKeys": ["bob-pc"] } } ] }
+    } },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "state": "ready", "safetyNumber": { "same-as": "bob-pc" } },
+        "bob-pc": { "state": "ready", "hasOurKey": true, "verified": false, "canSend": true }
+    } },
+    { "do": "send", "device": "alice-mac", "text": "hello companion" },
+    { "do": "send", "device": "bob-pc", "text": "hello duhcord" },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "messages": [ { "from": "alice-mac", "text": "hello companion", "warnings": [] }, { "from": "bob-pc", "text": "hello duhcord", "warnings": [] } ] },
+        "bob-pc": { "messages": [ { "from": "alice-mac", "text": "hello companion", "warnings": [] }, { "from": "bob-pc", "text": "hello duhcord", "warnings": [] } ] }
+    } }
+  ]
+}

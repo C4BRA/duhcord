@@ -105,8 +105,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Tests
         run: cargo test --workspace --locked
-      - name: Interop (committed Swift vectors)
-        run: cargo run -q --locked -p duhcord-interop -- check interop/swift-vectors.json
+      # Swift ⇄ Rust compatibility is checked with fresh vectors from both sides in interop.yml.
 
   plugins:
     name: Plugins

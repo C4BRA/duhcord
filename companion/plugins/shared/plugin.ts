@@ -145,6 +145,7 @@ export class DuhcordPrivatePlugin {
   private pill: HTMLButtonElement | null = null;
   private pairingCode: string | null = null;
   private connected = false;
+  private outdated: "plugin" | "companion" | null = null;
   private readonly subscriptions: Array<[string, (event: any) => void]> = [];
   private readonly reported = new Set<string>();
 
@@ -155,6 +156,7 @@ export class DuhcordPrivatePlugin {
   }
 
   start(): void {
+    this.outdated = null;
     this.discord = findDiscord(this.options.findByProps);
     const adapter: Adapter = {
       host: this.options.host,
@@ -185,6 +187,10 @@ export class DuhcordPrivatePlugin {
         this.renderPill();
       },
       onStatus: () => this.renderPill(),
+      onOutdated: (side) => {
+        this.outdated = side;
+        this.renderPill();
+      },
       onConnection: (connected) => {
         this.connected = connected;
         this.renderPill();
@@ -383,7 +389,13 @@ export class DuhcordPrivatePlugin {
     let text = "";
     let tone = "";
     let title = "Duhcord Private";
-    if (this.pairingCode) {
+    if (this.outdated) {
+      text = this.outdated === "plugin" ? "🔒 Update the Duhcord Private plugin" : "🔒 Update Duhcord Companion";
+      tone = "warn";
+      title = this.outdated === "plugin"
+        ? "This plugin is older than your Duhcord Companion. Open the companion to update it."
+        : "Your Duhcord Companion is older than this plugin. Update it from its window or tray menu.";
+    } else if (this.pairingCode) {
       text = `🔒 Code ${this.pairingCode} · allow it in Duhcord Companion`;
       tone = "warn";
     } else if (!isDm) {
@@ -411,6 +423,14 @@ export class DuhcordPrivatePlugin {
         case "locked":
           text = "🔒 Companion locked";
           tone = "muted";
+          break;
+        case "unconfirmed":
+          text = "🔒 Private · waiting for them to accept your key";
+          tone = "muted";
+          break;
+        case "outdated":
+          text = "🔒 They use a newer version · update Duhcord Companion";
+          tone = "warn";
           break;
         default:
           text = "🔒 Private";

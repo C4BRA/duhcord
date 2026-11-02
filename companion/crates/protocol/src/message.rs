@@ -22,7 +22,7 @@ use crate::{
     MAX_FILES, MAX_PLAINTEXT, MAX_RECIPIENTS, NOTICE, PREFIX,
 };
 
-const MESSAGE_TYPE: u8 = 0x21;
+use crate::handshake::MESSAGE_TYPE;
 const FIXED_HEADER: usize = 27;
 const ENTRY_SIZE: usize = 68;
 const EXPORT_CONTEXT: &[u8] = b"duhcord-message-key";
@@ -49,6 +49,8 @@ pub struct Opened {
     pub sent_at: u32,
     pub salt: [u8; 16],
     pub files: Vec<PrivateFile>,
+    /// `keyID`s of every recipient entry, in frame order: a receipt that the sender counts those keys (spec §6).
+    pub recipient_key_ids: Vec<[u8; 4]>,
 }
 
 pub fn seal(
@@ -104,11 +106,14 @@ pub fn open(
         return None;
     }
     let flags = payload[1];
+    if flags & !0b11 != 0 {
+        return None;
+    }
     let sender_id: [u8; 4] = payload[2..6].try_into().ok()?;
     let sent_at = u32::from_be_bytes(payload[6..10].try_into().ok()?);
     let salt: [u8; 16] = payload[10..26].try_into().ok()?;
     let count = usize::from(payload[26]);
-    if count > MAX_RECIPIENTS {
+    if count == 0 || count > MAX_RECIPIENTS {
         return None;
     }
     let header_end = FIXED_HEADER + ENTRY_SIZE * count;
@@ -180,11 +185,18 @@ pub fn open(
         body.drain(..1 + file_count * 45);
     }
     let text = String::from_utf8(body).ok()?;
+    let recipient_key_ids = (0..count)
+        .map(|index| {
+            let start = FIXED_HEADER + index * ENTRY_SIZE;
+            payload[start..start + 4].try_into().expect("4-byte key ID")
+        })
+        .collect();
     Some(Opened {
         text,
         sent_at,
         salt,
         files,
+        recipient_key_ids,
     })
 }
 

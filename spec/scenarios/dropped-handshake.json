@@ -1,0 +1,34 @@
+{
+  "name": "dropped-handshake",
+  "description": "Discord drops alice's first handshake. Her later handshakes queue behind it, so the chat is stuck until she re-sends her key, which always goes out.",
+  "devices": {
+    "alice-mac": { "person": "alice", "client": "duhcord" },
+    "bob-mac": { "person": "bob", "client": "duhcord" }
+  },
+  "steps": [
+    { "do": "setPrivate", "device": "alice-mac", "on": true },
+    { "do": "drop", "device": "alice-mac" },
+    { "do": "deliver" },
+    { "expect": { "alice-mac": { "state": "waiting" }, "bob-mac": { "state": "off" } } },
+    { "do": "setPrivate", "device": "bob-mac", "on": true },
+    { "expect": { "bob-mac": { "state": "waiting", "outbox": [ { "handshake": { "wantsReply": true, "acceptedKeys": [] } } ] } } },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "state": "unconfirmed", "keys": { "bob-mac": "accepted" }, "outbox": [] },
+        "bob-mac": { "state": "waiting" }
+    } },
+    { "do": "resendKey", "device": "alice-mac" },
+    { "expect": { "alice-mac": { "outbox": [ { "handshake": { "wantsReply": true, "acceptedKeys": ["bob-mac"] } } ] } } },
+    { "do": "deliver" },
+    { "expect": {
+        "bob-mac": { "state": "ready", "keys": { "alice-mac": "accepted" },
+                     "outbox": [ { "handshake": { "wantsReply": false, "acceptedKeys": ["alice-mac"] } } ] }
+    } },
+    { "do": "deliver" },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "state": "ready", "safetyNumber": { "same-as": "bob-mac" } },
+        "bob-mac": { "state": "ready" }
+    } }
+  ]
+}

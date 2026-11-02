@@ -80,11 +80,17 @@ fails). It sends one when:
    DM since this key was created, or it counts no key of the other person's: `wantsReply = (it counts none of theirs)`.
 2. **Answer** — a handshake from the other person with `wantsReply = 1` is newer than this client's last handshake in
    the DM, and the user has agreed (consent, §6): `wantsReply = 0`. Without consent, it shows a request instead.
-3. **Acceptance changed** — the user accepted or rejected one of the other person's keys, or turned the per-person
-   Companion exclusion (§6) on or off, while the DM is in Private: `wantsReply = 0`. This tells the other side what it
-   can now rely on.
+3. **Acceptance changed** — the set of the other person's keys this client counts (§6) changed while the DM is in
+   Private, for any reason: the user accepted or rejected a key, a key was trusted on first use, a known key was
+   relabelled, or the Companion exclusion or Duhcord's Companion setting changed: `wantsReply = 0`. This tells the other
+   side what it can now rely on. (Without the first-use case, two people meeting for the first time would leave one of
+   them `unconfirmed`.) When an answer (rule 2) and an acceptance change happen together, one handshake covers both.
 4. **Re-send** — the user asks for it explicitly ("Re-send my key"): `wantsReply = 1`. The other side, if it consented,
-   answers by rule 2. This is the recovery path for any confusion; both clients offer it in the DM's Private UI.
+   answers by rule 2. This is the recovery path for any confusion; both clients offer it in the DM's Private UI. A
+   re-send always goes out, even if an earlier handshake is still in flight (Discord may have lost that one).
+
+A handshake that's due while another is in flight is sent once that one is echoed (its `wantsReply` is the OR of
+everything that was due).
 
 A handshake always carries the sender's current `acceptedKeyID` list for the recipient.
 
@@ -174,9 +180,11 @@ seen in their messages, both only for our *current* key); and the Companion excl
   - `client = 0` (Duhcord) and it's the person's **first** key: `accepted` (trust on first use).
   - Otherwise — any later key, and **every** `client = 1` (Companion) key, first or not — `pending`. At most 4
     pending per person; any more are ignored.
-- **Known key, different `client`:** the key becomes `client = 1` and, if it was `accepted`, `pending` again (a
-  Companion key needs its own approval; a key never silently gains Duhcord's label). The verification is cleared.
-  (Known key, same `client`: update its `features`.)
+- **Known `client = 0` key, now `client = 1`:** the key becomes a Companion key and, if it was `accepted`, `pending`
+  again (a Companion key needs its own approval). The verification is cleared.
+- **Known `client = 1` key, now `client = 0`:** nothing changes. A key never gains Duhcord's label, and demoting it
+  again would let Discord force endless re-approvals.
+- Known key, same `client`: update its `features`.
 
 ### Which keys count
 A key of the other person **counts** if it's `accepted` and not excluded. A key is excluded when it's `client = 1` and

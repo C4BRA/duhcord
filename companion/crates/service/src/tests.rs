@@ -172,7 +172,7 @@ async fn round_trip_with_a_duhcord_peer_never_leaks_plaintext() {
     // Sending before Private is on is refused.
     assert!(service.send_text(ME, CHANNEL, CANARY).is_err());
 
-    // Switching to Private sends our 0x23 handshake (asking for a reply), naming the mod.
+    // Switching to Private sends our v3 handshake (asking for a reply), naming the mod.
     service.set_private(ME, CHANNEL, true).unwrap();
     let send = plugin.recv_type("send").await;
     let content = send["content"].as_str().unwrap().to_owned();
@@ -180,7 +180,7 @@ async fn round_trip_with_a_duhcord_peer_never_leaks_plaintext() {
         panic!("expected a handshake, got {content}");
     };
     assert_eq!(ours.class, ClientClass::Companion);
-    assert_eq!(ours.host, Host::BetterDiscord);
+    assert_eq!(ours.host, Host::BETTERDISCORD);
     assert!(ours.wants_reply);
     let our_id = plugin.snowflake();
     plugin
@@ -189,14 +189,16 @@ async fn round_trip_with_a_duhcord_peer_never_leaks_plaintext() {
     eventually(|| service.lock().outgoing.is_empty()).await;
     assert_eq!(service.chat(ME, CHANNEL).unwrap().status.state, "waiting");
 
-    // The Duhcord peer answers with a 0x22 handshake; its first key is trusted on first use.
+    // The Duhcord peer answers (after accepting our key, which it lists as a receipt). Its first key is trusted on
+    // first use.
     let peer_key = PrivateKey::generate();
     let peer_handshake = protocol::handshake_content(&Handshake {
         key: peer_key.public_key(),
         wants_reply: false,
         class: ClientClass::Duhcord,
-        host: Host::Unknown,
+        host: Host::UNKNOWN,
         features: Features::DUHCORD,
+        accepted_key_ids: vec![protocol::key_id(&ours.key)],
     });
     let peer_hs_id = plugin.snowflake();
     plugin
@@ -205,7 +207,23 @@ async fn round_trip_with_a_duhcord_peer_never_leaks_plaintext() {
             "before":null,"exhausted":true}))
         .await;
     eventually(|| service.chat(ME, CHANNEL).unwrap().status.state == "ready").await;
+    // Trusting their key changed what we count, so the companion tells them (spec §3 rule 3).
+    let tell = plugin.recv_type("send").await;
+    let Kind::Handshake(told) = protocol::kind(tell["content"].as_str().unwrap()) else {
+        panic!("expected a handshake");
+    };
+    assert_eq!(
+        told.accepted_key_ids,
+        vec![protocol::key_id(&peer_key.public_key())]
+    );
+    let tell_id = plugin.snowflake();
+    plugin
+        .send(json!({"t":"sent","nonce":tell["nonce"],"messageId":tell_id}))
+        .await;
     let chat = service.chat(ME, CHANNEL).unwrap();
+    assert!(chat.can_send && chat.has_our_key);
+    assert_eq!(chat.their_keys.len(), 1);
+    assert_eq!(chat.our_keys.len(), 1);
     assert_eq!(chat.status.peer_class, Some("duhcord"));
     assert!(chat.safety_number.is_some());
     assert!(!chat.status.verified);

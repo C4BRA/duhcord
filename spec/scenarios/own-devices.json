@@ -1,0 +1,38 @@
+{
+  "name": "own-devices",
+  "description": "Alice adds a Companion as a second device. It waits in her Mac's device list until approved; then her messages are also sealed to it, it opens them as her own once it approves the Mac too, and once bob accepts it the safety numbers on both sides match with it counted as a Companion key.",
+  "devices": {
+    "alice-mac": { "person": "alice", "client": "duhcord" },
+    "alice-pc": { "person": "alice", "client": "companion", "host": "betterdiscord" },
+    "bob-mac": { "person": "bob", "client": "duhcord" }
+  },
+  "steps": [
+    { "do": "setPrivate", "device": "alice-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "setPrivate", "device": "bob-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "deliver" },
+    { "do": "setPrivate", "device": "alice-pc", "on": true },
+    { "expect": { "alice-pc": { "devices": { "alice-mac": "pending" }, "keys": { "bob-mac": "accepted" } } } },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "devices": { "alice-pc": "pending" }, "state": "ready" },
+        "bob-mac": { "keys": { "alice-mac": "accepted", "alice-pc": "pending" }, "newKey": true }
+    } },
+    { "do": "setDevice", "device": "alice-mac", "key": "alice-pc", "trust": "accepted" },
+    { "do": "send", "device": "alice-mac", "text": "to bob and my pc" },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "devices": { "alice-pc": "accepted" } },
+        "alice-pc": { "messages": [ { "from": "alice-mac", "text": "to bob and my pc", "warnings": ["unapproved-device"] } ] }
+    } },
+    { "do": "setDevice", "device": "alice-pc", "key": "alice-mac", "trust": "accepted" },
+    { "expect": { "alice-pc": { "messages": [ { "from": "alice-mac", "text": "to bob and my pc", "warnings": [] } ] } } },
+    { "do": "accept", "device": "bob-mac", "keys": ["alice-pc"], "compared": "shown" },
+    { "do": "deliver" },
+    { "expect": {
+        "bob-mac": { "verified": true, "keys": { "alice-pc": "accepted" }, "safetyNumber": { "same-as": "alice-mac" } },
+        "alice-pc": { "state": "ready", "safetyNumber": { "same-as": "bob-mac" } }
+    } }
+  ]
+}

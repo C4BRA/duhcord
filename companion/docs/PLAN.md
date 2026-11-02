@@ -1,5 +1,9 @@
 # Duhcord Private Companion + thin plugins for Vencord, Replugged, BetterDiscord
 
+> **Superseded in parts.** This is the original plan. The wire protocol it describes (`dhc2:`, handshakes `0x22` /
+> `0x23`, two safety-number versions) was replaced by protocol v3 in [`spec/PROTOCOL.md`](../../spec/PROTOCOL.md), and
+> updates by [`spec/UPDATES.md`](../../spec/UPDATES.md). The specs are the authority.
+
 Goal: people on Vencord (and Vesktop), Replugged and BetterDiscord can chat in Duhcord's Private mode with Duhcord
 users, and Discord (its servers *and* its app) never holds their key or the decrypted text. Duhcord users decide
 whether they chat privately with these clients at all.
