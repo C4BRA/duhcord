@@ -9,8 +9,8 @@ use std::{
 
 use duhcord_private_protocol::{
     dense_text, handshake_content, key_code, kind, open, open_file, padme, safety_number, seal,
-    seal_file, ClientClass, Features, FileKind, Handshake, Kind, PrivateFile, PrivateKey,
-    PublicKey,
+    seal_file, ClientClass, Features, FileKind, Handshake, Host, Kind, PrivateFile, PrivateKey,
+    PublicKey, NOTICE, PREFIX,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
@@ -60,6 +60,9 @@ struct FileBlobVector {
 struct HandshakeVector {
     key: String,
     wants_reply: bool,
+    class: u8,
+    host: u8,
+    features: u16,
     content: String,
 }
 
@@ -75,6 +78,10 @@ struct DenseTextVector {
 struct SafetyNumberVector {
     a: Vec<String>,
     b: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    a_companion: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    b_companion: Vec<String>,
     number: String,
 }
 
@@ -198,24 +205,36 @@ fn generate_vectors() -> Result<Vectors, String> {
         plain: hex::encode(&file_blob_plain),
     }];
 
-    let handshakes = [("alice", true), ("bob", false)]
-        .into_iter()
-        .map(|(name, wants_reply)| {
-            let key = private_keys[name].public_key();
-            let handshake = Handshake {
+    let handshakes = [
+        ("alice", true, 0, 0, Features::DUHCORD.0),
+        ("bob", false, 0, 0, Features::DUHCORD.0),
+        ("carol", true, 1, 4, Features::COMPANION_V1.0),
+        ("dave", false, 1, 255, Features::COMPANION_V1.0),
+    ]
+    .into_iter()
+    .map(|(name, wants_reply, class, host, features)| {
+        let key = private_keys[name].public_key();
+        let content = if class == ClientClass::Duhcord as u8 {
+            handshake_content(&Handshake {
                 key,
                 wants_reply,
                 class: ClientClass::Duhcord,
-                host: duhcord_private_protocol::Host::Unknown,
+                host: Host::Unknown,
                 features: Features::DUHCORD,
-            };
-            HandshakeVector {
-                key: name.to_owned(),
-                wants_reply,
-                content: handshake_content(&handshake),
-            }
-        })
-        .collect();
+            })
+        } else {
+            companion_handshake_content(key, wants_reply, host, features)
+        };
+        HandshakeVector {
+            key: name.to_owned(),
+            wants_reply,
+            class,
+            host,
+            features,
+            content,
+        }
+    })
+    .collect();
 
     let dense_inputs = dense_inputs();
     let dense_text = dense_inputs
@@ -240,6 +259,8 @@ fn generate_vectors() -> Result<Vectors, String> {
         SafetyNumberVector {
             a: vec!["alice".to_owned()],
             b: vec!["bob".to_owned()],
+            a_companion: Vec::new(),
+            b_companion: Vec::new(),
             number: safety_number(
                 &[(alice_public, ClientClass::Duhcord)],
                 &[(bob_public, ClientClass::Duhcord)],
@@ -248,12 +269,50 @@ fn generate_vectors() -> Result<Vectors, String> {
         SafetyNumberVector {
             a: vec!["alice".to_owned(), "carol".to_owned()],
             b: vec!["bob".to_owned()],
+            a_companion: Vec::new(),
+            b_companion: Vec::new(),
             number: safety_number(
                 &[
                     (alice_public, ClientClass::Duhcord),
                     (carol_public, ClientClass::Duhcord),
                 ],
                 &[(bob_public, ClientClass::Duhcord)],
+            ),
+        },
+        SafetyNumberVector {
+            a: vec!["alice".to_owned()],
+            b: vec!["carol".to_owned()],
+            a_companion: Vec::new(),
+            b_companion: vec!["carol".to_owned()],
+            number: safety_number(
+                &[(alice_public, ClientClass::Duhcord)],
+                &[(carol_public, ClientClass::Companion)],
+            ),
+        },
+        SafetyNumberVector {
+            a: vec!["alice".to_owned(), "bob".to_owned()],
+            b: vec!["carol".to_owned(), "dave".to_owned()],
+            a_companion: Vec::new(),
+            b_companion: vec!["dave".to_owned()],
+            number: safety_number(
+                &[
+                    (alice_public, ClientClass::Duhcord),
+                    (bob_public, ClientClass::Duhcord),
+                ],
+                &[
+                    (carol_public, ClientClass::Duhcord),
+                    (private_keys["dave"].public_key(), ClientClass::Companion),
+                ],
+            ),
+        },
+        SafetyNumberVector {
+            a: vec!["alice".to_owned()],
+            b: vec!["alice".to_owned()],
+            a_companion: vec!["alice".to_owned()],
+            b_companion: Vec::new(),
+            number: safety_number(
+                &[(alice_public, ClientClass::Companion)],
+                &[(alice_public, ClientClass::Duhcord)],
             ),
         },
     ];
@@ -282,6 +341,24 @@ fn generate_vectors() -> Result<Vectors, String> {
         safety_numbers,
         key_codes,
     })
+}
+
+fn companion_handshake_content(
+    key: PublicKey,
+    wants_reply: bool,
+    host: u8,
+    features: u16,
+) -> String {
+    let mut frame = vec![
+        0x23,
+        u8::from(wants_reply),
+        ClientClass::Companion as u8,
+        host,
+        (features >> 8) as u8,
+        features as u8,
+    ];
+    frame.extend_from_slice(&key);
+    format!("{NOTICE}\n{PREFIX}{}", dense_text::encode(&frame))
 }
 
 fn build_message(
@@ -594,9 +671,9 @@ fn check_vectors(vectors: &Vectors) -> Vec<String> {
         }
     }
 
-    if vectors.handshakes.len() != 2 {
+    if vectors.handshakes.len() != 4 {
         failures.push(format!(
-            "expected 2 handshakes, found {}",
+            "expected 4 handshakes, found {}",
             vectors.handshakes.len()
         ));
     }
@@ -605,31 +682,50 @@ fn check_vectors(vectors: &Vectors) -> Vec<String> {
         .iter()
         .map(|item| item.key.as_str())
         .collect::<Vec<_>>()
-        != ["alice", "bob"]
+        != ["alice", "bob", "carol", "dave"]
     {
         failures.push("handshake names or ordering differ from fixed vectors".to_owned());
     }
     for handshake in &vectors.handshakes {
-        if !matches!(
-            (handshake.key.as_str(), handshake.wants_reply),
-            ("alice", true) | ("bob", false)
-        ) {
-            failures.push(format!(
-                "unexpected handshake input {} wantsReply={}",
-                handshake.key, handshake.wants_reply
-            ));
-        }
         let Some(key) = private_keys.get(&handshake.key).map(PrivateKey::public_key) else {
             failures.push(format!("handshake: unknown key {}", handshake.key));
             continue;
         };
-        let expected = handshake_content(&Handshake {
-            key,
-            wants_reply: handshake.wants_reply,
-            class: ClientClass::Duhcord,
-            host: duhcord_private_protocol::Host::Unknown,
-            features: Features::DUHCORD,
-        });
+        let expected_fields = match handshake.key.as_str() {
+            "alice" => (true, 0, 0, Features::DUHCORD.0),
+            "bob" => (false, 0, 0, Features::DUHCORD.0),
+            "carol" => (true, 1, 4, Features::COMPANION_V1.0),
+            "dave" => (false, 1, 255, Features::COMPANION_V1.0),
+            _ => continue,
+        };
+        if (
+            handshake.wants_reply,
+            handshake.class,
+            handshake.host,
+            handshake.features,
+        ) != expected_fields
+        {
+            failures.push(format!(
+                "handshake {}: fields differ from fixed vector",
+                handshake.key
+            ));
+        }
+        let expected = if handshake.class == ClientClass::Duhcord as u8 {
+            handshake_content(&Handshake {
+                key,
+                wants_reply: handshake.wants_reply,
+                class: ClientClass::Duhcord,
+                host: Host::Unknown,
+                features: Features::DUHCORD,
+            })
+        } else {
+            companion_handshake_content(
+                key,
+                handshake.wants_reply,
+                handshake.host,
+                handshake.features,
+            )
+        };
         if expected != handshake.content {
             failures.push(format!(
                 "handshake {}: content differs from generated handshake",
@@ -638,9 +734,18 @@ fn check_vectors(vectors: &Vectors) -> Vec<String> {
         }
         match kind(&handshake.content) {
             Kind::Handshake(decoded)
-                if decoded.key == key && decoded.wants_reply == handshake.wants_reply => {}
+                if decoded.key == key
+                    && decoded.wants_reply == handshake.wants_reply
+                    && decoded.class as u8 == handshake.class
+                    && decoded.host as u8
+                        == if handshake.host == 255 {
+                            0
+                        } else {
+                            handshake.host
+                        }
+                    && decoded.features.0 == handshake.features => {}
             _ => failures.push(format!(
-                "handshake {}: could not decode key and wantsReply",
+                "handshake {}: decoded fields differ",
                 handshake.key
             )),
         }
@@ -692,9 +797,9 @@ fn check_vectors(vectors: &Vectors) -> Vec<String> {
         failures.push("padme vectors differ from protocol expectations".to_owned());
     }
 
-    if vectors.safety_numbers.len() != 2 {
+    if vectors.safety_numbers.len() != 5 {
         failures.push(format!(
-            "expected 2 safetyNumbers vectors, found {}",
+            "expected 5 safetyNumbers vectors, found {}",
             vectors.safety_numbers.len()
         ));
     }
@@ -705,12 +810,28 @@ fn check_vectors(vectors: &Vectors) -> Vec<String> {
             (
                 item.a.iter().map(String::as_str).collect::<Vec<_>>(),
                 item.b.iter().map(String::as_str).collect::<Vec<_>>(),
+                item.a_companion
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                item.b_companion
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
             )
         })
         .collect();
     let expected_safety_inputs = [
-        (vec!["alice"], vec!["bob"]),
-        (vec!["alice", "carol"], vec!["bob"]),
+        (vec!["alice"], vec!["bob"], vec![], vec![]),
+        (vec!["alice", "carol"], vec!["bob"], vec![], vec![]),
+        (vec!["alice"], vec!["carol"], vec![], vec!["carol"]),
+        (
+            vec!["alice", "bob"],
+            vec!["carol", "dave"],
+            vec![],
+            vec!["dave"],
+        ),
+        (vec!["alice"], vec!["alice"], vec!["alice"], vec![]),
     ];
     if safety_inputs != expected_safety_inputs {
         failures.push("safetyNumbers inputs or ordering differ from fixed vectors".to_owned());
@@ -724,11 +845,31 @@ fn check_vectors(vectors: &Vectors) -> Vec<String> {
         };
         let a: Vec<_> = a
             .into_iter()
-            .map(|key| (key, ClientClass::Duhcord))
+            .zip(&vector.a)
+            .map(|(key, name)| {
+                (
+                    key,
+                    if vector.a_companion.contains(name) {
+                        ClientClass::Companion
+                    } else {
+                        ClientClass::Duhcord
+                    },
+                )
+            })
             .collect();
         let b: Vec<_> = b
             .into_iter()
-            .map(|key| (key, ClientClass::Duhcord))
+            .zip(&vector.b)
+            .map(|(key, name)| {
+                (
+                    key,
+                    if vector.b_companion.contains(name) {
+                        ClientClass::Companion
+                    } else {
+                        ClientClass::Duhcord
+                    },
+                )
+            })
             .collect();
         if safety_number(&a, &b) != vector.number {
             failures.push(format!("safetyNumbers[{index}]: number differs"));
@@ -864,7 +1005,13 @@ mod tests {
 
     #[test]
     fn generated_vectors_pass_the_interop_checker() {
-        let vectors = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop/rust-vectors.json");
-        check_path(&vectors).unwrap_or_else(|error| panic!("{error}"));
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop");
+        let rust_vectors = directory.join("rust-vectors.json");
+        check_path(&rust_vectors).unwrap_or_else(|error| panic!("{error}"));
+
+        let swift_vectors = directory.join("swift-vectors.json");
+        if swift_vectors.exists() {
+            check_path(&swift_vectors).unwrap_or_else(|error| panic!("{error}"));
+        }
     }
 }
