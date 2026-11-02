@@ -13,6 +13,7 @@ on:
       - ".github/workflows/interop.yml"
       - ".github/workflows/ci.yml"
       - ".github/workflows/release.yml"
+      - ".github/workflows/release-guard.yml"
   pull_request:
     paths:
       - "companion/**"
@@ -21,6 +22,7 @@ on:
       - ".github/workflows/interop.yml"
       - ".github/workflows/ci.yml"
       - ".github/workflows/release.yml"
+      - ".github/workflows/release-guard.yml"
   workflow_dispatch:
 
 permissions:
@@ -60,6 +62,11 @@ jobs:
           # Companion tags must never trigger Duhcord's release (which fires on v* tags), and vice versa.
           grep -qE "tags: \['v\*'\]" .github/workflows/release.yml || fail "Duhcord's release trigger changed; re-check tag separation"
           grep -qE 'companion-v\*' .github/workflows/companion-release.yml || fail "companion releases must use companion-v* tags"
+          # Companion releases live in this repository too: they must never become the "latest" release that
+          # Duhcord's updater reads.
+          grep -q -- '--prerelease --latest=false' .github/workflows/companion-release.yml \
+            || fail "companion releases must be created with --prerelease --latest=false"
+          test -f .github/workflows/release-guard.yml || fail "release-guard.yml is missing"
           # Duhcord's signed builds must not restore caches that companion jobs could have written.
           if grep -n 'actions/cache' .github/workflows/release.yml; then
             fail "Duhcord's release workflow must not restore CI caches"

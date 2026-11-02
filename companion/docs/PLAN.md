@@ -245,8 +245,8 @@ In order of preference:
 ## 6. Repository layout
 
 > **Moved:** the companion now lives in `C4BRA/duhcord` under `companion/`, with the shared specs in `spec/` at the
-> repository root. `C4BRA/duhcord-private-plugin` only hosts the companion and plugin releases. The original layout
-> is kept below for reference.
+> repository root. Companion releases are `companion-v*` pre-releases of `C4BRA/duhcord`. The original layout is
+> kept below for reference.
 ```
 spec/PROTOCOL.md        wire format (from PrivateMessaging.swift), handshake 0x23, safety number v3
 spec/BRIDGE.md          bridge messages, invariants, pairing

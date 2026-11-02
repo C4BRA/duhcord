@@ -38,7 +38,7 @@ await build({
  * @description Chat in Duhcord's Private mode. Your key and decrypted messages stay in the Duhcord Companion app, never in Discord.
  * @version ${version}
  * @source https://github.com/C4BRA/duhcord/tree/main/companion/plugins
- * @website https://github.com/C4BRA/duhcord-private-plugin
+ * @website https://github.com/C4BRA/duhcord/tree/main/companion
  */`,
   },
   footer: { js: "module.exports = module.exports.default;" },

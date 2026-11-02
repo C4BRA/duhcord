@@ -1,3 +1,6 @@
+> This is a **Duhcord Companion** release, for Vencord / Replugged / BetterDiscord users. It isn't a Duhcord
+> update; Duhcord itself updates from its own releases.
+
 ## Install
 
 **1. The companion** (holds your key; Discord never sees it or your decrypted messages)

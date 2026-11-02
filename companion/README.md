@@ -22,12 +22,14 @@ releases. The two are kept apart so neither can compromise the other:
 - **CI:** the companion's checks (`.github/workflows/companion-ci.yml`) run only when `companion/` or `spec/` changes.
   Duhcord's CI skips companion-only changes. `.github/workflows/interop.yml` runs when either side's private-messaging
   code changes, and checks fresh vectors in both directions.
-- **Releases:** Duhcord releases from `v1.2.3` tags in this repository, as before. The companion releases from
-  `companion-v0.1.0` tags (`.github/workflows/companion-release.yml`). Those builds are published as releases of
-  [`C4BRA/duhcord-private-plugin`](https://github.com/C4BRA/duhcord-private-plugin), so Duhcord's "latest release"
-  (which its updater reads) is never a companion release, and Replugged's GitHub updater keeps working.
-- **Secrets:** companion workflows never use Duhcord's `release` environment or its signing and update keys. The
-  companion's publish job uses its own `companion-release` environment, with a token scoped to the release repo.
+- **Releases:** both are released from this repository. Duhcord releases from `v1.2.3` tags, as before. The companion
+  releases from `companion-v0.1.0` tags (`.github/workflows/companion-release.yml`), always as **pre-releases**, which
+  GitHub never makes the "latest" release, the one Duhcord's updater reads. `release-guard.yml` puts Duhcord's
+  newest release back as latest if that ever changes, and even a companion release marked latest couldn't ship a
+  Duhcord update, because Duhcord only installs an `update.json` signed with its update key.
+- **Secrets:** companion workflows never use Duhcord's `release` environment or its signing and update keys. Only the
+  companion's publish job can write (to create its own release), in its own `companion-release` environment, and it
+  runs no npm or cargo code.
   Duhcord's signed builds never restore a CI cache, so a companion job (which runs npm and cargo packages) can't plant
   anything in them.
 
@@ -63,10 +65,10 @@ npm run app:dev        # run the companion
 ## Release
 
 Push a `companion-v0.1.0` tag (or run **Companion release** by hand). It builds the companion for macOS Apple Silicon,
-macOS Intel, Windows x64 and Linux x64, plus the three plugins. It then drafts a `v0.1.0` release in
-`C4BRA/duhcord-private-plugin` with one-click zips, native installers and `SHA256SUMS.txt`. It needs a
-`companion-release` environment holding `COMPANION_RELEASE_TOKEN`: a fine-grained token with *Contents: write* on
-`C4BRA/duhcord-private-plugin` only. Nothing is code-signed yet, and the Tauri updater isn't wired up yet (it needs a
+macOS Intel, Windows x64 and Linux x64, plus the three plugins. It then drafts a `companion-v0.1.0` **pre-release** in
+this repository with one-click zips, native installers and `SHA256SUMS.txt`. When you publish the draft, keep
+"Set as a pre-release" ticked. Plugins don't auto-update from GitHub. The companion bundles the current
+BetterDiscord and Replugged plugins, and **Connect → Install plugin** updates them. Nothing is code-signed yet, and the Tauri updater isn't wired up yet (it needs a
 signing key in a protected `release` environment, see `docs/PLAN.md` §3.6).
 
 ## Status

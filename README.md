@@ -203,7 +203,7 @@ companion/                Duhcord Private Companion and its Vencord / Replugged 
 ```
 
 The companion is a separate product that lives in this repository: its own Rust and npm build, its own CI
-(`companion-ci.yml`) and releases (`companion-v*` tags, published to
-[C4BRA/duhcord-private-plugin](https://github.com/C4BRA/duhcord-private-plugin/releases)). It never uses Duhcord's
-release environment or keys, and Duhcord's build never includes it. `interop.yml` checks both directions of the
+(`companion-ci.yml`) and releases (`companion-v*` tags, published here as pre-releases so Duhcord's updater, which
+reads the latest release, never sees them; `release-guard.yml` enforces that). It never uses Duhcord's release
+environment or keys, and Duhcord's build never includes it. `interop.yml` checks both directions of the
 private-messaging format whenever either side changes. See [companion/README.md](companion/README.md).
