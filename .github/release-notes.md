@@ -18,7 +18,8 @@ The builds aren't code-signed yet: on macOS right-click → Open the first time;
   into your plugins folder. Then User Settings → Plugins → DuhcordPrivate → on.
 - **Replugged:** in the companion click *Connect → Replugged*, or put `dev.c4bra.DuhcordPrivate.asar` in your
   Replugged plugins folder. Then Settings → Replugged → Plugins → Duhcord Private → on.
-- **Vencord / Vesktop:** unzip `DuhcordPrivate-Vencord-*.zip` into Vencord's `src/userplugins/`, then
+- **Vencord / Vesktop:** unzip `DuhcordPrivate-Vencord-*.zip` into Vencord's `src/userplugins/` (create that folder if it's missing)
+  so you get `src/userplugins/duhcordPrivate/`, then
   `pnpm build && pnpm inject`.
 
 **3. Pair:** Discord shows a 6-digit code, the companion shows the same code: click **Allow**.

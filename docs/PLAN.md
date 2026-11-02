@@ -234,6 +234,7 @@ In order of preference:
    ```
    git clone https://github.com/Vendicated/Vencord && cd Vencord && pnpm i
    git clone https://github.com/C4BRA/duhcord-private-plugin ../dpp
+   mkdir -p src/userplugins
    cp -r ../dpp/plugins/vencord/duhcordPrivate src/userplugins/
    pnpm build && pnpm inject
    ```
