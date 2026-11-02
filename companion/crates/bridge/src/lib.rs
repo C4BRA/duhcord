@@ -34,6 +34,8 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 
+/// The bridge protocol version (spec/BRIDGE.md), sent as `v` in the plugin's `hello`.
+pub const BRIDGE_VERSION: u64 = 1;
 const PORT_START: u16 = 47_823;
 const PORT_END: u16 = 47_827;
 const MAX_FRAME_SIZE: usize = 1024 * 1024;
@@ -502,6 +504,19 @@ async fn handle_connection(
                                 bad_frames += 1;
                                 continue;
                             }
+                            // spec/BRIDGE.md "Versions": say which side to update, then close.
+                            if let Some(version) = value.get("v").and_then(Value::as_u64) {
+                                if version != BRIDGE_VERSION {
+                                    let code = if version < BRIDGE_VERSION {
+                                        "plugin-outdated"
+                                    } else {
+                                        "companion-outdated"
+                                    };
+                                    let _ = send_json(&mut socket, json!({"t":"error","code":code})).await;
+                                    close_socket(&mut socket, CloseCode::Policy, code).await;
+                                    break;
+                                }
+                            }
                             match parse_hello(&value) {
                                 Some(hello) => {
                                     user_id = Some(hello.user_id);
@@ -729,11 +744,14 @@ struct Hello {
 }
 
 fn parse_hello(value: &Value) -> Option<Hello> {
-    if value.get("v").and_then(Value::as_u64) != Some(1) {
+    if value.get("v").and_then(Value::as_u64) != Some(BRIDGE_VERSION) {
         return None;
     }
     let host = value.get("host")?.as_str()?;
-    if !matches!(host, "vencord" | "vesktop" | "replugged" | "betterdiscord") {
+    if !matches!(
+        host,
+        "vencord" | "vesktop" | "replugged" | "betterdiscord" | "dorion"
+    ) {
         return None;
     }
     value.get("plugin")?.as_str()?;
@@ -872,7 +890,8 @@ fn validate_frame(frame: &CompanionFrame) -> Result<(), BridgeError> {
     };
     match protocol::kind(content) {
         Kind::Handshake(_) | Kind::Encrypted(_) => Ok(()),
-        Kind::Plain => Err(BridgeError::NotPrivate),
+        // The companion never produces another version's frames or plain text.
+        Kind::NewerHandshake { .. } | Kind::Plain => Err(BridgeError::NotPrivate),
     }
 }
 

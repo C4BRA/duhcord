@@ -1,0 +1,28 @@
+{
+  "name": "pending-limit",
+  "description": "After bob's first key, at most four more wait for approval; a fifth is ignored.",
+  "devices": {
+    "alice-mac": { "person": "alice", "client": "duhcord" },
+    "bob-1": { "person": "bob", "client": "duhcord" },
+    "bob-2": { "person": "bob", "client": "duhcord" },
+    "bob-3": { "person": "bob", "client": "duhcord" },
+    "bob-4": { "person": "bob", "client": "duhcord" },
+    "bob-5": { "person": "bob", "client": "duhcord" },
+    "bob-6": { "person": "bob", "client": "duhcord" }
+  },
+  "steps": [
+    { "do": "setPrivate", "device": "alice-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "setPrivate", "device": "bob-1", "on": true },
+    { "do": "deliver" },
+    { "do": "setPrivate", "device": "bob-2", "on": true },
+    { "do": "setPrivate", "device": "bob-3", "on": true },
+    { "do": "setPrivate", "device": "bob-4", "on": true },
+    { "do": "setPrivate", "device": "bob-5", "on": true },
+    { "do": "setPrivate", "device": "bob-6", "on": true },
+    { "do": "deliver" },
+    { "expect": { "alice-mac": { "keys": {
+        "bob-1": "accepted", "bob-2": "pending", "bob-3": "pending", "bob-4": "pending", "bob-5": "pending", "bob-6": "unknown"
+    } } } }
+  ]
+}

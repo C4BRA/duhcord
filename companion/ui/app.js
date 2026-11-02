@@ -47,6 +47,8 @@ function statusChip(status) {
   if (status.newKey) return h("span", { class: "chip warn" }, "New key");
   if (status.state === "off") return h("span", { class: "chip" }, "Not private");
   if (status.state === "waiting") return h("span", { class: "chip" }, "Waiting for their key");
+  if (status.state === "unconfirmed") return h("span", { class: "chip warn" }, "Waiting for them to accept your key");
+  if (status.state === "outdated") return h("span", { class: "chip warn" }, "They use a newer version");
   const label = status.peerClass === "companion" ? "Private · Companion" : "Private";
   return h("span", { class: status.verified ? "chip ok" : "chip" }, status.verified ? `${label} · Verified` : label);
 }
@@ -167,14 +169,20 @@ async function renderMain() {
       }
       const devices = (devicesByAccount.get(account.userId) ?? []).filter((device) => device.trust !== "rejected");
       if (devices.length) {
-        card.append(h("h2", {}, "Your Macs"));
+        card.append(h("h2", {}, "Your other devices"));
         for (const device of devices) {
           const error = h("p", { class: "error" });
           card.append(
             h(
               "div",
               { class: "row" },
-              h("span", { class: "grow" }, h("span", { class: "mono" }, device.keyCode), device.trust === "pending" ? " · waiting for approval" : " · approved"),
+              h(
+                "span",
+                { class: "grow" },
+                h("span", { class: "mono" }, device.keyCode),
+                ` · ${device.class === "companion" ? "Companion" : "Duhcord (Mac)"}`,
+                device.trust === "pending" ? " · waiting for approval" : " · approved",
+              ),
               device.trust === "pending" &&
                 h("button", { class: "primary", onClick: () => guarded(() => invoke("setOwnDevice", { userId: account.userId, key: device.key, accept: true }), error) }, "Approve"),
               device.trust === "pending" &&
@@ -183,7 +191,7 @@ async function renderMain() {
             error,
           );
         }
-        card.append(h("p", { class: "muted" }, "Approve only a key code that Duhcord on your Mac shows in Settings → Privacy. Approved Macs can read what you send from here."));
+        card.append(h("p", { class: "muted" }, "Approve only a key code you can see on that device (Duhcord: Settings → Privacy; Companion: its main window). Approved devices can read everything you send from here."));
       }
     }
     content.append(card);
@@ -326,10 +334,29 @@ function safetySheet(chat) {
     h("h1", {}, "Safety number"),
     h("p", {}, `Compare this with ${displayName(chat.peer)}. If every digit matches, nobody else can read this chat.`),
     h("p", { class: "number mono" }, chat.safetyNumber ?? "No keys yet"),
-    h("p", { class: "muted" }, "Your key code: ", h("span", { class: "mono" }, chat.myKeyCode)),
-    ...chat.acceptedKeys.map((key) =>
-      h("p", { class: "muted" }, `${key.class === "companion" ? "Companion" : "Duhcord"} key: `, h("span", { class: "mono" }, key.keyCode)),
+    h("p", { class: "muted" }, "If the numbers differ, compare these key codes to find which key doesn't match."),
+    h("h2", {}, "Your side"),
+    ...chat.ourKeys.map((key, index) =>
+      h("p", { class: "muted" }, `${index === 0 ? "This device" : "Your device"} (${key.class === "companion" ? "Companion" : "Duhcord"}): `, h("span", { class: "mono" }, key.keyCode)),
     ),
+    h("h2", {}, `${displayName(chat.peer)}'s side`),
+    ...(chat.theirKeys.length
+      ? chat.theirKeys.map((key) =>
+          h("p", { class: "muted" }, `${key.class === "companion" ? "Companion" : "Duhcord"} key: `, h("span", { class: "mono" }, key.keyCode)),
+        )
+      : [h("p", { class: "muted" }, "No key of theirs counts yet.")]),
+    chat.theirKeys.some((key) => key.class === "companion") || chat.companionExcluded
+      ? h(
+          "label",
+          { class: "row" },
+          (() => {
+            const box = h("input", { type: "checkbox", checked: chat.companionExcluded });
+            box.addEventListener("change", () => guarded(() => invoke("setCompanionExcluded", { userId, channelId, excluded: box.checked }), error));
+            return box;
+          })(),
+          "Leave out their Companion keys in this chat",
+        )
+      : null,
     h(
       "div",
       { class: "row" },
@@ -387,8 +414,23 @@ async function renderChat() {
         "Private is off for this chat. Turning it on sends your key to them through Discord.",
         h("div", { class: "row" }, h("button", { class: "primary", onClick: () => guarded(() => invoke("setPrivate", { userId, channelId, enabled: true }), error) }, "Turn on Private")),
       );
+    const resend = h("button", { onClick: () => guarded(() => invoke("resendKey", { userId, channelId }), error) }, "Re-send my key");
+    if (status.state === "outdated")
+      return h("div", { class: "banner" }, `${displayName(chat.peer)} uses a newer version of private messaging. Update Duhcord Companion to keep chatting privately.`);
     if (status.state === "waiting")
-      return h("div", { class: "banner" }, `Waiting for ${displayName(chat.peer)}'s key. They need Duhcord (with Companion chat on) or the Companion.`);
+      return h(
+        "div",
+        { class: "banner" },
+        `Waiting for ${displayName(chat.peer)}'s key. They need Duhcord (with "Private chat with Duhcord Companion" on) or the Companion.`,
+        h("div", { class: "row" }, resend, status.newKey && h("button", { class: "primary", onClick: () => acceptSheet(chat) }, "Review their key")),
+      );
+    if (status.state === "unconfirmed")
+      return h(
+        "div",
+        { class: "banner" },
+        `You have ${displayName(chat.peer)}'s key, but they haven't accepted yours yet, so they can't read you. Sending is off until they do.`,
+        h("div", { class: "row" }, resend, status.newKey && h("button", { class: "primary", onClick: () => acceptSheet(chat) }, "Review their new key")),
+      );
     if (status.newKey)
       return h(
         "div",
@@ -416,7 +458,7 @@ async function renderChat() {
     list.append(bubble);
   }
 
-  const canSend = chat.status.state === "ready";
+  const canSend = chat.canSend;
   const input = h("textarea", {
     placeholder: canSend ? `Private message to ${displayName(chat.peer)}` : "Private isn't ready yet",
     disabled: !canSend,

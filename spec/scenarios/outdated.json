@@ -1,0 +1,18 @@
+{
+  "name": "outdated",
+  "description": "A handshake from a newer protocol version makes the chat outdated with sending disabled, and its key isn't learned. A later v3 handshake from the same person brings the chat back.",
+  "devices": {
+    "alice-mac": { "person": "alice", "client": "duhcord" },
+    "bob-mac": { "person": "bob", "client": "duhcord" }
+  },
+  "steps": [
+    { "do": "setPrivate", "device": "alice-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "inject", "person": "bob", "handshake": { "key": "bob-future", "wantsReply": true, "client": 0, "version": 4 } },
+    { "expect": { "alice-mac": { "state": "outdated", "canSend": false, "keys": { "bob-future": "unknown" }, "outbox": [] } } },
+    { "do": "setPrivate", "device": "bob-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "deliver" },
+    { "expect": { "alice-mac": { "state": "ready", "keys": { "bob-mac": "accepted", "bob-future": "unknown" } }, "bob-mac": { "state": "ready" } } }
+  ]
+}

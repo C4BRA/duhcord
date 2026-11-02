@@ -1,0 +1,38 @@
+{
+  "name": "companion-chat-off",
+  "description": "Duhcord's Companion setting is off: the Companion key can be accepted but stays excluded, so the Companion user stays unconfirmed and Duhcord never sends to it. Turning the setting on makes both ready.",
+  "devices": {
+    "alice-mac": { "person": "alice", "client": "duhcord" },
+    "bob-pc": { "person": "bob", "client": "companion", "host": "vencord" }
+  },
+  "steps": [
+    { "do": "allowCompanionChat", "device": "alice-mac", "on": false },
+    { "do": "setPrivate", "device": "alice-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "setPrivate", "device": "bob-pc", "on": true },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "state": "waiting", "newKey": true, "keys": { "bob-pc": "pending" } },
+        "bob-pc": { "state": "unconfirmed" }
+    } },
+    { "do": "accept", "device": "alice-mac", "keys": ["bob-pc"] },
+    { "expect": {
+        "alice-mac": { "state": "waiting", "keys": { "bob-pc": "excluded" }, "safetyNumber": { "none": "" },
+                       "outbox": [ { "handshake": { "wantsReply": false, "acceptedKeys": [] } } ] }
+    } },
+    { "do": "send", "device": "alice-mac", "text": "should not go" },
+    { "expect": { "alice-mac": { "sendRefused": "not-ready" } } },
+    { "do": "deliver" },
+    { "expect": { "bob-pc": { "state": "unconfirmed", "hasOurKey": false } } },
+    { "do": "allowCompanionChat", "device": "alice-mac", "on": true },
+    { "expect": {
+        "alice-mac": { "state": "ready", "keys": { "bob-pc": "accepted" },
+                       "outbox": [ { "handshake": { "wantsReply": false, "acceptedKeys": ["bob-pc"] } } ] }
+    } },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "state": "ready", "safetyNumber": { "same-as": "bob-pc" } },
+        "bob-pc": { "state": "ready", "hasOurKey": true }
+    } }
+  ]
+}

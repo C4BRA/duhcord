@@ -1,0 +1,39 @@
+{
+  "name": "new-key",
+  "description": "Bob adds a new install (a new key for the same person). It waits on alice; accepting it with a number that doesn't match changes nothing; accepting it with the number shown verifies the chat. Once bob's two installs approve each other, all three safety numbers match.",
+  "devices": {
+    "alice-mac": { "person": "alice", "client": "duhcord" },
+    "bob-mac": { "person": "bob", "client": "duhcord" },
+    "bob-new": { "person": "bob", "client": "duhcord" }
+  },
+  "steps": [
+    { "do": "setPrivate", "device": "alice-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "setPrivate", "device": "bob-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "deliver" },
+    { "do": "setPrivate", "device": "bob-new", "on": true },
+    { "expect": { "bob-new": { "outbox": [ { "handshake": { "wantsReply": false, "acceptedKeys": ["alice-mac"] } } ], "devices": { "bob-mac": "pending" } } } },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "state": "ready", "newKey": true, "keys": { "bob-mac": "accepted", "bob-new": "pending" } },
+        "bob-new": { "state": "unconfirmed", "canSend": false },
+        "bob-mac": { "devices": { "bob-new": "pending" } }
+    } },
+    { "do": "accept", "device": "alice-mac", "keys": ["bob-new"], "compared": "11111 11111 11111 11111 11111 11111 11111 11111 11111 11111 11111 11111" },
+    { "expect": { "alice-mac": { "keys": { "bob-new": "pending" }, "verified": false, "outbox": [] } } },
+    { "do": "accept", "device": "alice-mac", "keys": ["bob-new"], "compared": "shown" },
+    { "expect": {
+        "alice-mac": { "keys": { "bob-new": "accepted" }, "verified": true, "newKey": false,
+                       "outbox": [ { "handshake": { "wantsReply": false, "acceptedKeys": ["bob-mac", "bob-new"] } } ] }
+    } },
+    { "do": "deliver" },
+    { "expect": { "bob-new": { "state": "ready" }, "bob-mac": { "state": "ready" } } },
+    { "do": "setDevice", "device": "bob-mac", "key": "bob-new", "trust": "accepted" },
+    { "do": "setDevice", "device": "bob-new", "key": "bob-mac", "trust": "accepted" },
+    { "expect": {
+        "alice-mac": { "safetyNumber": { "same-as": "bob-mac" } },
+        "bob-new": { "safetyNumber": { "same-as": "bob-mac" } }
+    } }
+  ]
+}

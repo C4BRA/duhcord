@@ -9,12 +9,15 @@ mod safety;
 
 pub use dense_text::{decode as decode_dense_text, encode as encode_dense_text};
 pub use file::{open_file, padme, seal_file, FileKind, PrivateFile};
-pub use handshake::{handshake_content, kind, ClientClass, Features, Handshake, Host, Kind};
+pub use handshake::{
+    frame_content, handshake_content, handshake_frame, kind, ClientClass, Features, Handshake,
+    Host, Kind, MAX_ACCEPTED_KEY_IDS, PROTOCOL_VERSION,
+};
 pub use key::PrivateKey;
 pub use message::{open, seal, Opened, SealError};
 pub use safety::{key_code, key_id, safety_number};
 
-pub const PREFIX: &str = "dhc2:";
+pub const PREFIX: &str = "dhc3:";
 pub const NOTICE: &str = "-# encrypted messaging by C4BRA/duhcord 🤫";
 pub const MAX_CONTENT_UTF16: usize = 2000;
 pub const MAX_RECIPIENTS: usize = 8;

@@ -1,0 +1,35 @@
+{
+  "name": "reject",
+  "description": "Alice rejects bob's new key. It gets nothing from her, her next handshake no longer lists it, so that install sees she hasn't accepted it; bob's accepted install stays ready.",
+  "devices": {
+    "alice-mac": { "person": "alice", "client": "duhcord" },
+    "bob-mac": { "person": "bob", "client": "duhcord" },
+    "bob-new": { "person": "bob", "client": "duhcord" }
+  },
+  "steps": [
+    { "do": "setPrivate", "device": "alice-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "setPrivate", "device": "bob-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "deliver" },
+    { "do": "setPrivate", "device": "bob-new", "on": true },
+    { "do": "deliver" },
+    { "expect": { "alice-mac": { "keys": { "bob-new": "pending" }, "newKey": true } } },
+    { "do": "reject", "device": "alice-mac", "keys": ["bob-new"] },
+    { "expect": {
+        "alice-mac": { "state": "ready", "newKey": false, "keys": { "bob-new": "rejected" },
+                       "outbox": [ { "handshake": { "wantsReply": false, "acceptedKeys": ["bob-mac"] } } ] }
+    } },
+    { "do": "deliver" },
+    { "expect": {
+        "bob-new": { "state": "unconfirmed", "hasOurKey": false },
+        "bob-mac": { "state": "ready", "hasOurKey": true }
+    } },
+    { "do": "send", "device": "alice-mac", "text": "only for bob-mac" },
+    { "do": "deliver" },
+    { "expect": {
+        "bob-mac": { "messages": [ { "from": "alice-mac", "text": "only for bob-mac", "warnings": [] } ] },
+        "bob-new": { "messages": [] }
+    } }
+  ]
+}

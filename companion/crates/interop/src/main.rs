@@ -8,9 +8,9 @@ use std::{
 };
 
 use duhcord_private_protocol::{
-    dense_text, handshake_content, key_code, kind, open, open_file, padme, safety_number, seal,
-    seal_file, ClientClass, Features, FileKind, Handshake, Host, Kind, PrivateFile, PrivateKey,
-    PublicKey, NOTICE, PREFIX,
+    dense_text, frame_content, handshake_content, handshake_frame, key_code, key_id, kind, open,
+    open_file, padme, safety_number, seal, seal_file, ClientClass, Features, FileKind, Handshake,
+    Host, Kind, PrivateFile, PrivateKey, PublicKey, NOTICE,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
@@ -34,6 +34,7 @@ struct Vectors {
     padme: Vec<[usize; 2]>,
     safety_numbers: Vec<SafetyNumberVector>,
     key_codes: Vec<KeyCodeVector>,
+    rejects: Vec<RejectVector>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -60,10 +61,80 @@ struct FileBlobVector {
 struct HandshakeVector {
     key: String,
     wants_reply: bool,
-    class: u8,
+    client: u8,
     host: u8,
     features: u16,
+    accepted_key_ids: Vec<String>,
     content: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RejectVector {
+    why: String,
+    content: String,
+}
+
+/// One fixed handshake: key, wantsReply, client, host, features, accepted keys (by name).
+type FixedHandshake = (&'static str, bool, u8, u8, u16, &'static [&'static str]);
+
+/// The fixed handshakes (spec/VECTORS.md).
+const FIXED_HANDSHAKES: [FixedHandshake; 4] = [
+    ("alice", true, 0, 0, Features::DUHCORD.0, &[]),
+    ("bob", false, 0, 0, Features::DUHCORD.0, &["alice"]),
+    ("carol", true, 1, 4, Features::COMPANION_V1.0, &[]),
+    (
+        "dave",
+        false,
+        1,
+        255,
+        Features::COMPANION_V1.0,
+        &["alice", "bob", "carol"],
+    ),
+];
+
+/// The required rejects, in order (spec/VECTORS.md): each must read as plain.
+const REJECT_REASONS: [&str; 8] = [
+    "handshake one byte too long",
+    "handshake one byte too short",
+    "handshake with n = 9",
+    "handshake with flags 0x02",
+    "handshake with client 2",
+    "message with n = 0",
+    "v2 message (type 0x21, dhc2: prefix)",
+    "v3 message with type byte 0x21",
+];
+
+fn vector_handshake(
+    name: &str,
+    wants_reply: bool,
+    client: u8,
+    host: u8,
+    features: u16,
+    accepted: &[&str],
+) -> Option<Handshake> {
+    // Sorted and unique, as they travel in the frame.
+    let mut accepted_key_ids: Vec<_> = accepted
+        .iter()
+        .map(|name| key_id(&vector_private_key(name).public_key()))
+        .collect();
+    accepted_key_ids.sort_unstable();
+    accepted_key_ids.dedup();
+    Some(Handshake {
+        key: vector_private_key(name).public_key(),
+        wants_reply,
+        class: ClientClass::from_byte(client)?,
+        host: Host(host),
+        features: Features(features),
+        accepted_key_ids,
+    })
+}
+
+fn sorted_hex_ids(handshake: &Handshake) -> Vec<String> {
+    let mut ids: Vec<_> = handshake.accepted_key_ids.iter().map(hex::encode).collect();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -205,36 +276,23 @@ fn generate_vectors() -> Result<Vectors, String> {
         plain: hex::encode(&file_blob_plain),
     }];
 
-    let handshakes = [
-        ("alice", true, 0, 0, Features::DUHCORD.0),
-        ("bob", false, 0, 0, Features::DUHCORD.0),
-        ("carol", true, 1, 4, Features::COMPANION_V1.0),
-        ("dave", false, 1, 255, Features::COMPANION_V1.0),
-    ]
-    .into_iter()
-    .map(|(name, wants_reply, class, host, features)| {
-        let key = private_keys[name].public_key();
-        let content = if class == ClientClass::Duhcord as u8 {
-            handshake_content(&Handshake {
-                key,
+    let handshakes = FIXED_HANDSHAKES
+        .iter()
+        .map(|&(name, wants_reply, client, host, features, accepted)| {
+            let handshake =
+                vector_handshake(name, wants_reply, client, host, features, accepted)
+                    .ok_or_else(|| format!("fixed handshake {name} has an invalid client"))?;
+            Ok(HandshakeVector {
+                key: name.to_owned(),
                 wants_reply,
-                class: ClientClass::Duhcord,
-                host: Host::Unknown,
-                features: Features::DUHCORD,
+                client,
+                host,
+                features,
+                accepted_key_ids: sorted_hex_ids(&handshake),
+                content: handshake_content(&handshake),
             })
-        } else {
-            companion_handshake_content(key, wants_reply, host, features)
-        };
-        HandshakeVector {
-            key: name.to_owned(),
-            wants_reply,
-            class,
-            host,
-            features,
-            content,
-        }
-    })
-    .collect();
+        })
+        .collect::<Result<Vec<_>, String>>()?;
 
     let dense_inputs = dense_inputs();
     let dense_text = dense_inputs
@@ -315,14 +373,33 @@ fn generate_vectors() -> Result<Vectors, String> {
                 &[(alice_public, ClientClass::Duhcord)],
             ),
         },
+        SafetyNumberVector {
+            a: vec!["bob".to_owned()],
+            b: vec!["alice".to_owned()],
+            a_companion: Vec::new(),
+            b_companion: Vec::new(),
+            number: safety_number(
+                &[(bob_public, ClientClass::Duhcord)],
+                &[(alice_public, ClientClass::Duhcord)],
+            ),
+        },
     ];
     let key_codes = vec![KeyCodeVector {
         key: "alice".to_owned(),
         code: key_code(&alice_public),
     }];
 
+    let rejects = reject_contents(&short.content)?
+        .into_iter()
+        .zip(REJECT_REASONS)
+        .map(|(content, why)| RejectVector {
+            why: why.to_owned(),
+            content,
+        })
+        .collect();
+
     Ok(Vectors {
-        version: 1,
+        version: 3,
         implementation: "rust".to_owned(),
         channel_id: CHANNEL_ID_TEXT.to_owned(),
         public_keys,
@@ -340,25 +417,47 @@ fn generate_vectors() -> Result<Vectors, String> {
         padme: padme_vectors.into_iter().collect(),
         safety_numbers,
         key_codes,
+        rejects,
     })
 }
 
-fn companion_handshake_content(
-    key: PublicKey,
-    wants_reply: bool,
-    host: u8,
-    features: u16,
-) -> String {
-    let mut frame = vec![
-        0x23,
-        u8::from(wants_reply),
-        ClientClass::Companion as u8,
-        host,
-        (features >> 8) as u8,
-        features as u8,
-    ];
-    frame.extend_from_slice(&key);
-    format!("{NOTICE}\n{PREFIX}{}", dense_text::encode(&frame))
+/// Builds the required rejects from the fixed bob handshake and the `short` message (spec/VECTORS.md).
+fn reject_contents(short_message: &str) -> Result<Vec<String>, String> {
+    let (name, wants_reply, client, host, features, accepted) = FIXED_HANDSHAKES[1];
+    let handshake = vector_handshake(name, wants_reply, client, host, features, accepted)
+        .ok_or("fixed handshake has an invalid client")?;
+    let base = handshake_frame(&handshake);
+    let mut too_long = base.clone();
+    too_long.push(0);
+    let too_short = base[..base.len() - 1].to_vec();
+    let mut nine = base[..39].to_vec();
+    nine.push(9);
+    nine.extend(std::iter::repeat_n(0u8, 36));
+    let mut bad_flags = base.clone();
+    bad_flags[1] = 0x02;
+    let mut bad_client = base;
+    bad_client[3] = 2;
+
+    let Kind::Encrypted(message) = kind(short_message) else {
+        return Err("the short message didn't parse".to_owned());
+    };
+    let mut no_recipients = message[..27].to_vec();
+    no_recipients[26] = 0;
+    no_recipients.extend_from_slice(&[0; 16]);
+    let mut v2_type = message;
+    v2_type[0] = 0x21;
+    let v2 = format!("{NOTICE}\ndhc2:{}", dense_text::encode(&v2_type));
+
+    Ok(vec![
+        frame_content(&too_long),
+        frame_content(&too_short),
+        frame_content(&nine),
+        frame_content(&bad_flags),
+        frame_content(&bad_client),
+        frame_content(&no_recipients),
+        v2,
+        frame_content(&v2_type),
+    ])
 }
 
 fn build_message(
@@ -457,7 +556,7 @@ fn check_path(path: &Path) -> Result<(), String> {
 
 fn check_vectors(vectors: &Vectors) -> Vec<String> {
     let mut failures = Vec::new();
-    if vectors.version != 1 {
+    if vectors.version != 3 {
         failures.push(format!("unsupported version {}", vectors.version));
     }
     if vectors.channel_id != CHANNEL_ID_TEXT {
@@ -671,83 +770,41 @@ fn check_vectors(vectors: &Vectors) -> Vec<String> {
         }
     }
 
-    if vectors.handshakes.len() != 4 {
-        failures.push(format!(
-            "expected 4 handshakes, found {}",
-            vectors.handshakes.len()
-        ));
-    }
     if vectors
         .handshakes
         .iter()
         .map(|item| item.key.as_str())
         .collect::<Vec<_>>()
-        != ["alice", "bob", "carol", "dave"]
+        != FIXED_HANDSHAKES.map(|fixed| fixed.0)
     {
         failures.push("handshake names or ordering differ from fixed vectors".to_owned());
     }
-    for handshake in &vectors.handshakes {
-        let Some(key) = private_keys.get(&handshake.key).map(PrivateKey::public_key) else {
-            failures.push(format!("handshake: unknown key {}", handshake.key));
+    for (vector, &(name, wants_reply, client, host, features, accepted)) in
+        vectors.handshakes.iter().zip(FIXED_HANDSHAKES.iter())
+    {
+        let Some(expected) = vector_handshake(name, wants_reply, client, host, features, accepted)
+        else {
+            failures.push(format!("handshake {name}: invalid fixed client"));
             continue;
         };
-        let expected_fields = match handshake.key.as_str() {
-            "alice" => (true, 0, 0, Features::DUHCORD.0),
-            "bob" => (false, 0, 0, Features::DUHCORD.0),
-            "carol" => (true, 1, 4, Features::COMPANION_V1.0),
-            "dave" => (false, 1, 255, Features::COMPANION_V1.0),
-            _ => continue,
-        };
         if (
-            handshake.wants_reply,
-            handshake.class,
-            handshake.host,
-            handshake.features,
-        ) != expected_fields
+            vector.wants_reply,
+            vector.client,
+            vector.host,
+            vector.features,
+        ) != (wants_reply, client, host, features)
+            || vector.accepted_key_ids != sorted_hex_ids(&expected)
         {
+            failures.push(format!("handshake {name}: fields differ from fixed vector"));
+        }
+        if handshake_content(&expected) != vector.content {
             failures.push(format!(
-                "handshake {}: fields differ from fixed vector",
-                handshake.key
+                "handshake {name}: content differs from our encoding of the same fields"
             ));
         }
-        let expected = if handshake.class == ClientClass::Duhcord as u8 {
-            handshake_content(&Handshake {
-                key,
-                wants_reply: handshake.wants_reply,
-                class: ClientClass::Duhcord,
-                host: Host::Unknown,
-                features: Features::DUHCORD,
-            })
-        } else {
-            companion_handshake_content(
-                key,
-                handshake.wants_reply,
-                handshake.host,
-                handshake.features,
-            )
-        };
-        if expected != handshake.content {
-            failures.push(format!(
-                "handshake {}: content differs from generated handshake",
-                handshake.key
-            ));
-        }
-        match kind(&handshake.content) {
-            Kind::Handshake(decoded)
-                if decoded.key == key
-                    && decoded.wants_reply == handshake.wants_reply
-                    && decoded.class as u8 == handshake.class
-                    && decoded.host as u8
-                        == if handshake.host == 255 {
-                            0
-                        } else {
-                            handshake.host
-                        }
-                    && decoded.features.0 == handshake.features => {}
-            _ => failures.push(format!(
-                "handshake {}: decoded fields differ",
-                handshake.key
-            )),
+        match kind(&vector.content) {
+            Kind::Handshake(decoded) if decoded == expected => {}
+            _ => failures.push(format!("handshake {name}: decoded fields differ")),
         }
     }
 
@@ -797,9 +854,9 @@ fn check_vectors(vectors: &Vectors) -> Vec<String> {
         failures.push("padme vectors differ from protocol expectations".to_owned());
     }
 
-    if vectors.safety_numbers.len() != 5 {
+    if vectors.safety_numbers.len() != 6 {
         failures.push(format!(
-            "expected 5 safetyNumbers vectors, found {}",
+            "expected 6 safetyNumbers vectors, found {}",
             vectors.safety_numbers.len()
         ));
     }
@@ -832,6 +889,7 @@ fn check_vectors(vectors: &Vectors) -> Vec<String> {
             vec!["dave"],
         ),
         (vec!["alice"], vec!["alice"], vec!["alice"], vec![]),
+        (vec!["bob"], vec!["alice"], vec![], vec![]),
     ];
     if safety_inputs != expected_safety_inputs {
         failures.push("safetyNumbers inputs or ordering differ from fixed vectors".to_owned());
@@ -876,6 +934,15 @@ fn check_vectors(vectors: &Vectors) -> Vec<String> {
         }
     }
 
+    if let (Some(first), Some(swapped)) = (
+        vectors.safety_numbers.first(),
+        vectors.safety_numbers.get(5),
+    ) {
+        if first.number != swapped.number {
+            failures.push("safetyNumbers: swapping the sides changed the number".to_owned());
+        }
+    }
+
     if vectors.key_codes.len() != 1 {
         failures.push(format!(
             "expected 1 keyCode vector, found {}",
@@ -891,6 +958,21 @@ fn check_vectors(vectors: &Vectors) -> Vec<String> {
         };
         if key_code(&key) != vector.code {
             failures.push(format!("keyCodes[{index}]: code differs"));
+        }
+    }
+
+    if vectors
+        .rejects
+        .iter()
+        .map(|item| item.why.as_str())
+        .collect::<Vec<_>>()
+        != REJECT_REASONS
+    {
+        failures.push("rejects differ from the required list".to_owned());
+    }
+    for reject in &vectors.rejects {
+        if kind(&reject.content) != Kind::Plain {
+            failures.push(format!("rejects: \"{}\" didn't read as plain", reject.why));
         }
     }
 
@@ -1010,10 +1092,5 @@ mod tests {
         let rust_vectors =
             crate_dir.join("../../../Tests/DuhcordCoreTests/Fixtures/rust-vectors.json");
         check_path(&rust_vectors).unwrap_or_else(|error| panic!("{error}"));
-
-        let swift_vectors = crate_dir.join("../../interop/swift-vectors.json");
-        if swift_vectors.exists() {
-            check_path(&swift_vectors).unwrap_or_else(|error| panic!("{error}"));
-        }
     }
 }

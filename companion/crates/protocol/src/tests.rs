@@ -5,10 +5,12 @@ use std::io::Write;
 use crate::{
     dense_text,
     file::{open_file, padme, seal_file, FileKind, PrivateFile},
-    handshake::{handshake_content, kind, ClientClass, Features, Handshake, Host, Kind},
+    handshake::{
+        handshake_content, handshake_frame, kind, ClientClass, Features, Handshake, Host, Kind,
+    },
     message::{open, seal, seal_test_body, SealError},
-    safety::{key_code, safety_number},
-    PrivateKey, MAX_PLAINTEXT,
+    safety::{key_code, key_id, safety_number},
+    PrivateKey, MAX_PLAINTEXT, NOTICE, PREFIX,
 };
 
 const CHANNEL_ID: u64 = 1_100_000_000_000_000_001;
@@ -170,52 +172,147 @@ fn decompression_bomb_is_rejected() {
     .is_none());
 }
 
+fn content(frame: &[u8]) -> String {
+    format!("{NOTICE}\n{PREFIX}{}", dense_text::encode(frame))
+}
+
 #[test]
-fn handshake_and_malformed_frames_follow_wire_lengths() {
+fn handshakes_round_trip_with_receipts_and_unknown_hosts() {
     let key = [7; 32];
-    let handshake = Handshake {
+    let duhcord = Handshake {
         key,
         wants_reply: true,
         class: ClientClass::Duhcord,
-        host: Host::Unknown,
+        host: Host::UNKNOWN,
         features: Features::DUHCORD,
+        accepted_key_ids: vec![],
     };
-    assert!(matches!(
-        kind(&handshake_content(&handshake)),
-        Kind::Handshake(decoded) if decoded.key == key && decoded.wants_reply
-    ));
-    let companion = Handshake {
-        class: ClientClass::Companion,
-        host: Host::Vencord,
-        features: Features::COMPANION_V1,
-        ..handshake
-    };
-    assert!(matches!(
-        kind(&handshake_content(&companion)),
-        Kind::Handshake(decoded) if decoded == companion
-    ));
-    let mut unknown_host = vec![0x23, 0, 1, 0xff, 0, 3];
-    unknown_host.extend_from_slice(&key);
-    assert!(matches!(
-        kind(&format!("dhc2:{}", dense_text::encode(&unknown_host))),
-        Kind::Handshake(decoded) if decoded.host == Host::Unknown
-    ));
-
-    for size in [33, 35] {
-        let mut frame = vec![0x22, 0];
-        frame.resize(size, 0);
-        assert_eq!(
-            kind(&format!("dhc2:{}", dense_text::encode(&frame))),
-            Kind::Plain
-        );
-    }
-    let mut invalid_companion = vec![0x23, 0, 0, Host::Unknown as u8, 0, 3];
-    invalid_companion.extend_from_slice(&key);
     assert_eq!(
-        kind(&format!("dhc2:{}", dense_text::encode(&invalid_companion))),
-        Kind::Plain
+        kind(&handshake_content(&duhcord)),
+        Kind::Handshake(duhcord.clone())
     );
-    assert_eq!(kind("dhc2:!"), Kind::Plain);
+    let companion = Handshake {
+        wants_reply: false,
+        class: ClientClass::Companion,
+        host: Host(255),
+        features: Features::COMPANION_V1,
+        // Out of order and duplicated on purpose: the frame carries them sorted and unique.
+        accepted_key_ids: vec![[9, 9, 9, 9], [1, 2, 3, 4], [9, 9, 9, 9]],
+        ..duhcord.clone()
+    };
+    let frame = handshake_frame(&companion);
+    assert_eq!(frame.len(), 40 + 4 * 2);
+    assert_eq!(&frame[..7], &[0x32, 0, 3, 1, 255, 0, 3]);
+    let Kind::Handshake(decoded) = kind(&handshake_content(&companion)) else {
+        panic!("companion handshake didn't parse");
+    };
+    assert_eq!(decoded.host, Host(255));
+    assert_eq!(decoded.accepted_key_ids, vec![[1, 2, 3, 4], [9, 9, 9, 9]]);
+}
+
+#[test]
+fn newer_versions_are_recognised_but_not_parsed() {
+    let mut frame = handshake_frame(&Handshake {
+        key: [7; 32],
+        wants_reply: false,
+        class: ClientClass::Duhcord,
+        host: Host::UNKNOWN,
+        features: Features::DUHCORD,
+        accepted_key_ids: vec![],
+    });
+    frame[2] = 4;
+    frame.extend_from_slice(&[0xaa; 5]); // a later version may be longer
+    assert_eq!(kind(&content(&frame)), Kind::NewerHandshake { version: 4 });
+    frame[2] = 2;
+    assert_eq!(kind(&content(&frame)), Kind::Plain);
+}
+
+#[test]
+fn malformed_frames_read_as_plain() {
+    let base = handshake_frame(&Handshake {
+        key: [7; 32],
+        wants_reply: true,
+        class: ClientClass::Duhcord,
+        host: Host::UNKNOWN,
+        features: Features::DUHCORD,
+        accepted_key_ids: vec![[1, 1, 1, 1]],
+    });
+    let mut too_long = base.clone();
+    too_long.push(0);
+    let too_short = base[..base.len() - 1].to_vec();
+    let mut nine = base[..39].to_vec();
+    nine.push(9);
+    nine.extend(std::iter::repeat_n(0u8, 36));
+    let mut bad_flags = base.clone();
+    bad_flags[1] = 0x02;
+    let mut bad_client = base.clone();
+    bad_client[3] = 2;
+    for (why, frame) in [
+        ("one byte too long", too_long),
+        ("one byte too short", too_short),
+        ("n = 9", nine),
+        ("flags 0x02", bad_flags),
+        ("client 2", bad_client),
+    ] {
+        assert_eq!(kind(&content(&frame)), Kind::Plain, "{why}");
+    }
+
+    let sender = PrivateKey::from_bytes([1; 32]);
+    let recipient = PrivateKey::from_bytes([2; 32]);
+    let sealed = seal(
+        "hi",
+        &[],
+        CHANNEL_ID,
+        &sender,
+        &[recipient.public_key()],
+        1_700_000_000,
+    )
+    .unwrap();
+    let Kind::Encrypted(mut message) = kind(&sealed) else {
+        panic!("sealed message didn't parse");
+    };
+    let mut no_recipients = message[..27].to_vec();
+    no_recipients[26] = 0;
+    no_recipients.extend_from_slice(&[0; 16]);
+    assert_eq!(kind(&content(&no_recipients)), Kind::Plain, "n = 0");
+    message[0] = 0x21;
+    assert_eq!(kind(&content(&message)), Kind::Plain, "v2 type byte");
+    assert_eq!(
+        kind(&format!("dhc2:{}", dense_text::encode(&message))),
+        Kind::Plain,
+        "v2 prefix"
+    );
+    assert_eq!(kind("dhc3:!"), Kind::Plain);
+}
+
+#[test]
+fn opened_messages_report_their_recipients() {
+    let sender = PrivateKey::from_bytes([1; 32]);
+    let recipient = PrivateKey::from_bytes([2; 32]);
+    let sealed = seal(
+        "hi",
+        &[],
+        CHANNEL_ID,
+        &sender,
+        &[recipient.public_key(), sender.public_key()],
+        1_700_000_000,
+    )
+    .unwrap();
+    let Kind::Encrypted(payload) = kind(&sealed) else {
+        panic!("sealed message didn't parse");
+    };
+    let opened = open(
+        &payload,
+        CHANNEL_ID,
+        &recipient,
+        &[sender.public_key()],
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        opened.recipient_key_ids,
+        vec![key_id(&recipient.public_key())]
+    );
 }
 
 #[test]

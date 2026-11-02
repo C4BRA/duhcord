@@ -14,7 +14,7 @@ import { type Adapter, DuhcordBridge, isPrivateContent, type SocketLike, type St
 import { bridgeFilePath, parseBridgeFile } from "./bridgeFile.ts";
 import { toWire } from "./plugin.ts";
 
-const PRIVATE = "-# encrypted messaging by C4BRA/duhcord 🤫\ndhc2:㐀㐁㐂";
+const PRIVATE = "-# encrypted messaging by C4BRA/duhcord 🤫\ndhc3:㐀㐁㐂";
 const ME = "111111111111111111";
 const PEER = "222222222222222222";
 const CHANNEL = "333333333333333333";
@@ -98,11 +98,11 @@ async function readyBridge(overrides: Partial<Adapter> = {}) {
 
 test("private content is recognised only by its last line", () => {
   assert.ok(isPrivateContent(PRIVATE));
-  assert.ok(isPrivateContent("dhc2:㐀"));
-  assert.ok(!isPrivateContent("dhc2:"));
-  assert.ok(!isPrivateContent("dhc2:㐀\nhello"));
-  assert.ok(!isPrivateContent("hello dhc2:㐀"));
-  assert.ok(!isPrivateContent("x".repeat(1995) + "\ndhc2:㐀"));
+  assert.ok(isPrivateContent("dhc3:㐀"));
+  assert.ok(!isPrivateContent("dhc3:"));
+  assert.ok(!isPrivateContent("dhc3:㐀\nhello"));
+  assert.ok(!isPrivateContent("hello dhc3:㐀"));
+  assert.ok(!isPrivateContent("x".repeat(1995) + "\ndhc3:㐀"));
   assert.ok(!isPrivateContent(42));
 });
 
@@ -211,6 +211,24 @@ test("denied pairing forgets the token and stops", async () => {
   await tick();
   assert.equal(fake.tokens.get(ME), null);
   assert.equal(bridge._socket, null);
+});
+
+test("a bridge version mismatch says which side to update and stops retrying", async () => {
+  for (const [code, side] of [["plugin-outdated", "plugin"], ["companion-outdated", "companion"]] as const) {
+    const outdated: string[] = [];
+    const fake = fakeAdapter({ onOutdated: (which) => void outdated.push(which) });
+    const bridge = new DuhcordBridge(fake.adapter);
+    bridge.start(ME);
+    await tick();
+    fake.sockets[0].open();
+    await tick();
+    fake.sockets[0].receive({ t: "error", code });
+    await tick();
+    assert.deepEqual(outdated, [side]);
+    assert.equal(bridge._socket, null);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(fake.sockets.length, 1, "no reconnect attempts");
+  }
 });
 
 test("toWire accepts raw API messages and store records", () => {

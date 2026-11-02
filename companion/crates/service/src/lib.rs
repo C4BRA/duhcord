@@ -19,8 +19,8 @@ use duhcord_companion_bridge::{
     Bridge, BridgeConfig, BridgeError, BridgeEvent, BridgeHandle, CompanionFrame, ConnectionId,
 };
 use duhcord_companion_engine::{
-    Action, ChannelId, DmInfo, Engine, EngineError, MessageId, PeerClass, State, Status, Trust,
-    UserId, UserInfo,
+    AcceptError, Action, ChannelId, DmInfo, Engine, EngineError, MessageId, PeerClass, Status,
+    Trust, UserId, UserInfo,
 };
 use duhcord_companion_store::{PairingRecord, Store, StoreError};
 use duhcord_private_protocol::{self as protocol, FileKind, Host, Kind, PublicKey};
@@ -176,6 +176,13 @@ pub struct ChatDto {
     pub pending_keys: Vec<KeyDto>,
     pub safety_number: Option<String>,
     pub my_key_code: String,
+    /// Our side of the safety number: this device and our approved devices (spec §8).
+    pub our_keys: Vec<KeyDto>,
+    /// Their side: the keys of theirs that count.
+    pub their_keys: Vec<KeyDto>,
+    pub can_send: bool,
+    pub has_our_key: bool,
+    pub companion_excluded: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -184,6 +191,7 @@ pub struct OwnDeviceDto {
     pub key: String,
     pub key_code: String,
     pub trust: &'static str,
+    pub class: &'static str,
     pub added: u64,
 }
 
@@ -710,7 +718,7 @@ impl Service {
                     id: view.id.to_string(),
                     from_me: view.from_me,
                     text: view.text.clone(),
-                    warnings: view.warnings.clone(),
+                    warnings: view.warnings.iter().map(|warning| warning.text()).collect(),
                     trusted: view.trusted,
                     images: if view.trusted {
                         view.images
@@ -724,11 +732,37 @@ impl Service {
                     timestamp_ms: (view.id >> 22) + DISCORD_EPOCH_MS,
                 })
                 .collect();
+            let status = engine.status(channel);
+            let peer_id = dm.peer.id;
+            let class_of = |class: duhcord_private_protocol::ClientClass| match class {
+                duhcord_private_protocol::ClientClass::Duhcord => "duhcord",
+                duhcord_private_protocol::ClientClass::Companion => "companion",
+            };
+            let our_keys = engine
+                .our_side()
+                .into_iter()
+                .map(|(key, class)| KeyDto {
+                    key: hex::encode(key),
+                    key_code: protocol::key_code(&key),
+                    class: class_of(class),
+                    trust: "accepted",
+                })
+                .collect();
+            let their_keys = keys
+                .iter()
+                .filter(|key| engine.counts(peer_id, key))
+                .map(key_dto)
+                .collect();
             Ok(ChatDto {
+                our_keys,
+                their_keys,
+                can_send: status.can_send(),
+                has_our_key: engine.has_our_key(channel),
+                companion_excluded: engine.companion_excluded(channel),
                 channel_id: channel.to_string(),
                 peer: person(&dm.peer),
                 me: person(&dm.me),
-                status: status_dto(engine.status(channel)),
+                status: status_dto(status),
                 private: engine.directory().private_channels.contains(&channel),
                 messages,
                 accepted_keys: keys
@@ -781,12 +815,32 @@ impl Service {
             if engine.dm(channel).is_none() {
                 return Err(ServiceError::NoChat);
             }
-            if enabled {
-                Ok(engine.agree(channel))
-            } else {
-                engine.set_private(channel, false);
-                Ok(vec![Action::StatusChanged { channel }])
+            Ok(engine.set_private(channel, enabled))
+        })
+    }
+
+    /// "Re-send my key" (spec §3 rule 4).
+    pub fn resend_key(&self, user_id: UserId, channel: ChannelId) -> Result<(), ServiceError> {
+        self.write(user_id, channel, |engine| {
+            if engine.dm(channel).is_none() {
+                return Err(ServiceError::NoChat);
             }
+            Ok(engine.resend_key(channel))
+        })
+    }
+
+    /// Keeps this person's Companion keys out of the chat (spec §6), or lets them back in.
+    pub fn set_companion_excluded(
+        &self,
+        user_id: UserId,
+        channel: ChannelId,
+        excluded: bool,
+    ) -> Result<(), ServiceError> {
+        self.write(user_id, channel, |engine| {
+            if engine.dm(channel).is_none() {
+                return Err(ServiceError::NoChat);
+            }
+            Ok(engine.set_companion_excluded(channel, excluded))
         })
     }
 
@@ -812,13 +866,13 @@ impl Service {
     ) -> Result<(), ServiceError> {
         let keys = parse_keys(keys)?;
         self.write(user_id, channel, |engine| {
-            if engine.accept_keys(channel, &keys, compared) {
-                Ok(vec![Action::StatusChanged { channel }])
-            } else if compared.is_some() {
-                Err(ServiceError::Mismatch)
-            } else {
-                Err(ServiceError::BadKey)
-            }
+            engine
+                .accept_keys(channel, &keys, compared)
+                .map_err(|error| match error {
+                    AcceptError::Mismatch => ServiceError::Mismatch,
+                    AcceptError::NoChat => ServiceError::NoChat,
+                    AcceptError::NothingPending => ServiceError::BadKey,
+                })
         })
     }
 
@@ -830,8 +884,7 @@ impl Service {
     ) -> Result<(), ServiceError> {
         let keys = parse_keys(keys)?;
         self.write(user_id, channel, |engine| {
-            engine.reject_keys(channel, &keys);
-            Ok(vec![Action::StatusChanged { channel }])
+            Ok(engine.reject_keys(channel, &keys))
         })
     }
 
@@ -849,13 +902,14 @@ impl Service {
     pub fn own_devices(&self, user_id: UserId) -> Result<Vec<OwnDeviceDto>, ServiceError> {
         self.read(user_id, |engine| {
             Ok(engine
-                .own_macs()
+                .devices()
                 .iter()
-                .map(|mac| OwnDeviceDto {
-                    key: hex::encode(mac.key),
-                    key_code: protocol::key_code(&mac.key),
-                    trust: trust_name(mac.trust),
-                    added: mac.added,
+                .map(|device| OwnDeviceDto {
+                    key: hex::encode(device.key),
+                    key_code: protocol::key_code(&device.key),
+                    trust: trust_name(device.trust),
+                    class: class_name(device.class),
+                    added: device.added,
                 })
                 .collect())
         })
@@ -873,11 +927,14 @@ impl Service {
             let Some(Account::Open(engine)) = inner.accounts.get_mut(&user_id) else {
                 return Err(ServiceError::NoAccount(user_id));
             };
-            let changed = if accept {
-                engine.accept_own_mac(key)
-            } else {
-                engine.reject_own_mac(key)
-            };
+            let changed = engine.set_device(
+                key,
+                if accept {
+                    Trust::Accepted
+                } else {
+                    Trust::Rejected
+                },
+            );
             if !changed {
                 return Err(ServiceError::BadKey);
             }
@@ -1179,11 +1236,12 @@ fn parse_keys(keys: &[String]) -> Result<Vec<PublicKey>, ServiceError> {
 
 fn host_from_name(host: &str) -> Host {
     match host {
-        "vencord" => Host::Vencord,
-        "vesktop" => Host::Vesktop,
-        "replugged" => Host::Replugged,
-        "betterdiscord" => Host::BetterDiscord,
-        _ => Host::Unknown,
+        "vencord" => Host::VENCORD,
+        "vesktop" => Host::VESKTOP,
+        "replugged" => Host::REPLUGGED,
+        "betterdiscord" => Host::BETTERDISCORD,
+        "dorion" => Host::DORION,
+        _ => Host::UNKNOWN,
     }
 }
 
@@ -1198,13 +1256,7 @@ fn person(user: &UserInfo) -> PersonDto {
 
 fn status_dto(status: Status) -> StatusDto {
     StatusDto {
-        state: match status.state {
-            State::Off => "off",
-            State::Request => "request",
-            State::Waiting => "waiting",
-            State::Ready => "ready",
-            State::Locked => "locked",
-        },
+        state: status.state.as_str(),
         verified: status.verified,
         new_key: status.new_key,
         peer_class: status.peer_class.map(class_name),

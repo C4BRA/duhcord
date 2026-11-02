@@ -1,0 +1,32 @@
+{
+  "name": "replay-and-delay",
+  "description": "Discord posts a copy of a private message (marked as a copy), and delivers another eleven minutes after it was written (marked as written earlier).",
+  "devices": {
+    "alice-mac": { "person": "alice", "client": "duhcord" },
+    "bob-mac": { "person": "bob", "client": "duhcord" }
+  },
+  "steps": [
+    { "do": "setPrivate", "device": "alice-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "setPrivate", "device": "bob-mac", "on": true },
+    { "do": "deliver" },
+    { "do": "deliver" },
+    { "do": "send", "device": "alice-mac", "text": "once" },
+    { "do": "deliver" },
+    { "do": "replay", "index": -1 },
+    { "expect": {
+        "bob-mac": { "messages": [ { "from": "alice-mac", "text": "once", "warnings": [] }, { "from": "alice-mac", "text": "once", "warnings": ["copy"] } ] },
+        "alice-mac": { "messages": [ { "from": "alice-mac", "text": "once", "warnings": [] }, { "from": "alice-mac", "text": "once", "warnings": ["copy"] } ] }
+    } },
+    { "do": "send", "device": "bob-mac", "text": "late" },
+    { "do": "delay", "seconds": 660 },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "messages": [
+            { "from": "alice-mac", "text": "once", "warnings": [] },
+            { "from": "alice-mac", "text": "once", "warnings": ["copy"] },
+            { "from": "bob-mac", "text": "late", "warnings": ["written-earlier"] }
+        ] }
+    } }
+  ]
+}

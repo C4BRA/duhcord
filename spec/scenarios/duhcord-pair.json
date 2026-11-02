@@ -1,0 +1,45 @@
+{
+  "name": "duhcord-pair",
+  "description": "Two Duhcord users meet: request, agree, both ready; first keys trusted on first use; messages both ways; same safety number.",
+  "devices": {
+    "alice-mac": { "person": "alice", "client": "duhcord" },
+    "bob-mac": { "person": "bob", "client": "duhcord" }
+  },
+  "steps": [
+    { "do": "setPrivate", "device": "alice-mac", "on": true },
+    { "expect": {
+        "alice-mac": { "state": "waiting", "canSend": false, "outbox": [ { "handshake": { "wantsReply": true, "acceptedKeys": [] } } ] },
+        "bob-mac": { "state": "off" }
+    } },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "state": "waiting" },
+        "bob-mac": { "state": "request", "keys": { "alice-mac": "accepted" } }
+    } },
+    { "do": "setPrivate", "device": "bob-mac", "on": true },
+    { "expect": {
+        "bob-mac": { "state": "unconfirmed", "canSend": false, "outbox": [ { "handshake": { "wantsReply": false, "acceptedKeys": ["alice-mac"] } } ] }
+    } },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "state": "ready", "keys": { "bob-mac": "accepted" }, "hasOurKey": true,
+                       "outbox": [ { "handshake": { "wantsReply": false, "acceptedKeys": ["bob-mac"] } } ] },
+        "bob-mac": { "state": "unconfirmed", "hasOurKey": false }
+    } },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "state": "ready", "canSend": true, "verified": false, "newKey": false, "safetyNumber": { "same-as": "bob-mac" } },
+        "bob-mac": { "state": "ready", "canSend": true, "hasOurKey": true, "outbox": [] }
+    } },
+    { "do": "send", "device": "alice-mac", "text": "hi" },
+    { "do": "deliver" },
+    { "do": "send", "device": "bob-mac", "text": "hey back" },
+    { "do": "deliver" },
+    { "expect": {
+        "alice-mac": { "messages": [ { "from": "alice-mac", "text": "hi", "warnings": [] }, { "from": "bob-mac", "text": "hey back", "warnings": [] } ] },
+        "bob-mac": { "messages": [ { "from": "alice-mac", "text": "hi", "warnings": [] }, { "from": "bob-mac", "text": "hey back", "warnings": [] } ] }
+    } },
+    { "do": "markVerified", "device": "alice-mac" },
+    { "expect": { "alice-mac": { "verified": true }, "bob-mac": { "verified": false } } }
+  ]
+}

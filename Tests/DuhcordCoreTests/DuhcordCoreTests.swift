@@ -1148,10 +1148,11 @@ final class PrivateMessagingTests: XCTestCase {
         let key = Curve25519.KeyAgreement.PrivateKey().publicKey.rawRepresentation
         let content = PrivateMessaging.handshake(publicKey: key, wantsReply: true)
         XCTAssertTrue(content.hasPrefix("-# encrypted messaging by C4BRA/duhcord 🤫\n"))
-        XCTAssertEqual(PrivateMessaging.kind(of: content), .handshake(key: key, wantsReply: true))
+        XCTAssertEqual(PrivateMessaging.kind(of: content), .handshake(PrivateHandshake(
+            key: key, wantsReply: true, client: .duhcord, host: 0, features: .duhcord, acceptedKeyIDs: [])))
         XCTAssertLessThan(content.utf16.count, 80)
         XCTAssertEqual(PrivateMessaging.kind(of: "hello"), .plain)
-        XCTAssertEqual(PrivateMessaging.kind(of: "dhc2:not dense text"), .plain)
+        XCTAssertEqual(PrivateMessaging.kind(of: "dhc3:not dense text"), .plain)
     }
 
     func testDenseTextRoundTripsAndCountsOneUnitPerCharacter() {

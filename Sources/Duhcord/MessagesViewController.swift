@@ -964,7 +964,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         if let reply = message.referencedMessage {
             switch PrivateMessaging.kind(of: reply.content) {
             case .plain: break
-            case .handshake, .companionHandshake: shown.referencedMessage?.content = "🔒 Offer to chat privately"
+            case .handshake, .newerHandshake: shown.referencedMessage?.content = "🔒 Offer to chat privately"
             case .encrypted:
                 let text = isPrivate ? privateChat?.plaintext(content: reply.content, id: reply.id, authorID: reply.author.id,
                                                               channelID: message.channelId) : nil
@@ -974,7 +974,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         switch PrivateMessaging.kind(of: message.content) {
         case .plain:
             return shown
-        case .handshake, .companionHandshake:
+        case .handshake, .newerHandshake:
             shown.content = message.author.id == store.me?.id ? "🔒 *You offered to chat privately.*" : "🔒 *Wants to chat privately.*"
         case .encrypted:
             // Its attachments are the encrypted images: shown decrypted below the text in Private, never as files.
@@ -1003,7 +1003,7 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
         findOlderPrivateMessages()
     }
 
-    private enum BarAction { case none, verify, accept, reviewKey, settings, retryKeychain, allowStandard }
+    private enum BarAction { case none, verify, accept, reviewKey, settings, retryKeychain, allowStandard, resendKey }
     private var barAction = BarAction.none
     private var secondaryBarAction = BarAction.none
 
@@ -1045,8 +1045,23 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                                       tone: .warning, action: "Review…", then: .reviewKey)
                     }
                 } else {
-                    setPrivateBar("Waiting for \(name) to set up private chat. They need Duhcord to read private messages.", tone: .info)
+                    setPrivateBar("Waiting for \(name) to set up private chat. They need Duhcord (or the Duhcord Private "
+                                  + "Companion) to read private messages.", tone: .info, action: "Re-send My Key",
+                                  then: .resendKey)
                 }
+            case .unconfirmed(let newKey):
+                if newKey {
+                    setPrivateBar("\(name) has a new key waiting, and hasn't accepted your key yet.", tone: .warning,
+                                  action: "Review…", secondaryAction: "Re-send My Key", then: .reviewKey,
+                                  thenSecondary: .resendKey)
+                } else {
+                    setPrivateBar("You have \(name)'s key, but they haven't accepted yours yet, so they can't read you. "
+                                  + "Sending is off until they do.", tone: .warning, action: "Re-send My Key",
+                                  then: .resendKey)
+                }
+            case .outdated:
+                setPrivateBar("\(name) uses a newer version of private messaging. Update Duhcord to keep chatting privately.",
+                              tone: .warning)
             case .ready(let verified, let newKey):
                 if newKey {
                     if privateChat.newKeysIncludeCompanion(in: channelID) {
@@ -1107,6 +1122,8 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
             privateChat.retryKeychain()
         case .allowStandard:
             privateChat.useStandardWhileLocked(in: channelID)
+        case .resendKey:
+            privateChat.resendKey(in: channelID)
         case .verify:
             guard let number = privateChat.safetyNumber(for: channelID), let window = view.window else { return }
             let name = privateChat.peer(in: channelID)?.displayName ?? "them"
@@ -1114,10 +1131,18 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
                 || privateChat.hasDuhcordAndCompanionKeys(in: channelID)
             let alert = NSAlert()
             alert.messageText = "Safety number with \(name)"
+            let codes = privateChat.keyCodes(for: channelID)
+            func label(_ client: PeerClient) -> String { client == .companion ? "Companion" : "Duhcord" }
+            let ours = codes.ours.enumerated().map { index, item in
+                "\(index == 0 ? "This Mac" : "Your device") (\(label(item.client))): \(item.code)"
+            }
+            let theirs = codes.theirs.map { "\(label($0.client)): \($0.code)" }
             alert.informativeText = number + "\n\nCompare this with \(name)'s, in person or in a voice call (Duhcord's calls are end-to-end "
                 + "encrypted). It covers every \(hasCompanion ? "device" : "Mac") on both sides: if the numbers match, only your Macs and their "
                 + (hasCompanion ? "devices" : "Macs") + " can read your "
                 + "private messages. If either of you adds or removes a \(hasCompanion ? "device" : "Mac"), compare again."
+                + "\n\nIf the numbers differ, compare these key codes to see which key doesn't match.\n\nYour side:\n"
+                + ours.joined(separator: "\n") + "\n\n\(name)'s side:\n" + theirs.joined(separator: "\n")
             alert.addButton(withTitle: "Mark as Verified")
             alert.addButton(withTitle: "Cancel")
             let canChooseDuhcordOnly = privateChat.hasDuhcordAndCompanionKeys(in: channelID)
@@ -1139,8 +1164,12 @@ final class MessagesViewController: NSViewController, NSTableViewDataSource, NST
     }
 
     private func privateBarSecondaryAction() {
-        guard let channelID, let privateChat, secondaryBarAction == .allowStandard else { return }
-        privateChat.useStandardWhileLocked(in: channelID)
+        guard let channelID, let privateChat else { return }
+        switch secondaryBarAction {
+        case .allowStandard: privateChat.useStandardWhileLocked(in: channelID)
+        case .resendKey: privateChat.resendKey(in: channelID)
+        default: break
+        }
     }
 
     /// The other person has a key besides the accepted ones: compare the safety number it would make, then accept

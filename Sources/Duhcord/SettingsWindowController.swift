@@ -122,11 +122,12 @@ final class SettingsWindowController: NSWindowController {
 
     private func deviceRow(_ device: PrivateChatController.Device, privateChat: PrivateChatController) -> NSView {
         let added = DateFormatter.localizedString(from: device.added, dateStyle: .medium, timeStyle: .none)
+        let kind = device.client == .companion ? "Your Duhcord Private Companion" : "Other Mac"
         let title: String
         switch device.trust {
-        case .pending: title = "Other Mac — waiting for approval"
-        case .accepted: title = "Other Mac — approved"
-        case .rejected: title = "Other Mac — denied"
+        case .pending: title = "\(kind) — waiting for approval"
+        case .accepted: title = "\(kind) — approved"
+        case .rejected: title = "\(kind) — denied"
         }
         let name = NSTextField(labelWithString: title)
         name.toolTip = "First seen \(added)"
@@ -145,7 +146,7 @@ final class SettingsWindowController: NSWindowController {
         let approve = button("Approve…") { [weak self] in self?.confirmApprove(device, privateChat: privateChat) }
         approve.isEnabled = privateChat.canApproveAnotherMac
         approve.toolTip = approve.isEnabled ? nil
-            : "Up to \(PrivateChatController.maxOtherMacs) other Macs can be approved. Remove one first."
+            : "Up to \(PrivateChatController.maxOtherMacs) other devices can be approved. Remove one first."
         switch device.trust {
         case .pending:
             buttons = [button("Deny…") { [weak self] in self?.confirmDeny(device, privateChat: privateChat) }, approve]
@@ -162,11 +163,17 @@ final class SettingsWindowController: NSWindowController {
     private func confirmApprove(_ device: PrivateChatController.Device, privateChat: PrivateChatController) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Approve this Mac?"
-        alert.informativeText = "Only approve a Mac you own. Open Duhcord's Settings on it: the code under “This Mac” must be "
-            + "exactly\n\n\(device.code)\n\nIt will be able to read every private message you send from now on. Discord "
-            + "carries these keys, so a Mac you don't recognise could be Discord trying to read your messages.\n\n"
-            + "Your safety number with everyone changes, so anyone who verified you will need to compare again."
+        let companion = device.client == .companion
+        alert.messageText = companion ? "Approve this Duhcord Private Companion?" : "Approve this Mac?"
+        alert.informativeText = (companion
+            ? "Only approve a Companion you run yourself (on Vencord, Replugged or BetterDiscord). Its main window shows its "
+              + "key code, which must be exactly"
+            : "Only approve a Mac you own. Open Duhcord's Settings on it: the code under “This Mac” must be exactly")
+            + "\n\n\(device.code)\n\nIt will be able to read every private message you send from now on. Discord "
+            + "carries these keys, so a device you don't recognise could be Discord trying to read your messages."
+            + (companion ? " The Companion doesn't have Duhcord's protections: on Windows and Linux, other apps on that "
+               + "computer could read its key." : "")
+            + "\n\nYour safety number with everyone changes, so anyone who verified you will need to compare again."
         alert.addButton(withTitle: "Approve")
         alert.addButton(withTitle: "Cancel")
         present(alert) { privateChat.setTrust(.accepted, forDevice: device.key) }
@@ -176,7 +183,8 @@ final class SettingsWindowController: NSWindowController {
         let approved = device.trust == .accepted
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = approved ? "Remove this Mac?" : "Deny this Mac?"
+        let what = device.client == .companion ? "Companion" : "Mac"
+        alert.messageText = approved ? "Remove this \(what)?" : "Deny this \(what)?"
         alert.informativeText = (approved ? "It will stop receiving the private messages you send. " : "It won't receive the "
             + "private messages you send. ") + "If it's really yours, it won't be able to read them, and what you send from "
             + "it is marked as not approved here. Duhcord remembers this; you can approve it again later in Settings."
