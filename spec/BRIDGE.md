@@ -16,7 +16,7 @@ text typed into its own window.
 - Rate limit: 200 frames/s per connection; at most 8 connections.
 
 ## Pairing
-1. Plugin → `{"t":"hello","v":1,"host":"vencord|vesktop|replugged|betterdiscord","plugin":"1.0.0","userId":"<snowflake>","token":"<base64url>|null"}`
+1. Plugin → `{"t":"hello","v":1,"host":"vencord|vesktop|replugged|betterdiscord|dorion","plugin":"1.0.0","userId":"<snowflake>","token":"<base64url>|null"}`
 2. Known token for `(host,userId)` → `{"t":"ready","userId":"…","companion":"1.0.0"}`.
 3. Otherwise the companion shows a pairing prompt with a 6-digit code and replies `{"t":"pairing","code":"123456"}`
    (the plugin shows the same code). When the user clicks Allow in the companion:
@@ -28,7 +28,7 @@ text typed into its own window.
 - `dm`: `{"t":"dm","channelId","peer":{"id","username","globalName","avatarUrl"},"me":{"id","username"}}` — a 1:1
   DM the user has open or has private traffic in. Group DMs are never sent.
 - `messages`: `{"t":"messages","channelId","messages":[Msg],"before":"<id>|null","exhausted":bool}` — loaded messages
-  oldest→newest. Plugins send only messages whose last line starts with `dhc2:` (others are irrelevant).
+  oldest→newest. Plugins send only messages whose last line starts with `dhc3:` (others are irrelevant).
   `Msg = {"id","authorId","content","editedAt":"ISO-8601|null","attachments":[{"id","filename","size","url"}]}`.
 - `deleted`: `{"t":"deleted","channelId","ids":["…"]}`.
 - `open`: `{"t":"open","channelId"}` — user clicked the plugin's "Private" button; companion focuses that chat.
@@ -36,12 +36,13 @@ text typed into its own window.
 
 ## Companion → plugin
 - `send`: `{"t":"send","nonce","channelId","content"}` — the plugin posts `content` verbatim as a normal message.
-  Plugins must refuse (`sendFailed`, `"error":"not-private"`) if `content`'s last line doesn't start with `dhc2:`.
+  Plugins must refuse (`sendFailed`, `"error":"not-private"`) if `content`'s last line doesn't start with `dhc3:`.
 - `edit`: `{"t":"edit","nonce","channelId","messageId","content"}`, same rule. `delete`: `{"t":"delete","nonce","channelId","messageId"}`.
 - `needHistory`: `{"t":"needHistory","channelId","before":"<id>|null"}` — plugin loads older messages and replies with
   `messages`.
-- `status`: `{"t":"status","channelId","state":"off|request|waiting|ready|locked","verified":bool,"newKey":bool,"peerClass":"duhcord|companion|null"}`
-  — drives the plugin's button badge. Carries no message content.
+- `status`: `{"t":"status","channelId","state":"off|request|waiting|unconfirmed|ready|outdated|locked","verified":bool,"newKey":bool,"peerClass":"duhcord|companion|null"}`
+  — drives the plugin's button badge. Carries no message content. The states are those of PROTOCOL.md §6;
+  `unconfirmed` = their key is accepted but they haven't accepted ours yet, `outdated` = they use a newer protocol.
 
 Unknown `t` → ignored. Malformed frames → `{"t":"error","code":"bad-frame"}`; 10 of them → close.
 
