@@ -233,16 +233,20 @@ In order of preference:
    pnpm are present:
    ```
    git clone https://github.com/Vendicated/Vencord && cd Vencord && pnpm i
-   git clone https://github.com/C4BRA/duhcord-private-plugin ../dpp
+   git clone https://github.com/C4BRA/duhcord ../duhcord
    mkdir -p src/userplugins
-   cp -r ../dpp/plugins/vencord/duhcordPrivate src/userplugins/
+   cp -r ../duhcord/companion/plugins/vencord/duhcordPrivate src/userplugins/
    pnpm build && pnpm inject
    ```
    - Vesktop: point Vesktop's custom Vencord location setting at that build **(verify the current option name)**.
 
 ---
 
-## 6. Repository layout (`C4BRA/duhcord-private-plugin`, currently empty)
+## 6. Repository layout
+
+> **Moved:** the companion now lives in `C4BRA/duhcord` under `companion/`, with the shared specs in `spec/` at the
+> repository root. `C4BRA/duhcord-private-plugin` only hosts the companion and plugin releases. The original layout
+> is kept below for reference.
 ```
 spec/PROTOCOL.md        wire format (from PrivateMessaging.swift), handshake 0x23, safety number v3
 spec/BRIDGE.md          bridge messages, invariants, pairing

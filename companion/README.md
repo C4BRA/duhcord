@@ -8,9 +8,28 @@ Chat in [Duhcord](https://github.com/C4BRA/duhcord)'s Private mode from Vencord 
   never hold a key and never see plaintext, so a compromised plugin or Discord's own code can at most drop, delay or
   replay messages.
 
-See [`docs/PLAN.md`](docs/PLAN.md) for the design. The wire format is in [`spec/PROTOCOL.md`](spec/PROTOCOL.md), the
-bridge in [`spec/BRIDGE.md`](spec/BRIDGE.md), and the cross-implementation test vectors in
-[`spec/VECTORS.md`](spec/VECTORS.md).
+See [`docs/PLAN.md`](docs/PLAN.md) for the design. The specs are shared with Duhcord and live at the repository root:
+the wire format in [`spec/PROTOCOL.md`](../spec/PROTOCOL.md), the bridge in [`spec/BRIDGE.md`](../spec/BRIDGE.md), and
+the cross-implementation test vectors in [`spec/VECTORS.md`](../spec/VECTORS.md).
+
+## One repository, two products
+
+The companion lives in this folder of the Duhcord repository but is a separate product with its own builds and
+releases. The two are kept apart so neither can compromise the other:
+
+- **Code:** Duhcord's Swift package doesn't reference anything in `companion/`, and the companion's Rust and npm
+  packages never enter Duhcord's build.
+- **CI:** the companion's checks (`.github/workflows/companion-ci.yml`) run only when `companion/` or `spec/` changes.
+  Duhcord's CI skips companion-only changes. `.github/workflows/interop.yml` runs when either side's private-messaging
+  code changes, and checks fresh vectors in both directions.
+- **Releases:** Duhcord releases from `v1.2.3` tags in this repository, as before. The companion releases from
+  `companion-v0.1.0` tags (`.github/workflows/companion-release.yml`). Those builds are published as releases of
+  [`C4BRA/duhcord-private-plugin`](https://github.com/C4BRA/duhcord-private-plugin), so Duhcord's "latest release"
+  (which its updater reads) is never a companion release, and Replugged's GitHub updater keeps working.
+- **Secrets:** companion workflows never use Duhcord's `release` environment or its signing and update keys. The
+  companion's publish job uses its own `companion-release` environment, with a token scoped to the release repo.
+  Duhcord's signed builds never restore a CI cache, so a companion job (which runs npm and cargo packages) can't plant
+  anything in them.
 
 ## Layout
 
@@ -30,11 +49,11 @@ bridge in [`spec/BRIDGE.md`](spec/BRIDGE.md), and the cross-implementation test 
 
 ## Develop
 
-Requirements: Rust (pinned by `rust-toolchain.toml`), Node 22. On Linux:
+Run everything below inside `companion/`. Requirements: Rust (pinned by `rust-toolchain.toml`), Node 22. On Linux:
 `libdbus-1-dev pkg-config libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev`.
 
 ```bash
-npm ci
+npm ci --ignore-scripts
 npm run build          # plugins → plugins/dist (and the app's bundled copies)
 npm test               # plugin unit tests + interop with the real Rust bridge
 cargo test --workspace # protocol, engine, store, bridge, service
@@ -43,9 +62,11 @@ npm run app:dev        # run the companion
 
 ## Release
 
-Push a `v*` tag (or run the **Release** workflow by hand). It builds the companion for macOS Apple Silicon, macOS
-Intel, Windows x64 and Linux x64, plus the three plugins. It then drafts a GitHub release with one-click zips, native
-installers and `SHA256SUMS.txt`. Nothing is code-signed yet, and the Tauri updater isn't wired up yet (it needs a
+Push a `companion-v0.1.0` tag (or run **Companion release** by hand). It builds the companion for macOS Apple Silicon,
+macOS Intel, Windows x64 and Linux x64, plus the three plugins. It then drafts a `v0.1.0` release in
+`C4BRA/duhcord-private-plugin` with one-click zips, native installers and `SHA256SUMS.txt`. It needs a
+`companion-release` environment holding `COMPANION_RELEASE_TOKEN`: a fine-grained token with *Contents: write* on
+`C4BRA/duhcord-private-plugin` only. Nothing is code-signed yet, and the Tauri updater isn't wired up yet (it needs a
 signing key in a protected `release` environment, see `docs/PLAN.md` §3.6).
 
 ## Status

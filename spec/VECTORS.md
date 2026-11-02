@@ -1,6 +1,6 @@
 # Interop test vectors
 
-Both implementations (Swift in `C4BRA/duhcord`, Rust in `crates/protocol`) write a vectors file in this format and check
+Both implementations (Swift in `Sources/DuhcordCore`, Rust in `companion/crates/protocol`) write a vectors file in this format and check
 the other side's file. CI on macOS runs both directions; nothing ships unless both pass.
 
 ## Fixed inputs

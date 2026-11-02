@@ -14,5 +14,5 @@
   "license": "MIT",
   "type": "replugged-plugin",
   "renderer": "renderer.js",
-  "source": "https://github.com/C4BRA/duhcord-private-plugin"
+  "source": "https://github.com/C4BRA/duhcord/tree/main/companion/plugins"
 }

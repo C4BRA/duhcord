@@ -1005,11 +1005,13 @@ mod tests {
 
     #[test]
     fn generated_vectors_pass_the_interop_checker() {
-        let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../interop");
-        let rust_vectors = directory.join("rust-vectors.json");
+        let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // The committed Rust vectors are the fixture Duhcord's Swift tests read.
+        let rust_vectors =
+            crate_dir.join("../../../Tests/DuhcordCoreTests/Fixtures/rust-vectors.json");
         check_path(&rust_vectors).unwrap_or_else(|error| panic!("{error}"));
 
-        let swift_vectors = directory.join("swift-vectors.json");
+        let swift_vectors = crate_dir.join("../../interop/swift-vectors.json");
         if swift_vectors.exists() {
             check_path(&swift_vectors).unwrap_or_else(|error| panic!("{error}"));
         }

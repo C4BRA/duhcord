@@ -1,5 +1,5 @@
 {
-  "name": "duhcord-private-plugin",
+  "name": "duhcord-companion",
   "private": true,
   "version": "0.1.0",
   "description": "Duhcord Private Companion UI and the thin Vencord / Replugged / BetterDiscord plugins",

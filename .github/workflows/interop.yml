@@ -1,0 +1,61 @@
+name: Interop
+
+# Duhcord (Swift) and the companion (Rust) must read each other's private messages byte for byte (spec/VECTORS.md).
+# This job generates fresh vectors on both sides and checks them in both directions, whenever either side's
+# private-messaging code or the specs change. It has no secrets and builds no release.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "spec/**"
+      - "companion/crates/protocol/**"
+      - "companion/crates/interop/**"
+      - "companion/Cargo.lock"
+      - "Sources/DuhcordCore/PrivateMessaging.swift"
+      - "Sources/Duhcord/PrivateChatController.swift"
+      - "Tests/DuhcordCoreTests/CompanionInteropTests.swift"
+      - "Tests/DuhcordCoreTests/Fixtures/rust-vectors.json"
+      - ".github/workflows/interop.yml"
+  pull_request:
+    paths:
+      - "spec/**"
+      - "companion/crates/protocol/**"
+      - "companion/crates/interop/**"
+      - "companion/Cargo.lock"
+      - "Sources/DuhcordCore/PrivateMessaging.swift"
+      - "Sources/Duhcord/PrivateChatController.swift"
+      - "Tests/DuhcordCoreTests/CompanionInteropTests.swift"
+      - "Tests/DuhcordCoreTests/Fixtures/rust-vectors.json"
+      - ".github/workflows/interop.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  both-directions:
+    name: Swift ⇄ Rust vectors
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Rust toolchain (from companion/rust-toolchain.toml)
+        working-directory: companion
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: The committed Rust vectors still pass on the Rust side
+        working-directory: companion
+        run: cargo run -q --locked -p duhcord-interop -- check ../Tests/DuhcordCoreTests/Fixtures/rust-vectors.json
+      - name: Rust writes fresh vectors for Swift to check
+        working-directory: companion
+        run: |
+          mkdir -p ../build
+          cargo run -q --locked -p duhcord-interop -- gen ../build/rust-vectors.json
+          cp ../build/rust-vectors.json ../Tests/DuhcordCoreTests/Fixtures/rust-vectors.json
+      # The voice helper's libdave isn't needed: without Vendor/libdave the package builds without it.
+      - name: Swift checks the Rust vectors and writes its own
+        run: DUHCORD_WRITE_VECTORS="$PWD/build/swift-vectors.json" swift test --filter CompanionInteropTests
+      - name: Rust checks the fresh Swift vectors
+        working-directory: companion
+        run: cargo run -q --locked -p duhcord-interop -- check ../build/swift-vectors.json

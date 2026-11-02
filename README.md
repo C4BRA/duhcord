@@ -48,7 +48,7 @@ Voice channels in the channel list show who's in them, with a green ring around 
 
 DMs between Duhcord users can be end-to-end encrypted, so Discord only ever stores scrambled text. Switch a DM from **Standard** to **Private** in the toolbar (or **View → Private Messages**, ⌥⌘P). The Private view lists only the private messages; the standard view folds them to one line.
 
-Private messaging can interoperate with the Duhcord Private Companion for Discord client mods. Companion support is off by default, each Companion key requires explicit approval, and safety numbers include the client type.
+Private messaging can interoperate with the [Duhcord Private Companion](companion/README.md) for Discord client mods. Companion support is off by default, each Companion key requires explicit approval, and safety numbers include the client type.
 
 - **Setting up.** The first time, Duhcord sends the other person a short handshake message carrying your key. If they use Duhcord, it offers them private chat; once they accept, their app answers with their key and you can start. On other apps the handshake and private messages show a note instead.
 - **How it's encrypted.** Each Duhcord install has a key pair (X25519) kept in your login keychain. Each message's key is derived from your key and a random value, so you can read messages Discord attributes to you, and reaches the other person through HPKE (RFC 9180) in authenticated mode, so it can only have come from you; it's tied to that DM. The text is compressed, padded so its length gives little away, and encrypted with ChaCha20-Poly1305. Nothing else is stored: history loaded from Discord later decrypts again.
@@ -198,4 +198,12 @@ Sources/CDave             libdave's C header (the library comes from scripts/bui
 Sources/DuhcordUpdater    Installer helper (XPC service)
 Sources/DuhcordUpdateKit  Update manifest and signature checks, code-signature checks
 Tests/                    Unit tests
+spec/                     Private messaging wire format, companion bridge and interop vectors (shared with the companion)
+companion/                Duhcord Private Companion and its Vencord / Replugged / BetterDiscord plugins (separate product)
 ```
+
+The companion is a separate product that lives in this repository: its own Rust and npm build, its own CI
+(`companion-ci.yml`) and releases (`companion-v*` tags, published to
+[C4BRA/duhcord-private-plugin](https://github.com/C4BRA/duhcord-private-plugin/releases)). It never uses Duhcord's
+release environment or keys, and Duhcord's build never includes it. `interop.yml` checks both directions of the
+private-messaging format whenever either side changes. See [companion/README.md](companion/README.md).

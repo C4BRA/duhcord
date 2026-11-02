@@ -1,6 +1,6 @@
 # Duhcord Private messaging — wire protocol
 
-Authoritative source: `C4BRA/duhcord` `Sources/DuhcordCore/PrivateMessaging.swift` and
+Authoritative source: `Sources/DuhcordCore/PrivateMessaging.swift` and
 `Sources/Duhcord/PrivateChatController.swift`. If this file and the Swift ever disagree, the Swift wins and this file is
 fixed. Everything here is byte-exact; all integers are big-endian.
 
