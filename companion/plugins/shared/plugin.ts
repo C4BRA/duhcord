@@ -100,7 +100,11 @@ export function findDiscord(findByProps: FindByProps | undefined): Discord {
     .map((store) => store?._dispatcher)
     .find((candidate) => safeTest(isDispatcher, candidate));
   const Dispatcher = storeDispatcher ?? find("Dispatcher", isDispatcher, "dispatch", "subscribe", "unsubscribe");
-  const RestAPI = find("RestAPI", byFunctions("get", "post", "patch", "del"), "get", "post", "patch", "del");
+  // Discord's REST client has get/post/put/patch/del; other modules share some of those names, so
+  // ask for all five and prefer the one that also knows Discord's API base URL.
+  const RestAPI =
+    findModule(byFunctions("getAPIBaseURL", "get", "post", "put", "patch", "del")) ??
+    find("RestAPI", byFunctions("get", "post", "put", "patch", "del"), "get", "post", "put", "patch", "del");
   if (missing.length) {
     throw new Error(`Duhcord Private: couldn't find Discord's ${missing.join(", ")}. Discord may have changed; please report this.`);
   }
@@ -120,6 +124,38 @@ function toIso(value: unknown): string | null {
   if (value === null || value === undefined || value === "") return null;
   const date = typeof value === "object" && value && "toDate" in value ? (value as any).toDate() : new Date(value as any);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+const ECHO_TIMEOUT_MS = 8000;
+
+/** The new message's ID from a REST reply, whichever shape Discord's client returns. */
+export function messageIdFrom(response: any): string | null {
+  let body = response?.body ?? response?.data ?? response;
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof response?.text === "string" && !isSnowflake(body?.id)) {
+    try {
+      body = JSON.parse(response.text);
+    } catch {
+      // keep body
+    }
+  }
+  const id = body?.id ?? body?.message?.id;
+  return isSnowflake(id) ? id : null;
+}
+
+/** Keys and types only (never values), for the console when a reply isn't understood. */
+function describeShape(value: any): string {
+  if (value === null || typeof value !== "object") return typeof value;
+  return Object.keys(value)
+    .slice(0, 20)
+    .map((key) => `${key}:${value[key] === null ? "null" : typeof value[key]}`)
+    .join(",");
 }
 
 /** Accepts both Discord's raw API messages and its MessageStore records. */
@@ -309,13 +345,67 @@ export class DuhcordPrivatePlugin {
 
   private async post(channelId: string, content: string): Promise<string> {
     const nonce = makeNonce();
-    const response = await this.discord!.RestAPI.post({
-      url: `/channels/${channelId}/messages`,
-      body: { content, nonce, tts: false, flags: 0 },
-    });
-    const id = response?.body?.id;
-    if (!isSnowflake(id)) throw new Error("no message id");
-    return id;
+    // Discord echoes the nonce on the gateway's MESSAGE_CREATE, which confirms the send (and gives
+    // the ID) even when the REST reply isn't shaped the way we expect.
+    const echo = this.waitForEcho(channelId, nonce, ECHO_TIMEOUT_MS);
+    let response: any;
+    try {
+      response = await this.discord!.RestAPI.post({
+        url: `/channels/${channelId}/messages`,
+        body: { content, nonce, tts: false, flags: 0 },
+      });
+    } catch (error) {
+      echo.cancel();
+      throw error;
+    }
+    const status = response?.status;
+    if (response?.ok === false || (typeof status === "number" && status >= 400)) {
+      echo.cancel();
+      throw { status: typeof status === "number" ? status : 0 };
+    }
+    const id = messageIdFrom(response);
+    if (id) {
+      echo.cancel();
+      return id;
+    }
+    const echoed = await echo.promise;
+    if (echoed) return echoed;
+    this.options.log?.("send: Discord's reply had no message ID", describeShape(response));
+    throw new Error("Discord didn't confirm the message; check the DM, then try again");
+  }
+
+  private waitForEcho(channelId: string, nonce: string, timeoutMs: number): { promise: Promise<string | null>; cancel(): void } {
+    const dispatcher = this.discord!.Dispatcher;
+    let finish: (id: string | null) => void = () => {};
+    const promise = new Promise<string | null>((resolve) => (finish = resolve));
+    const handler = (event: any) => {
+      try {
+        const message = event?.message;
+        const channel = event?.channelId ?? message?.channel_id;
+        if (message?.nonce === nonce && channel === channelId && isSnowflake(message.id)) done(message.id);
+      } catch {
+        // ignore
+      }
+    };
+    const timer = setTimeout(() => done(null), timeoutMs);
+    let settled = false;
+    const done = (id: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        dispatcher.unsubscribe("MESSAGE_CREATE", handler);
+      } catch {
+        // ignore
+      }
+      finish(id);
+    };
+    try {
+      dispatcher.subscribe("MESSAGE_CREATE", handler);
+    } catch {
+      done(null);
+    }
+    return { promise, cancel: () => done(null) };
   }
 
   private async history(channelId: string, before: string | null): Promise<History> {
