@@ -10,7 +10,7 @@ import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { WebSocket } from "ws";
 
-import { type Adapter, DuhcordBridge, isPrivateContent, type SocketLike, type Status, type WireMessage } from "./bridge.ts";
+import { type Adapter, DuhcordBridge, isPrivateContent, PROTOCOL_VERSION, type SocketLike, type Status, type WireMessage } from "./bridge.ts";
 import { bridgeFilePath, parseBridgeFile } from "./bridgeFile.ts";
 import { toWire } from "./plugin.ts";
 
@@ -116,7 +116,7 @@ test("hello carries the stored token; pairing shows the code and stores the toke
   assert.equal(socket.url, "ws://127.0.0.1:47825/bridge");
   socket.open();
   await tick();
-  assert.deepEqual(socket.sent[0], { t: "hello", v: 1, host: "betterdiscord", plugin: "test", userId: ME, token: "stored-token" });
+  assert.deepEqual(socket.sent[0], { t: "hello", v: PROTOCOL_VERSION, host: "betterdiscord", plugin: "test", userId: ME, token: "stored-token" });
 
   socket.receive({ t: "pairing", code: "123456" });
   socket.receive({ t: "paired", token: "new-token" });

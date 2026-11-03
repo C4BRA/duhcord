@@ -127,6 +127,32 @@ async function renderMain() {
     );
   }
 
+  for (const plugin of overview.outdatedPlugins ?? []) {
+    const name = HOSTS[plugin.host] ?? plugin.host;
+    const error = h("p", { class: "error" });
+    const card = h("div", { class: "card attention" });
+    if (plugin.pluginOutdated) {
+      card.append(
+        h("p", {}, h("strong", {}, `Your ${name} plugin is out of date`), plugin.pluginVersion ? ` (${plugin.pluginVersion})` : ""),
+        h("p", { class: "muted" }, "It can't post or read private messages with this version of the companion, so it was turned away. Install the plugin that comes with this companion, then reload Discord."),
+      );
+      if (plugin.host === "betterdiscord" || plugin.host === "replugged") {
+        card.append(
+          h("button", { class: "primary", onClick: () => guarded(async () => { await invoke("installPlugin", { host: plugin.host }); error.textContent = "Installed. Reload Discord (Ctrl/Cmd+R) to load it."; }, error) }, "Install plugin"),
+        );
+      } else {
+        card.append(h("p", { class: "muted" }, "Vencord / Vesktop: rebuild Vencord with the duhcordPrivate folder from this release (see Connect your Discord below)."));
+      }
+    } else {
+      card.append(
+        h("p", {}, h("strong", {}, `Your ${name} plugin is newer than this companion`)),
+        h("p", { class: "muted" }, "Update Duhcord Companion to the latest release so they can talk to each other."),
+      );
+    }
+    card.append(error);
+    content.append(card);
+  }
+
   content.append(h("h2", {}, "Private chats"));
   if (overview.accounts.length === 0) {
     content.append(
@@ -275,6 +301,18 @@ async function loadImage(chat, message, attachmentId, container) {
 }
 
 const userId = params.get("user");
+/** The last send that failed in this chat (a handshake or a message), shown until the next one goes out. */
+let lastSendError = null;
+
+function sendErrorText(error) {
+  if (error === "not-private") {
+    return "Discord's plugin refused to post it: the plugin is out of date. Install the current plugin from the companion's main window, then reload Discord.";
+  }
+  if (error === "unknown-channel") return "The plugin doesn't have this DM open. Open it in Discord and try again.";
+  if (/^http-429/.test(error)) return "Discord is rate-limiting messages. Try again in a moment.";
+  if (/^http-/.test(error)) return `Discord refused the message (${error.replace("http-", "HTTP ")}).`;
+  return `Couldn't send: ${error}`;
+}
 const channelId = params.get("channel");
 let draft = "";
 
@@ -396,7 +434,7 @@ async function renderChat() {
   const oldInput = root.querySelector("textarea");
   if (oldInput) draft = oldInput.value;
 
-  const error = h("p", { class: "error", style: "margin:0 16px" });
+  const error = h("p", { class: "error", style: "margin:0 16px" }, lastSendError ?? "");
   const banner = (() => {
     const status = chat.status;
     if (status.state === "locked") return h("div", { class: "banner" }, "The companion is locked. Unlock it from the main window.");
@@ -414,7 +452,7 @@ async function renderChat() {
         "Private is off for this chat. Turning it on sends your key to them through Discord.",
         h("div", { class: "row" }, h("button", { class: "primary", onClick: () => guarded(() => invoke("setPrivate", { userId, channelId, enabled: true }), error) }, "Turn on Private")),
       );
-    const resend = h("button", { onClick: () => guarded(() => invoke("resendKey", { userId, channelId }), error) }, "Re-send my key");
+    const resend = h("button", { onClick: () => { lastSendError = null; error.textContent = ""; return guarded(() => invoke("resendKey", { userId, channelId }), error); } }, "Re-send my key");
     if (status.state === "outdated")
       return h("div", { class: "banner" }, `${displayName(chat.peer)} uses a newer version of private messaging. Update Duhcord Companion to keep chatting privately.`);
     if (status.state === "waiting")
@@ -471,6 +509,7 @@ async function renderChat() {
     if (!text.trim()) return;
     input.value = "";
     draft = "";
+    lastSendError = null;
     await guarded(() => invoke("sendText", { userId, channelId, text }), error).catch(() => {});
     if (error.textContent) {
       input.value = text;
@@ -525,6 +564,7 @@ if (params.get("view") === "chat") {
   rerender(renderChat);
   listen("companion", ({ payload }) => {
     const mine = payload.userId === userId && (payload.channelId === undefined || payload.channelId === channelId);
+    if (mine && payload.type === "sendFailed") lastSendError = sendErrorText(payload.error);
     if (mine || payload.type === "accountsChanged") rerender(renderChat);
   });
   addEventListener("beforeunload", () => imageUrls.forEach((url) => URL.revokeObjectURL(url)));

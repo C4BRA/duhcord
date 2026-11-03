@@ -34,8 +34,9 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 
-/// The bridge protocol version (spec/BRIDGE.md), sent as `v` in the plugin's `hello`.
-pub const BRIDGE_VERSION: u64 = 1;
+/// The bridge protocol version (spec/BRIDGE.md), sent as `v` in the plugin's `hello`. 2 = private messaging v3
+/// (`dhc3:`): a v1 plugin would refuse to post v3 content, so it's turned away with `plugin-outdated`.
+pub const BRIDGE_VERSION: u64 = 2;
 const PORT_START: u16 = 47_823;
 const PORT_END: u16 = 47_827;
 const MAX_FRAME_SIZE: usize = 1024 * 1024;
@@ -93,6 +94,13 @@ pub enum CompanionFrame {
 }
 
 pub enum BridgeEvent {
+    /// A plugin spoke another bridge version and was turned away. `plugin_outdated`: the plugin is the older side.
+    VersionMismatch {
+        conn: ConnectionId,
+        host: Option<String>,
+        plugin_version: Option<String>,
+        plugin_outdated: bool,
+    },
     PairingRequested {
         conn: ConnectionId,
         host: String,
@@ -514,6 +522,12 @@ async fn handle_connection(
                                     };
                                     let _ = send_json(&mut socket, json!({"t":"error","code":code})).await;
                                     close_socket(&mut socket, CloseCode::Policy, code).await;
+                                    let _ = event_tx.send(BridgeEvent::VersionMismatch {
+                                        conn,
+                                        host: value.get("host").and_then(Value::as_str).map(str::to_owned),
+                                        plugin_version: value.get("plugin").and_then(Value::as_str).map(str::to_owned),
+                                        plugin_outdated: version < BRIDGE_VERSION,
+                                    });
                                     break;
                                 }
                             }

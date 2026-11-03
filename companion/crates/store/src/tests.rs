@@ -54,7 +54,7 @@ fn mock_keyring_fail_closed_directory_encryption_and_pairings() {
     ));
     assert!(store.load_account(450002).unwrap().is_none());
 
-    let directory_path = root.join("accounts").join("450001.dir");
+    let directory_path = root.join("accounts").join("450001.v3.dir");
     let corrupt = b"corrupt encrypted directory";
     fs::write(&directory_path, corrupt).unwrap();
     assert!(matches!(

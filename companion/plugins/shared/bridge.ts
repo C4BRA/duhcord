@@ -89,7 +89,7 @@ export interface Adapter {
   log?(...args: unknown[]): void;
 }
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const DEFAULT_PORTS = [47823, 47824, 47825, 47826, 47827];
 const PREFIX = "dhc3:";
 const SNOWFLAKE = /^\d{1,20}$/;

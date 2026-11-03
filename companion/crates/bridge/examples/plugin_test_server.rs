@@ -109,6 +109,11 @@ async fn main() {
                 json!({"event": "deleted", "ids": ids.iter().map(u64::to_string).collect::<Vec<_>>()})
             }
             BridgeEvent::Disconnected { .. } => json!({"event": "disconnected"}),
+            BridgeEvent::VersionMismatch {
+                plugin_outdated, ..
+            } => {
+                json!({"event": "versionMismatch", "pluginOutdated": plugin_outdated})
+            }
         };
         println!("{line}");
     }

@@ -11,8 +11,8 @@ use std::path::PathBuf;
 
 use duhcord_companion_bridge::BridgeConfig;
 use duhcord_companion_service::{
-    AccountSummary, ChatDto, ChatSummary, OwnDeviceDto, PairingDto, PairingRequest, Service,
-    UiEvent,
+    AccountSummary, ChatDto, ChatSummary, OutdatedPlugin, OwnDeviceDto, PairingDto, PairingRequest,
+    Service, UiEvent,
 };
 use duhcord_companion_store::Store;
 use serde::Serialize;
@@ -50,6 +50,7 @@ struct Overview {
     accounts: Vec<AccountSummary>,
     pairing_requests: Vec<PairingRequest>,
     pairings: Vec<PairingDto>,
+    outdated_plugins: Vec<OutdatedPlugin>,
     locked: bool,
     bridge_port: u16,
     autostart: bool,
@@ -63,6 +64,7 @@ fn overview(app: AppHandle, state: State<'_, AppState>) -> CommandResult<Overvie
         accounts: service.accounts(),
         pairing_requests: service.pending_pairings(),
         pairings: service.pairings().map_err(err)?,
+        outdated_plugins: service.outdated_plugins(),
         locked: service.is_locked(),
         bridge_port: service.bridge_port(),
         autostart: app.autolaunch().is_enabled().unwrap_or(false),

@@ -92,7 +92,7 @@ async fn next_json(socket: &mut ClientSocket) -> Option<Value> {
 fn hello(token: Option<&str>) -> Value {
     json!({
         "t": "hello",
-        "v": 1,
+        "v": BRIDGE_VERSION,
         "host": "vencord",
         "plugin": "1.0.0",
         "userId": "123456789",
@@ -313,7 +313,7 @@ async fn ten_bad_frames_close_the_connection() {
 async fn mismatched_bridge_versions_say_which_side_to_update() {
     let _guard = TEST_LOCK.lock().await;
     let (handle, _events, path) = start("versions").await;
-    for (version, code) in [(0, "plugin-outdated"), (2, "companion-outdated")] {
+    for (version, code) in [(1, "plugin-outdated"), (3, "companion-outdated")] {
         let mut socket = connect(&handle, None, None).await.unwrap();
         let mut frame = hello(None);
         frame["v"] = json!(version);
