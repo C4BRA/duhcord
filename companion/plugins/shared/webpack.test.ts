@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { findDiscord } from "./plugin.ts";
+import { findDiscord, messageIdFrom } from "./plugin.ts";
 import { _resetWebpackCache, byFunctions, byProps, findModule } from "./webpack.ts";
 
 class Dispatcher {
@@ -108,4 +108,32 @@ test("findDiscord ignores a wrong result from the mod's finder and names everyth
   });
   _resetWebpackCache();
   assert.throws(() => findDiscord(undefined), /UserStore, ChannelStore, SelectedChannelStore, MessageStore, Dispatcher, RestAPI/);
+});
+
+test("findDiscord prefers the REST client that knows the API base URL over other get/post/put/patch/del modules", () => {
+  installDiscord();
+  const real = { getAPIBaseURL() {}, get() {}, post() {}, put() {}, patch() {}, del() {} };
+  const decoy = { get() {}, post() {}, put() {}, patch() {}, del() {} };
+  const finder = () => decoy; // the mod's finder returns a lookalike
+  const cache = { 101: { exports: { a: decoy } }, 102: { exports: { b: real } } };
+  const base = (globalThis as any).webpackChunkdiscord_app;
+  (globalThis as any).webpackChunkdiscord_app = Object.assign([], {
+    push(chunk: [unknown, unknown, (require: unknown) => void]) {
+      base.push([chunk[0], chunk[1], (require: any) => chunk[2]({ c: { ...require.c, ...cache } })]);
+      return 1;
+    },
+  });
+  _resetWebpackCache();
+  assert.equal(findDiscord(finder).RestAPI, real);
+});
+
+test("messageIdFrom reads the ID from each reply shape Discord's clients return", () => {
+  const id = "1234567890123456789";
+  assert.equal(messageIdFrom({ ok: true, status: 200, body: { id } }), id);
+  assert.equal(messageIdFrom({ body: JSON.stringify({ id }) }), id);
+  assert.equal(messageIdFrom({ text: JSON.stringify({ id }), body: {} }), id);
+  assert.equal(messageIdFrom({ id }), id);
+  assert.equal(messageIdFrom({ body: { message: { id } } }), id);
+  assert.equal(messageIdFrom({ body: null }), null);
+  assert.equal(messageIdFrom(undefined), null);
 });
