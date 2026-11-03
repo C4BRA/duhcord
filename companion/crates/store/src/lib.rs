@@ -20,8 +20,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
-const SERVICE: &str = "com.duhcord.companion";
-const DIRECTORY_AAD_PREFIX: &str = "duhcord-companion-directory-v1/";
+/// Private messaging v3 is a clean break (spec/PROTOCOL.md §10): a new key-store entry and directory file, so a
+/// v3 companion never reads a v2 key or the peer keys it knew under v2.
+const SERVICE: &str = "com.duhcord.companion-v3";
+const DIRECTORY_AAD_PREFIX: &str = "duhcord-companion-directory-v3/";
 const NONCE_LENGTH: usize = 24;
 
 #[derive(Debug, Error)]
@@ -246,7 +248,7 @@ impl Store {
     fn directory_path(&self, user_id: u64) -> PathBuf {
         self.config_dir
             .join("accounts")
-            .join(format!("{user_id}.dir"))
+            .join(format!("{user_id}.v3.dir"))
     }
 
     fn pairings_path(&self) -> PathBuf {

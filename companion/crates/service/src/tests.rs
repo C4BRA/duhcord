@@ -122,7 +122,7 @@ async fn eventually(mut condition: impl FnMut() -> bool) {
 async fn paired_plugin(service: &Service, ui: &mut mpsc::UnboundedReceiver<UiEvent>) -> Plugin {
     let mut plugin = Plugin::connect(service.bridge_port()).await;
     plugin
-        .send(json!({"t":"hello","v":1,"host":"betterdiscord","plugin":"1.0.0","userId":ME.to_string(),"token":null}))
+        .send(json!({"t":"hello","v":duhcord_companion_bridge::BRIDGE_VERSION,"host":"betterdiscord","plugin":"1.0.0","userId":ME.to_string(),"token":null}))
         .await;
     let pairing = plugin.recv_type("pairing").await;
     let UiEvent::PairingRequested(request) =
@@ -303,7 +303,7 @@ async fn round_trip_with_a_duhcord_peer_never_leaks_plaintext() {
         .all(|frame| !frame.contains("hello from duhcord")));
 
     // The directory was saved, encrypted.
-    let saved = std::fs::read(dir.join("accounts").join(format!("{ME}.dir"))).unwrap();
+    let saved = std::fs::read(dir.join("accounts").join(format!("{ME}.v3.dir"))).unwrap();
     assert!(!String::from_utf8_lossy(&saved).contains("private_channels"));
 
     service.shutdown().await;
@@ -391,4 +391,30 @@ fn media_urls_and_image_types_are_checked() {
 
     let (wrong, sealed) = protocol::seal_file(b"not a jpeg", 4, 4, FileKind::Jpeg).unwrap();
     assert!(decrypt_image(&sealed, &wrong).is_err());
+}
+
+#[tokio::test]
+async fn an_outdated_plugin_is_turned_away_and_reported() {
+    let _guard = TEST_LOCK.lock().await;
+    keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+    let dir = temp_dir();
+    let (service, mut ui) = Service::start(&dir, BridgeConfig::default()).await.unwrap();
+    let mut old = Plugin::connect(service.bridge_port()).await;
+    old.send(json!({"t":"hello","v":1,"host":"betterdiscord","plugin":"0.1.0","userId":ME.to_string(),"token":null}))
+        .await;
+    assert_eq!(old.recv().await["code"], "plugin-outdated");
+    next_ui(&mut ui, |e| matches!(e, UiEvent::AccountsChanged)).await;
+    assert_eq!(
+        service.outdated_plugins(),
+        vec![OutdatedPlugin {
+            host: "betterdiscord".to_owned(),
+            plugin_version: Some("0.1.0".to_owned()),
+            plugin_outdated: true,
+        }]
+    );
+    // Once an up-to-date plugin of the same mod connects, the warning goes away.
+    let _new = paired_plugin(&service, &mut ui).await;
+    assert!(service.outdated_plugins().is_empty());
+    service.shutdown().await;
+    let _ = std::fs::remove_dir_all(dir);
 }

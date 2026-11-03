@@ -16,14 +16,15 @@ text typed into its own window.
 - Rate limit: 200 frames/s per connection; at most 8 connections.
 
 ## Pairing
-1. Plugin → `{"t":"hello","v":1,"host":"vencord|vesktop|replugged|betterdiscord|dorion","plugin":"1.0.0","userId":"<snowflake>","token":"<base64url>|null"}`
+1. Plugin → `{"t":"hello","v":2,"host":"vencord|vesktop|replugged|betterdiscord|dorion","plugin":"1.0.0","userId":"<snowflake>","token":"<base64url>|null"}`
 2. Known token for `(host,userId)` → `{"t":"ready","userId":"…","companion":"1.0.0"}`.
 3. Otherwise the companion shows a pairing prompt with a 6-digit code and replies `{"t":"pairing","code":"123456"}`
    (the plugin shows the same code). When the user clicks Allow in the companion:
    `{"t":"paired","token":"<32 random bytes, base64url>"}` then `ready`. Deny → `{"t":"error","code":"denied"}`, close.
    The companion stores only SHA-256(token). Plugins store the token in their settings.
 4. Before `ready`, every other frame → `{"t":"error","code":"unpaired"}`.
-5. Versions: `v` in `hello` is the bridge version (1). If it's lower than the companion accepts, the companion answers
+5. Versions: `v` in `hello` is the bridge version: **2** (private messaging v3, `dhc3:`). Version 1 plugins only post
+   `dhc2:` content, so they are turned away with `plugin-outdated` and the companion shows that the plugin needs updating. If it's lower than the companion accepts, the companion answers
    `{"t":"error","code":"plugin-outdated"}` and closes; if higher, `{"t":"error","code":"companion-outdated"}` and
    closes. The plugin shows which side to update and doesn't retry until it's restarted. `plugin` (the plugin's version)
    never blocks a connection; when it's older than the plugin bundled with the companion, the companion offers to

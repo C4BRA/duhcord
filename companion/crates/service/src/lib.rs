@@ -236,6 +236,18 @@ struct Inner {
     outgoing: HashMap<String, Outgoing>,
     next_order: u64,
     session_locked: bool,
+    /// Plugins turned away for speaking another bridge version, by mod (spec/BRIDGE.md "Versions").
+    outdated_plugins: HashMap<String, OutdatedPlugin>,
+}
+
+/// A plugin that couldn't connect because its bridge version differs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutdatedPlugin {
+    pub host: String,
+    pub plugin_version: Option<String>,
+    /// True when the plugin is the older side (update the plugin); false when the companion is (update it).
+    pub plugin_outdated: bool,
 }
 
 #[derive(Clone)]
@@ -306,6 +318,25 @@ impl Service {
 
     fn handle_bridge_event(&self, event: BridgeEvent) {
         match event {
+            BridgeEvent::VersionMismatch {
+                host,
+                plugin_version,
+                plugin_outdated,
+                ..
+            } => {
+                let host = host.unwrap_or_else(|| "unknown".to_owned());
+                let entry = OutdatedPlugin {
+                    host: host.clone(),
+                    plugin_version,
+                    plugin_outdated,
+                };
+                // A plugin retries every few seconds; only a change is worth an event.
+                let changed =
+                    self.lock().outdated_plugins.insert(host, entry.clone()) != Some(entry);
+                if changed {
+                    self.emit(UiEvent::AccountsChanged);
+                }
+            }
             BridgeEvent::PairingRequested {
                 conn,
                 host,
@@ -380,6 +411,8 @@ impl Service {
     fn on_ready(&self, conn: ConnectionId, user_id: UserId, host: String) {
         let had_pairing = {
             let mut inner = self.lock();
+            // An up-to-date plugin of this mod connected: the warning about an old one is resolved.
+            inner.outdated_plugins.remove(&host);
             let had_pairing = inner.pairings.remove(&conn).is_some();
             inner.next_order += 1;
             let order = inner.next_order;
@@ -948,6 +981,13 @@ impl Service {
             user_id: user_id.to_string(),
         });
         Ok(())
+    }
+
+    /// Plugins that couldn't connect because of a bridge version mismatch.
+    pub fn outdated_plugins(&self) -> Vec<OutdatedPlugin> {
+        let mut plugins: Vec<_> = self.lock().outdated_plugins.values().cloned().collect();
+        plugins.sort_by(|a, b| a.host.cmp(&b.host));
+        plugins
     }
 
     pub fn pending_pairings(&self) -> Vec<PairingRequest> {
